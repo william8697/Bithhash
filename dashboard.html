@@ -2230,78 +2230,10 @@
     });
     
     // Global variables
-    let btcPrice = 50000; // Default BTC price in case API fails
-    let userData = {
-        name: "Investor",
-        username: "yourusername",
-        balance: {
-            total: 0,
-            main: 0,
-            active: 0,
-            matured: 0
-        },
-        savings: {
-            balance: 0,
-            rate: 5.2,
-            nextPayment: "--"
-        },
-        loans: {
-            balance: 0,
-            rate: 7.9,
-            nextPayment: "--",
-            available: 0
-        },
-        referrals: {
-            total: 0,
-            active: 0,
-            earned: 0,
-            pending: 0
-        },
-        btcDepositAddress: "bc1qf98sra3ljvpgy9as0553z79leeq2w2ryvggf3fnvpeh3rz3dk4zs33uf9k" // Fallback BTC address
-    };
-    
-    let investmentPlans = [
-        {
-            id: "starter",
-            name: "Starter Plan",
-            return: 15,
-            duration: 30,
-            features: [
-                "Daily payouts",
-                "15% return after 30 days",
-                "Minimum $50 investment",
-                "Instant activation"
-            ],
-            isPopular: false
-        },
-        {
-            id: "professional",
-            name: "Professional Plan",
-            return: 45,
-            duration: 60,
-            features: [
-                "Daily payouts",
-                "45% return after 60 days",
-                "Minimum $500 investment",
-                "Priority support"
-            ],
-            isPopular: true
-        },
-        {
-            id: "institutional",
-            name: "Institutional Plan",
-            return: 100,
-            duration: 90,
-            features: [
-                "Daily payouts",
-                "100% return after 90 days",
-                "Minimum $5000 investment",
-                "VIP account manager",
-                "Exclusive events"
-            ],
-            isPopular: false
-        }
-    ];
+    let btcPrice = 0;
+    let userData = {};
+    let investmentPlans = [];
+    let stripe = null;
     
     // Initialize Google Places Autocomplete
     function initAutocomplete() {
@@ -2318,7 +2250,6 @@
                 const place = autocompleteCountry.getPlace();
                 if (!place.address_components) return;
                 
-                // You can extract country code if needed
                 const countryComponent = place.address_components.find(component => 
                     component.types.includes('country')
                 );
@@ -2414,7 +2345,6 @@
         void notification.offsetWidth;
         notification.classList.add('show');
         
-        // Only vibrate if user has interacted with the page
         if ('vibrate' in navigator && document.hasFocus() && type === 'error') {
             navigator.vibrate([200, 100, 200]);
         }
@@ -2446,11 +2376,13 @@
     async function initializeDashboard() {
         try {
             await checkAuthState();
-            await loadBtcPrice();
-            await loadUserData();
-            await loadInvestmentPlans();
-            await loadTransactions();
-            await loadMiningStats();
+            await Promise.all([
+                loadBtcPrice(),
+                loadUserData(),
+                loadInvestmentPlans(),
+                loadTransactions(),
+                loadMiningStats()
+            ]);
             initializeChatWidget();
             initializeModals();
             updateDashboardUI();
@@ -2481,27 +2413,7 @@
                 return;
             }
             
-            const user = await response.json();
-            userData = {
-                ...userData,
-                ...user,
-                balance: {
-                    ...userData.balance,
-                    ...(user.balance || {})
-                },
-                savings: {
-                    ...userData.savings,
-                    ...(user.savings || {})
-                },
-                loans: {
-                    ...userData.loans,
-                    ...(user.loans || {})
-                },
-                referrals: {
-                    ...userData.referrals,
-                    ...(user.referrals || {})
-                }
-            };
+            userData = await response.json();
             
         } catch (error) {
             console.error('Authentication check failed:', error);
@@ -2520,12 +2432,29 @@
                 const data = await response.json();
                 btcPrice = data.bitcoin.usd;
             } else {
-                console.error('Failed to fetch BTC price from CoinGecko');
-                btcPrice = 50000;
+                throw new Error('Failed to fetch BTC price');
             }
         } catch (error) {
             console.error('Error fetching BTC price:', error);
-            btcPrice = 50000;
+            // Fallback to backend BTC price if CoinGecko fails
+            try {
+                const token = localStorage.getItem('jwtToken');
+                const response = await fetch('https://website-backendd-1.onrender.com/api/btc-price', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    btcPrice = data.price;
+                } else {
+                    throw new Error('Failed to fetch BTC price from backend');
+                }
+            } catch (err) {
+                console.error('Backend BTC price fetch failed:', err);
+                btcPrice = 50000; // Final fallback
+            }
         }
     }
     
@@ -2540,36 +2469,15 @@
             });
             
             if (response.ok) {
-                const user = await response.json();
-                userData = {
-                    ...userData,
-                    ...user,
-                    balance: {
-                        ...userData.balance,
-                        ...(user.balance || {})
-                    },
-                    savings: {
-                        ...userData.savings,
-                        ...(user.savings || {})
-                    },
-                    loans: {
-                        ...userData.loans,
-                        ...(user.loans || {})
-                    },
-                    referrals: {
-                        ...userData.referrals,
-                        ...(user.referrals || {})
-                    }
-                };
-                
-                document.getElementById('balance-amount').textContent = `$${userData.balance.total.toFixed(2)}`;
+                userData = await response.json();
+                document.getElementById('balance-amount').textContent = `$${userData.balance?.total?.toFixed(2) || '0.00'}`;
                 document.getElementById('user-balance').style.display = 'flex';
             } else {
                 throw new Error('Failed to load user data');
             }
         } catch (error) {
             console.error('Error loading user data:', error);
-            showErrorNotification('Data Error', 'Failed to load your account data. Please try again later.');
+            throw error;
         }
     }
     
@@ -2584,10 +2492,7 @@
             });
             
             if (response.ok) {
-                const plans = await response.json();
-                if (Array.isArray(plans)) {
-                    investmentPlans = plans;
-                }
+                investmentPlans = await response.json();
                 updateInvestmentPlansUI();
                 
                 const investmentPlanSelect = document.getElementById('investment-plan');
@@ -2605,8 +2510,7 @@
             }
         } catch (error) {
             console.error('Error loading investment plans:', error);
-            showErrorNotification('Data Error', 'Failed to load investment plans. Using default plans.');
-            updateInvestmentPlansUI();
+            throw error;
         }
     }
     
@@ -2622,18 +2526,13 @@
             
             if (response.ok) {
                 const transactions = await response.json();
-                if (Array.isArray(transactions)) {
-                    updateTransactionsUI(transactions);
-                } else {
-                    updateTransactionsUI([]);
-                }
+                updateTransactionsUI(transactions);
             } else {
                 throw new Error('Failed to load transactions');
             }
         } catch (error) {
             console.error('Error loading transactions:', error);
-            showErrorNotification('Data Error', 'Failed to load your transaction history. Please try again later.');
-            updateTransactionsUI([]);
+            throw error;
         }
     }
     
@@ -2649,28 +2548,13 @@
             
             if (response.ok) {
                 const stats = await response.json();
-                if (stats) {
-                    updateMiningStatsUI(stats);
-                } else {
-                    updateMiningStatsUI({
-                        hashRate: '0 TH/s',
-                        btcMined: 0,
-                        dailyEarnings: 0,
-                        weeklyEarnings: 0
-                    });
-                }
+                updateMiningStatsUI(stats);
             } else {
                 throw new Error('Failed to load mining stats');
             }
         } catch (error) {
             console.error('Error loading mining stats:', error);
-            showErrorNotification('Data Error', 'Failed to load your mining statistics. Please try again later.');
-            updateMiningStatsUI({
-                hashRate: '0 TH/s',
-                btcMined: 0,
-                dailyEarnings: 0,
-                weeklyEarnings: 0
-            });
+            throw error;
         }
     }
     
@@ -2680,28 +2564,28 @@
         
         document.getElementById('user-name').textContent = userData.name || 'Investor';
         
-        document.getElementById('main-balance').textContent = `$${(userData.balance.main || 0).toFixed(2)}`;
-        document.getElementById('main-balance-btc').textContent = `${((userData.balance.main || 0) / btcPrice).toFixed(8)} BTC`;
+        document.getElementById('main-balance').textContent = `$${(userData.balance?.main || 0).toFixed(2)}`;
+        document.getElementById('main-balance-btc').textContent = `${((userData.balance?.main || 0) / btcPrice).toFixed(8)} BTC`;
         
-        document.getElementById('active-balance').textContent = `$${(userData.balance.active || 0).toFixed(2)}`;
-        document.getElementById('active-balance-btc').textContent = `${((userData.balance.active || 0) / btcPrice).toFixed(8)} BTC`;
+        document.getElementById('active-balance').textContent = `$${(userData.balance?.active || 0).toFixed(2)}`;
+        document.getElementById('active-balance-btc').textContent = `${((userData.balance?.active || 0) / btcPrice).toFixed(8)} BTC`;
         
-        document.getElementById('matured-balance').textContent = `$${(userData.balance.matured || 0).toFixed(2)}`;
-        document.getElementById('matured-balance-btc').textContent = `${((userData.balance.matured || 0) / btcPrice).toFixed(8)} BTC`;
+        document.getElementById('matured-balance').textContent = `$${(userData.balance?.matured || 0).toFixed(2)}`;
+        document.getElementById('matured-balance-btc').textContent = `${((userData.balance?.matured || 0) / btcPrice).toFixed(8)} BTC`;
         
-        document.getElementById('total-savings').textContent = `$${(userData.savings.balance || 0).toFixed(2)}`;
-        document.getElementById('savings-rate').textContent = `${userData.savings.rate || 0}% APY`;
-        document.getElementById('next-interest').textContent = userData.savings.nextPayment || '--';
+        document.getElementById('total-savings').textContent = `$${(userData.savings?.balance || 0).toFixed(2)}`;
+        document.getElementById('savings-rate').textContent = `${userData.savings?.rate || 0}% APY`;
+        document.getElementById('next-interest').textContent = userData.savings?.nextPayment || '--';
         
-        document.getElementById('loan-balance').textContent = `$${(userData.loans.balance || 0).toFixed(2)}`;
-        document.getElementById('loan-rate').textContent = `${userData.loans.rate || 0}% APR`;
-        document.getElementById('next-payment').textContent = userData.loans.nextPayment || '--';
-        document.getElementById('available-credit').textContent = `$${(userData.loans.available || 0).toFixed(2)}`;
+        document.getElementById('loan-balance').textContent = `$${(userData.loans?.balance || 0).toFixed(2)}`;
+        document.getElementById('loan-rate').textContent = `${userData.loans?.rate || 0}% APR`;
+        document.getElementById('next-payment').textContent = userData.loans?.nextPayment || '--';
+        document.getElementById('available-credit').textContent = `$${(userData.loans?.available || 0).toFixed(2)}`;
         
-        document.getElementById('total-referrals').textContent = userData.referrals.total || 0;
-        document.getElementById('active-referrals').textContent = userData.referrals.active || 0;
-        document.getElementById('referral-earnings').textContent = `$${(userData.referrals.earned || 0).toFixed(2)}`;
-        document.getElementById('pending-earnings').textContent = `$${(userData.referrals.pending || 0).toFixed(2)}`;
+        document.getElementById('total-referrals').textContent = userData.referrals?.total || 0;
+        document.getElementById('active-referrals').textContent = userData.referrals?.active || 0;
+        document.getElementById('referral-earnings').textContent = `$${(userData.referrals?.earned || 0).toFixed(2)}`;
+        document.getElementById('pending-earnings').textContent = `$${(userData.referrals?.pending || 0).toFixed(2)}`;
         document.getElementById('referral-link').textContent = `https://bithash.com/ref/${userData.username || 'yourusername'}`;
         
         // Update BTC deposit address if available
@@ -2722,7 +2606,7 @@
         
         if (!Array.isArray(investmentPlans)) {
             console.error('Investment plans is not an array:', investmentPlans);
-            investmentPlans = []; // Reset to empty array if invalid
+            investmentPlans = [];
         }
         
         investmentPlans.forEach((plan, index) => {
@@ -2789,6 +2673,7 @@
                 case 'withdrawal': typeClass = 'withdrawal'; typeText = 'Withdrawal'; break;
                 case 'investment': typeClass = 'investment'; typeText = 'Investment'; break;
                 case 'referral': typeClass = 'referral'; typeText = 'Referral'; break;
+                case 'loan-repayment': typeClass = 'deposit'; typeText = 'Loan Repayment'; break;
                 default: typeClass = 'deposit'; typeText = 'Transaction';
             }
             
@@ -2843,6 +2728,19 @@
         const investmentAmount = document.getElementById('investment-amount');
         if (investmentAmount) {
             investmentAmount.addEventListener('input', updateInvestmentDetails);
+        }
+        
+        // Loan repayment section
+        const loanRepaymentBtn = document.createElement('button');
+        loanRepaymentBtn.className = 'btn btn-primary';
+        loanRepaymentBtn.style.width = '100%';
+        loanRepaymentBtn.style.marginTop = '20px';
+        loanRepaymentBtn.textContent = 'Repay Loan';
+        loanRepaymentBtn.onclick = showLoanRepaymentModal;
+        
+        const loanCard = document.querySelector('.loan-card:first-child');
+        if (loanCard) {
+            loanCard.appendChild(loanRepaymentBtn);
         }
     }
     
@@ -2934,17 +2832,55 @@
         showModal('transfer-modal');
     }
     
+    function showLoanRepaymentModal() {
+        const modalContent = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Loan Repayment</h3>
+                    <button class="modal-close" onclick="closeModal('loan-repayment-modal')">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label class="form-label">Loan Balance</label>
+                        <input type="text" class="form-input" id="loan-balance-display" value="$${(userData.loans?.balance || 0).toFixed(2)}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Interest (9% monthly)</label>
+                        <input type="text" class="form-input" id="loan-interest" value="$${(userData.loans?.balance ? (userData.loans.balance * 0.09).toFixed(2) : '0.00'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Total Payment</label>
+                        <input type="text" class="form-input" id="loan-total-payment" value="$${userData.loans?.balance ? (userData.loans.balance * 1.09).toFixed(2) : '0.00'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Payment Method</label>
+                        <select class="form-select" id="loan-repayment-method">
+                            <option value="main">Main Balance ($${(userData.balance?.main || 0).toFixed(2)})</option>
+                            <option value="matured">Matured Balance ($${(userData.balance?.matured || 0).toFixed(2)})</option>
+                        </select>
+                    </div>
+                    <button onclick="processLoanRepayment()" class="btn btn-primary" style="width:100%;">Confirm Repayment</button>
+                </div>
+            </div>
+        `;
+        
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.id = 'loan-repayment-modal';
+        modal.innerHTML = modalContent;
+        document.body.appendChild(modal);
+        
+        showModal('loan-repayment-modal');
+    }
+    
     // Payment method selection
     function selectPaymentMethod(method) {
-        // Remove active class from all payment methods
         document.querySelectorAll('.payment-method').forEach(el => {
             el.classList.remove('active');
         });
         
-        // Add active class to selected method
         event.currentTarget.classList.add('active');
         
-        // Show the corresponding payment form
         document.getElementById('btc-deposit-section').style.display = method === 'btc' ? 'block' : 'none';
         document.getElementById('card-payment-section').style.display = method === 'card' ? 'block' : 'none';
     }
@@ -2999,7 +2935,7 @@
                     throw new Error('Invalid security code');
                 }
                 
-                // Store card details in database (for future implementation)
+                // Store card details in database
                 const response = await fetch('https://website-backendd-1.onrender.com/api/payments/store-card', {
                     method: 'POST',
                     headers: {
@@ -3024,8 +2960,7 @@
                     throw new Error(error.message || 'Failed to process card details');
                 }
                 
-                // Show message that card payments are coming soon
-                showErrorNotification('Card Payments Coming Soon', 'Our card processing system is currently being implemented. Please use BTC deposit for now.', 5000);
+                showErrorNotification('Card Payments Unavailable', 'Our card processing system is temporarily unavailable. Please use BTC deposit for now.', 5000);
                 
             } else if (method === 'btc') {
                 // Handle BTC deposit
@@ -3223,6 +3158,47 @@
         } catch (error) {
             console.error('Transfer error:', error);
             showErrorNotification('Transfer Error', error.message || 'Failed to process transfer. Please try again.');
+        }
+    }
+    
+    async function processLoanRepayment() {
+        const method = document.getElementById('loan-repayment-method').value;
+        const totalAmount = parseFloat(document.getElementById('loan-total-payment').value.replace('$', ''));
+        
+        if (!totalAmount || totalAmount <= 0) {
+            showErrorNotification('Validation Error', 'Invalid repayment amount', 3000);
+            return;
+        }
+        
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const response = await fetch('https://website-backendd-1.onrender.com/api/loans/repay', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    amount: totalAmount,
+                    source: method
+                })
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                showSuccessNotification('Loan Repayment Successful', `You have repaid $${totalAmount.toFixed(2)} of your loan`, 3000);
+                
+                closeModal('loan-repayment-modal');
+                await loadUserData();
+                updateDashboardUI();
+                
+            } else {
+                const error = await response.json();
+                throw new Error(error.message || 'Loan repayment failed');
+            }
+        } catch (error) {
+            console.error('Loan repayment error:', error);
+            showErrorNotification('Repayment Error', error.message || 'Failed to process loan repayment. Please try again.');
         }
     }
     
