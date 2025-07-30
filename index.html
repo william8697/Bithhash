@@ -3495,8 +3495,6 @@ function renderPlans(plans, userBalance = null) {
             </div>
         `).join('');
         
-        const isLoggedIn = localStorage.getItem('jwtToken') !== null;
-        
         planCard.innerHTML = `
             <h3 class="plan-name">${plan.name}</h3>
             <p class="plan-description">${plan.description}</p>
@@ -3514,9 +3512,9 @@ function renderPlans(plans, userBalance = null) {
                 </div>
             </div>
             <button class="btn plan-button" onclick="handlePlanSelection('${plan.id}', ${plan.minAmount}, ${plan.maxAmount}, ${plan.percentage}, ${plan.duration}, '${plan.name}')" 
-                ${isLoggedIn && !plan.canInvest ? 'disabled' : ''}>
-                <i class="fas ${isLoggedIn ? 'fa-coins' : 'fa-lock'}"></i>
-                ${isLoggedIn ? 'Invest Now' : 'Login to Invest'}
+                ${userBalance !== null && !plan.canInvest ? 'disabled' : ''}>
+                <i class="fas ${userBalance !== null ? 'fa-coins' : 'fa-lock'}"></i>
+                ${userBalance !== null ? 'Invest Now' : 'Login to Invest'}
             </button>
         `;
         
@@ -3527,6 +3525,176 @@ function renderPlans(plans, userBalance = null) {
     AOS.refresh();
 }
 
+// Handle plan selection
+function handlePlanSelection(planId, minAmount, maxAmount, percentage, duration, planName) {
+    const token = localStorage.getItem('jwtToken');
+    if (!token) {
+        showNotification('error', 'Authentication Required', 'Please login or sign up to invest in a plan.');
+        setTimeout(() => {
+            window.location.href = 'signup.html';
+        }, 1500);
+        return;
+    }
+    
+    // Open investment modal with plan details
+    openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName);
+}
+
+// Open investment modal
+function openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName) {
+    const modal = document.getElementById('investment-modal');
+    const modalPlanName = document.getElementById('modal-plan-name');
+    const modalPlanReturn = document.getElementById('modal-plan-return');
+    const modalPlanDuration = document.getElementById('modal-plan-duration');
+    const modalPlanMin = document.getElementById('modal-plan-min');
+    const modalPlanMax = document.getElementById('modal-plan-max');
+    
+    // Set plan details
+    modalPlanName.textContent = planName;
+    modalPlanReturn.textContent = `${percentage}%`;
+    modalPlanDuration.textContent = `${duration} hours`;
+    modalPlanMin.textContent = `$${minAmount}`;
+    modalPlanMax.textContent = `$${maxAmount}`;
+    
+    // Reset form
+    document.getElementById('investment-amount').value = minAmount;
+    document.getElementById('amount-error').textContent = '';
+    document.getElementById('expected-return').textContent = '$0.00';
+    document.getElementById('investment-status').textContent = '';
+    
+    // Calculate initial expected return
+    calculateExpectedReturn(minAmount, percentage);
+    
+    // Show modal
+    modal.classList.add('active');
+    
+    // Add event listeners
+    document.getElementById('investment-amount').addEventListener('input', function() {
+        const amount = parseFloat(this.value) || 0;
+        validateInvestmentAmount(amount, minAmount, maxAmount);
+        calculateExpectedReturn(amount, percentage);
+    });
+    
+    document.getElementById('confirm-investment').addEventListener('click', function() {
+        const amount = parseFloat(document.getElementById('investment-amount').value);
+        if (validateInvestmentAmount(amount, minAmount, maxAmount)) {
+            createInvestment(planId, amount);
+        }
+    });
+}
+
+// Close investment modal
+function closeInvestmentModal() {
+    const modal = document.getElementById('investment-modal');
+    modal.classList.remove('active');
+}
+
+// Validate investment amount
+function validateInvestmentAmount(amount, minAmount, maxAmount) {
+    const errorElement = document.getElementById('amount-error');
+    
+    if (isNaN(amount)) {
+        errorElement.textContent = 'Please enter a valid amount';
+        return false;
+    }
+    
+    if (amount < minAmount) {
+        errorElement.textContent = `Minimum investment is $${minAmount}`;
+        return false;
+    }
+    
+    if (amount > maxAmount) {
+        errorElement.textContent = `Maximum investment is $${maxAmount}`;
+        return false;
+    }
+    
+    errorElement.textContent = '';
+    return true;
+}
+
+// Calculate expected return
+function calculateExpectedReturn(amount, percentage) {
+    if (isNaN(amount)) {
+        document.getElementById('expected-return').textContent = '$0.00';
+        return;
+    }
+    
+    const expectedReturn = amount + (amount * percentage / 100);
+    document.getElementById('expected-return').textContent = formatCurrency(expectedReturn);
+}
+
+// Create investment via API
+async function createInvestment(planId, amount) {
+    const token = localStorage.getItem('jwtToken');
+    if (!token) return;
+    
+    const confirmBtn = document.getElementById('confirm-investment');
+    const statusElement = document.getElementById('investment-status');
+    
+    try {
+        confirmBtn.disabled = true;
+        statusElement.textContent = 'Processing investment...';
+        statusElement.style.color = '';
+        
+        const response = await fetch('https://website-backendd-1.onrender.com/api/investments', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({
+                planId,
+                amount
+            })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            statusElement.textContent = 'Investment created successfully!';
+            statusElement.style.color = 'var(--primary)';
+            
+            // Update UI after successful investment
+            setTimeout(() => {
+                closeInvestmentModal();
+                loadPlansData(); // Refresh plans to update balances
+                showNotification('success', 'Investment Created', `You've successfully invested $${amount} in the plan.`);
+            }, 1500);
+        } else {
+            const errorData = await response.json();
+            throw new Error(errorData.message || 'Failed to create investment');
+        }
+    } catch (error) {
+        console.error('Investment error:', error);
+        statusElement.textContent = error.message || 'Failed to create investment';
+        statusElement.style.color = 'var(--error)';
+    } finally {
+        confirmBtn.disabled = false;
+    }
+}
+
+// Format currency helper function
+function formatCurrency(amount) {
+    return '$' + amount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// Initialize modal close button
+document.getElementById('modal-close').addEventListener('click', closeInvestmentModal);
+
+// Close modal when clicking outside
+document.getElementById('investment-modal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeInvestmentModal();
+    }
+});
+
+// Initialize all functionality when DOM is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    // Load plans when page loads
+    loadPlansData();
+    
+    // Refresh plans when authentication state changes
+    document.addEventListener('authStateChanged', loadPlansData);
+});
 
 // Handle plan selection
 function handlePlanSelection(planId, minAmount, maxAmount, percentage, duration, planName) {
