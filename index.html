@@ -3120,90 +3120,96 @@ checkAuthState();
 
  
 
-// BTC Price Widget Functionality
+// Fetch BTC price data from CoinGecko
 async function fetchBTCPrice() {
     try {
         // Show loading state
         const refreshBtn = document.getElementById('btc-refresh');
         refreshBtn.classList.add('loading');
         
-        // Fetch BTC data from CoinGecko API
-        const response = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false');
+        // Fetch data from CoinGecko API
+        const response = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=true');
         
-        if (!response.ok) {
+        if (response.ok) {
+            const data = await response.json();
+            updateBTCPriceWidget(data);
+        } else {
             throw new Error('Failed to fetch BTC price');
         }
-        
-        const data = await response.json();
-        updateBTCPriceWidget(data);
-        
     } catch (error) {
         console.error('Error fetching BTC price:', error);
-        showNotification('error', 'Price Error', 'Failed to load BTC price data. Trying again...');
+        showNotification('error', 'Price Error', 'Failed to fetch Bitcoin price data. Using cached values.');
     } finally {
+        // Remove loading state
         const refreshBtn = document.getElementById('btc-refresh');
         refreshBtn.classList.remove('loading');
     }
 }
 
+// Update BTC price widget with data
 function updateBTCPriceWidget(data) {
-    const price = data.market_data.current_price.usd;
-    const change24h = data.market_data.price_change_percentage_24h;
-    const high24h = data.market_data.high_24h.usd;
-    const low24h = data.market_data.low_24h.usd;
-    const volume = data.market_data.total_volume.usd;
-    const marketCap = data.market_data.market_cap.usd;
+    const marketData = data.market_data;
+    const sparkline = data.sparkline_in_7d.price;
     
-    // Format numbers
-    const formatCurrency = num => '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const formatLargeNumber = num => '$' + (num / 1000000000).toFixed(2) + 'B';
+    // Update main price
+    const currentPrice = marketData.current_price.usd;
+    document.getElementById('btc-price').textContent = formatCurrency(currentPrice);
     
-    // Update DOM elements
-    document.getElementById('btc-price').textContent = formatCurrency(price);
-    
+    // Update price change
+    const priceChange24h = marketData.price_change_percentage_24h;
     const priceChangeElement = document.getElementById('btc-price-change');
-    priceChangeElement.innerHTML = `<span class="${change24h >= 0 ? 'price-up' : 'price-down'}">${Math.abs(change24h).toFixed(2)}%</span>`;
-    priceChangeElement.querySelector('i').className = change24h >= 0 ? 'fas fa-arrow-up' : 'fas fa-arrow-down';
+    priceChangeElement.innerHTML = '';
     
-    document.getElementById('btc-high').textContent = formatCurrency(high24h);
-    document.getElementById('btc-low').textContent = formatCurrency(low24h);
-    document.getElementById('btc-volume').textContent = formatLargeNumber(volume);
-    document.getElementById('btc-marketcap').textContent = formatLargeNumber(marketCap);
+    const changeSpan = document.createElement('span');
+    changeSpan.textContent = `${priceChange24h.toFixed(2)}%`;
+    changeSpan.classList.add(priceChange24h >= 0 ? 'price-up' : 'price-down');
     
-    // Update chart (simplified version - in a real app you'd use a charting library)
-    updateSimplePriceChart(data.market_data.sparkline_7d.price);
+    const arrowIcon = document.createElement('i');
+    arrowIcon.className = priceChange24h >= 0 ? 'fas fa-arrow-up' : 'fas fa-arrow-down';
+    
+    priceChangeElement.appendChild(changeSpan);
+    priceChangeElement.appendChild(arrowIcon);
+    
+    // Update other metrics
+    document.getElementById('btc-high').textContent = formatCurrency(marketData.high_24h.usd);
+    document.getElementById('btc-low').textContent = formatCurrency(marketData.low_24h.usd);
+    document.getElementById('btc-volume').textContent = formatCurrency(marketData.total_volume.usd);
+    document.getElementById('btc-marketcap').textContent = formatCurrency(marketData.market_cap.usd);
+    
+    // Render sparkline chart
+    renderSparklineChart(sparkline);
 }
 
-function updateSimplePriceChart(prices) {
-    if (!prices || prices.length === 0) return;
-    
+// Render sparkline chart
+function renderSparklineChart(data) {
     const chartElement = document.getElementById('btc-price-chart');
     const tooltip = document.getElementById('btc-price-tooltip');
     
     // Clear previous chart if it exists
     chartElement.innerHTML = '';
-    
-    // Create canvas for drawing
     const canvas = document.createElement('canvas');
-    canvas.width = chartElement.offsetWidth;
-    canvas.height = chartElement.offsetHeight;
     chartElement.appendChild(canvas);
     
+    // Get dimensions
+    const width = chartElement.offsetWidth;
+    const height = chartElement.offsetHeight;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     
     // Calculate min/max for scaling
-    const minPrice = Math.min(...prices);
-    const maxPrice = Math.max(...prices);
-    const priceRange = maxPrice - minPrice;
+    const min = Math.min(...data);
+    const max = Math.max(...data);
+    const range = max - min;
     
-    // Draw chart
+    // Draw sparkline
     ctx.beginPath();
-    ctx.strokeStyle = '#D4AF37';
+    ctx.strokeStyle = '#D4AF37'; // Gold color
     ctx.lineWidth = 2;
     
-    prices.forEach((price, index) => {
-        const x = (index / (prices.length - 1)) * canvas.width;
-        const y = canvas.height - ((price - minPrice) / priceRange) * canvas.height;
+    data.forEach((price, index) => {
+        const x = (index / (data.length - 1)) * width;
+        const y = height - ((price - min) / range) * height;
         
         if (index === 0) {
             ctx.moveTo(x, y);
@@ -3218,13 +3224,14 @@ function updateSimplePriceChart(prices) {
     canvas.addEventListener('mousemove', (e) => {
         const rect = canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
-        const index = Math.floor((x / canvas.width) * (prices.length - 1));
-        const price = prices[index];
+        const index = Math.round((x / width) * (data.length - 1));
+        const price = data[index];
         
+        // Position tooltip
+        tooltip.style.left = `${x}px`;
+        tooltip.style.top = `${((max - price) / range) * height}px`;
+        tooltip.textContent = formatCurrency(price);
         tooltip.style.opacity = '1';
-        tooltip.style.left = `${e.clientX - rect.left + 10}px`;
-        tooltip.style.top = `${e.clientY - rect.top - 30}px`;
-        tooltip.textContent = `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     });
     
     canvas.addEventListener('mouseout', () => {
@@ -3232,18 +3239,27 @@ function updateSimplePriceChart(prices) {
     });
 }
 
+// Format currency helper function
+function formatCurrency(amount) {
+    return '$' + amount.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+
 // Initialize BTC price widget
-document.addEventListener('DOMContentLoaded', () => {
-    // First load
+document.addEventListener('DOMContentLoaded', function() {
+    // Initial load
     fetchBTCPrice();
     
-    // Set up refresh button
+    // Refresh button
     document.getElementById('btc-refresh').addEventListener('click', fetchBTCPrice);
     
     // Auto-refresh every 60 seconds
     setInterval(fetchBTCPrice, 60000);
 });
 
+        
         
 // Enhanced stats loading with real-time updates and animations
 async function loadStatsData() {
