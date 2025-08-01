@@ -742,82 +742,97 @@
 
 
 
-/* Transaction Popups */
-.transaction-popup-container {
+/* Transaction Popup Styles */
+.transaction-popup {
     position: fixed;
-    top: 100px;
+    top: 90px;
     right: 20px;
-    z-index: 999;
+    width: 320px;
+    padding: 15px;
+    border-radius: var(--border-radius);
+    box-shadow: var(--box-shadow-lg);
+    z-index: 9998;
+    transform: translateX(120%);
+    transition: transform 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    backdrop-filter: blur(10px);
+    border-left: 4px solid;
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
-    gap: 10px;
-    pointer-events: none;
+    overflow: hidden;
 }
 
-.transaction-popup {
-    background-color: rgba(30, 30, 30, 0.95);
-    border-radius: var(--border-radius);
-    padding: 12px 16px;
-    box-shadow: var(--box-shadow-lg);
-    border-left: 4px solid var(--primary);
-    transform: translateX(120%);
-    opacity: 0;
-    transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
-    max-width: 300px;
-    pointer-events: auto;
-    backdrop-filter: blur(5px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.transaction-popup.show {
+.transaction-popup.visible {
     transform: translateX(0);
-    opacity: 1;
 }
 
 .transaction-popup.investment {
-    border-left-color: var(--primary);
-    background-color: rgba(0, 211, 149, 0.15);
+    background: linear-gradient(135deg, rgba(0, 211, 149, 0.9) 0%, rgba(0, 183, 131, 0.9) 100%);
+    border-left-color: #00B783;
 }
 
 .transaction-popup.withdrawal {
-    border-left-color: var(--gold);
-    background-color: rgba(212, 175, 55, 0.15);
+    background: linear-gradient(135deg, rgba(120, 79, 237, 0.9) 0%, rgba(98, 59, 210, 0.9) 100%);
+    border-left-color: #623BD2;
 }
 
-.transaction-popup-content {
+.transaction-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.transaction-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 10px;
+    flex-shrink: 0;
+    color: var(--darker);
+}
+
+.transaction-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--darker);
+}
+
+.transaction-content {
     font-size: 0.9rem;
     line-height: 1.4;
+    color: var(--darker);
+    margin-bottom: 8px;
 }
 
-.transaction-popup-content .user {
-    font-weight: 600;
-    color: var(--primary-light);
-}
-
-.transaction-popup-content .amount {
-    font-weight: 700;
-    color: var(--gold-light);
-}
-
-.transaction-popup-content .plan {
-    font-style: italic;
-}
-
-.transaction-popup-content .tx-id {
+.transaction-footer {
+    display: flex;
+    justify-content: space-between;
     font-size: 0.8rem;
-    opacity: 0.8;
-    margin-top: 4px;
-    font-family: 'Courier New', monospace;
+    color: rgba(10, 10, 10, 0.7);
 }
 
-@keyframes slideIn {
-    0% { transform: translateX(120%); opacity: 0; }
-    20% { transform: translateX(0); opacity: 1; }
-    80% { transform: translateX(0); opacity: 1; }
-    100% { transform: translateX(120%); opacity: 0; }
+.progress-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    background-color: rgba(10, 10, 10, 0.2);
+    width: 100%;
 }
-        
+
+.progress {
+    height: 100%;
+    background-color: rgba(10, 10, 10, 0.4);
+    width: 100%;
+    animation: progress 10s linear forwards;
+}
+
+@keyframes progress {
+    from { width: 100%; }
+    to { width: 0%; }
+}
         
         
        /* Bitcoin Price Container */
@@ -3393,152 +3408,193 @@ checkAuthState();
 
 
 
-// Transaction Popup System
+/* ============================================= */
+/* Transaction Popup System */
+/* ============================================= */
+
 class TransactionPopup {
     constructor() {
-        this.container = document.getElementById('transaction-popup-container');
-        this.redis = new Redis({
-            host: 'redis-14450.c276.us-east-1-2.ec2.redns.redis-cloud.com',
-            port: 14450,
-            password: 'qjXgsg0YrsLaSumlEW9HkIZbvLjXEwXR'
-        });
-        this.activePopups = 0;
-        this.maxPopups = 3;
         this.queue = [];
-        this.initialize();
-    }
-
-    async initialize() {
+        this.isShowing = false;
+        this.lastPopupTime = 0;
+        this.popupContainer = document.createElement('div');
+        this.popupContainer.id = 'transaction-popup-container';
+        document.body.appendChild(this.popupContainer);
+        
         // Load initial data
-        await this.cacheData();
+        this.loadTransactionData();
         
         // Start showing popups
-        this.showNextPopup();
-        
-        // Refresh data every 5 minutes
-        setInterval(() => this.cacheData(), 5 * 60 * 1000);
+        this.startPopupCycle();
     }
-
-    async cacheData() {
+    
+    async loadTransactionData() {
         try {
-            // Try to get from Redis first
-            const cachedInvestments = await this.redis.get('recentInvestments');
-            const cachedWithdrawals = await this.redis.get('recentWithdrawals');
+            // Try to get cached data first
+            const cachedWithdrawals = await this.getCachedData('recent-withdrawals');
+            const cachedInvestments = await this.getCachedData('recent-investments');
             
-            if (cachedInvestments && cachedWithdrawals) {
-                this.investments = JSON.parse(cachedInvestments);
-                this.withdrawals = JSON.parse(cachedWithdrawals);
-                return;
-            }
-            
-            // Fetch fresh data if Redis is empty
-            const [investmentsRes, withdrawalsRes] = await Promise.all([
-                fetch('https://website-backendd-1.onrender.com/api/recent-investments'),
-                fetch('https://website-backendd-1.onrender.com/api/recent-withdrawals')
-            ]);
-            
-            if (investmentsRes.ok && withdrawalsRes.ok) {
-                this.investments = await investmentsRes.json();
-                this.withdrawals = await withdrawalsRes.json();
+            if (cachedWithdrawals && cachedInvestments) {
+                this.withdrawals = cachedWithdrawals;
+                this.investments = cachedInvestments;
+            } else {
+                // Fetch fresh data if cache is empty
+                const [withdrawalsRes, investmentsRes] = await Promise.all([
+                    fetch('https://website-backendd-1.onrender.com/api/transactions/recent-withdrawals'),
+                    fetch('https://website-backendd-1.onrender.com/api/transactions/recent-investments')
+                ]);
                 
-                // Cache in Redis for 1 hour
-                await this.redis.set('recentInvestments', JSON.stringify(this.investments.data), 'EX', 3600);
-                await this.redis.set('recentWithdrawals', JSON.stringify(this.withdrawals.data), 'EX', 3600);
+                if (withdrawalsRes.ok && investmentsRes.ok) {
+                    this.withdrawals = (await withdrawalsRes.json()).data;
+                    this.investments = (await investmentsRes.json()).data;
+                } else {
+                    throw new Error('Failed to fetch transaction data');
+                }
             }
-        } catch (err) {
-            console.error('Error caching transaction data:', err);
             
-            // Fallback data if API fails
-            this.investments = { data: [] };
-            this.withdrawals = { data: [] };
+            // Prepare the queue with mixed withdrawals and investments
+            this.prepareQueue();
+            
+        } catch (error) {
+            console.error('Error loading transaction data:', error);
+            // Fallback to locally generated data if API fails
+            this.generateFallbackData();
+            this.prepareQueue();
         }
     }
-
+    
+    async getCachedData(key) {
+        try {
+            const cached = await redis.get(key);
+            return cached ? JSON.parse(cached) : null;
+        } catch {
+            return null;
+        }
+    }
+    
+    generateFallbackData() {
+        // Simple fallback data generation if API fails
+        this.withdrawals = Array.from({ length: 20 }, (_, i) => ({
+            maskedUserId: `Usr${Math.floor(Math.random() * 9000 + 1000)}•••${Math.floor(Math.random() * 9000 + 1000)}`,
+            amount: Math.floor(Math.random() * (2000000 - 120 + 1)) + 120,
+            method: Math.random() > 0.5 ? 'btc' : 'wire',
+            maskedTxId: `Tx${Math.floor(Math.random() * 9000 + 1000)}•••${Math.floor(Math.random() * 9000 + 1000)}`
+        }));
+        
+        this.investments = Array.from({ length: 20 }, (_, i) => ({
+            maskedUserId: `Usr${Math.floor(Math.random() * 9000 + 1000)}•••${Math.floor(Math.random() * 9000 + 1000)}`,
+            amount: Math.floor(Math.random() * (10000 - 100 + 1)) + 100,
+            plan: ['Starter', 'Gold', 'Advance', 'Exclusive', 'Expert'][Math.floor(Math.random() * 5)] + ' Plan',
+            maskedTxId: `Tx${Math.floor(Math.random() * 9000 + 1000)}•••${Math.floor(Math.random() * 9000 + 1000)}`
+        }));
+    }
+    
+    prepareQueue() {
+        // Mix withdrawals and investments randomly
+        const allTransactions = [
+            ...this.withdrawals.map(tx => ({ ...tx, type: 'withdrawal' })),
+            ...this.investments.map(tx => ({ ...tx, type: 'investment' }))
+        ];
+        
+        // Shuffle the array
+        this.queue = allTransactions.sort(() => Math.random() - 0.5);
+    }
+    
+    startPopupCycle() {
+        // Show first popup after initial delay (3-10 seconds)
+        const initialDelay = Math.floor(Math.random() * 7000) + 3000;
+        setTimeout(() => this.showNextPopup(), initialDelay);
+    }
+    
     showNextPopup() {
-        if (this.activePopups >= this.maxPopups || this.queue.length > 0) {
+        if (this.queue.length === 0) {
+            // If queue is empty, reload data and restart
+            this.loadTransactionData();
+            setTimeout(() => this.showNextPopup(), 30000); // Check again in 30 seconds
             return;
         }
-
-        // Random delay between 3 seconds and 5 minutes
-        const delay = Math.floor(Math.random() * (300000 - 3000 + 1)) + 3000;
         
+        if (this.isShowing) return;
+        
+        const now = Date.now();
+        if (now - this.lastPopupTime < 3000) {
+            // Ensure minimum 3 seconds between popups
+            setTimeout(() => this.showNextPopup(), 3000 - (now - this.lastPopupTime));
+            return;
+        }
+        
+        this.isShowing = true;
+        this.lastPopupTime = now;
+        
+        const transaction = this.queue.shift();
+        this.showPopup(transaction);
+        
+        // Schedule next popup with random delay (3 seconds to 5 minutes)
+        const nextDelay = Math.floor(Math.random() * (300000 - 3000 + 1)) + 3000;
         setTimeout(() => {
-            // Randomly choose between investment or withdrawal (50/50 chance)
-            const showInvestment = Math.random() > 0.5;
-            
-            if (showInvestment && this.investments.data.length > 0) {
-                const randomIndex = Math.floor(Math.random() * this.investments.data.length);
-                this.createPopup(this.investments.data[randomIndex], 'investment');
-            } else if (this.withdrawals.data.length > 0) {
-                const randomIndex = Math.floor(Math.random() * this.withdrawals.data.length);
-                this.createPopup(this.withdrawals.data[randomIndex], 'withdrawal');
-            }
-            
-            // Continue showing popups
+            this.isShowing = false;
             this.showNextPopup();
-        }, delay);
+        }, nextDelay);
     }
-
-    createPopup(data, type) {
-        if (this.activePopups >= this.maxPopups) {
-            this.queue.push({ data, type });
-            return;
-        }
-
-        this.activePopups++;
-        
+    
+    showPopup(transaction) {
         const popup = document.createElement('div');
-        popup.className = `transaction-popup ${type}`;
+        popup.className = `transaction-popup ${transaction.type}`;
         
-        if (type === 'investment') {
-            popup.innerHTML = `
-                <div class="transaction-popup-content">
-                    <span class="user">${data.user}</span> 
-                    <span class="amount">${data.amount}</span> 
-                    in the <span class="plan">${data.plan}</span>
-                    <div class="tx-id">${data.txId}</div>
-                </div>
-            `;
+        const icon = transaction.type === 'investment' ? 'fa-coins' : 'fa-money-bill-wave';
+        const title = transaction.type === 'investment' ? 'New Investment' : 'Withdrawal Processed';
+        
+        let content;
+        if (transaction.type === 'investment') {
+            content = `User ${transaction.maskedUserId} invested $${transaction.amount.toLocaleString()} in the ${transaction.plan}`;
         } else {
-            popup.innerHTML = `
-                <div class="transaction-popup-content">
-                    <span class="user">${data.user}</span> 
-                    <span class="amount">${data.amount}</span> 
-                    via <span class="plan">${data.method}</span>
-                    <div class="tx-id">${data.txId}</div>
-                </div>
-            `;
+            const method = transaction.method === 'btc' ? 'BTC' : 'Wire Transfer';
+            content = `User ${transaction.maskedUserId} withdrew $${transaction.amount.toLocaleString()} via ${method}`;
         }
         
-        this.container.appendChild(popup);
+        popup.innerHTML = `
+            <div class="transaction-header">
+                <div class="transaction-icon">
+                    <i class="fas ${icon}"></i>
+                </div>
+                <div class="transaction-title">${title}</div>
+            </div>
+            <div class="transaction-content">${content}</div>
+            <div class="transaction-footer">
+                <span>TX ID: ${transaction.maskedTxId}</span>
+                <span>Just now</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress"></div>
+            </div>
+        `;
         
-        // Trigger animation
+        this.popupContainer.appendChild(popup);
+        
+        // Force reflow to enable animation
+        void popup.offsetWidth;
+        
+        // Show popup
+        popup.classList.add('visible');
+        
+        // Remove popup after 10 seconds
         setTimeout(() => {
-            popup.classList.add('show');
-            
-            // Remove after 10 seconds
+            popup.classList.remove('visible');
             setTimeout(() => {
-                popup.classList.remove('show');
-                
-                // Remove from DOM after animation
-                setTimeout(() => {
-                    this.container.removeChild(popup);
-                    this.activePopups--;
-                    
-                    // Show next in queue if any
-                    if (this.queue.length > 0) {
-                        const next = this.queue.shift();
-                        this.createPopup(next.data, next.type);
-                    }
-                }, 500);
-            }, 10000);
-        }, 10);
+                if (popup.parentNode) {
+                    popup.parentNode.removeChild(popup);
+                }
+            }, 500);
+        }, 10000);
     }
 }
 
-// Initialize the popup system when DOM is loaded
+// Initialize the transaction popup system when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
-    new TransactionPopup();
+    // Only initialize on homepage
+    if (window.location.pathname === '/' || window.location.pathname === '/index.html') {
+        new TransactionPopup();
+    }
 });
         
 
