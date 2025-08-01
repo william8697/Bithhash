@@ -1770,27 +1770,103 @@
         }
         
         // Load user data
-        async function loadUserData() {
-            try {
-                const token = localStorage.getItem('jwtToken');
-                const response = await fetch('https://website-backendd-1.onrender.com/api/users/me', {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-                
-                if (response.ok) {
-                    const userData = await response.json();
-                    const username = userData.name || userData.email.split('@')[0];
-                    document.getElementById('username').textContent = username;
-                } else {
-                    throw new Error('Failed to load user data');
-                }
-            } catch (error) {
-                console.error('Error loading user data:', error);
-                showNotification('error', 'Data Error', 'Failed to load user data. Please try again later.');
-            }
-        }
+       // Enhanced loadUserData function
+async function loadUserData() {
+  try {
+    // Show loading state
+    document.getElementById('username').textContent = 'Loading...';
+    
+    const token = localStorage.getItem('jwtToken');
+    if (!token) {
+      throw new Error('No authentication token found');
+    }
+
+    // Check cache first
+    const cacheKey = `user:${token}`;
+    const cachedData = await caches.match(`/api/users/me`);
+    
+    if (cachedData) {
+      const userData = await cachedData.json();
+      updateUserDisplay(userData);
+      return;
+    }
+
+    const response = await fetch('https://website-backendd-1.onrender.com/api/users/me', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      cache: 'default'
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to load user data');
+    }
+
+    const userData = await response.json();
+    
+    // Validate response structure
+    if (!userData.data || !userData.data.user) {
+      throw new Error('Invalid user data structure');
+    }
+
+    // Cache the response
+    const cache = await caches.open('user-data');
+    const cacheResponse = new Response(JSON.stringify(userData), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    await cache.put('/api/users/me', cacheResponse);
+
+    updateUserDisplay(userData);
+  } catch (error) {
+    console.error('Error loading user data:', error);
+    
+    // Fallback display
+    document.getElementById('username').textContent = 'User';
+    
+    showNotification('error', 'Data Error', 
+      error.message.includes('token') ? 
+      'Session expired. Please login again.' : 
+      'Failed to load user data. Using cached data if available.'
+    );
+    
+    // Attempt to use any cached data
+    try {
+      const cachedData = await caches.match(`/api/users/me`);
+      if (cachedData) {
+        const userData = await cachedData.json();
+        updateUserDisplay(userData);
+      }
+    } catch (cacheError) {
+      console.error('Cache fallback failed:', cacheError);
+    }
+    
+    // Redirect to login if token is invalid
+    if (error.message.includes('token') || error.message.includes('Session')) {
+      setTimeout(() => {
+        window.location.href = 'login.html';
+      }, 2000);
+    }
+  }
+}
+
+// Helper function to update UI with user data
+function updateUserDisplay(userData) {
+  const user = userData.data.user;
+  const displayName = user.firstName || user.email.split('@')[0];
+  
+  document.getElementById('username').textContent = displayName;
+  
+  // Update other user-specific elements if needed
+  if (document.getElementById('user-email')) {
+    document.getElementById('user-email').textContent = user.email;
+  }
+  if (document.getElementById('user-kyc-status')) {
+    document.getElementById('user-kyc-status').textContent = 
+      user.kycStatus.identity === 'verified' ? 'Verified' : 'Not Verified';
+  }
+}
         
         // Load balances data
         async function loadBalances() {
