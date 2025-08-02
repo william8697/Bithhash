@@ -2234,11 +2234,13 @@ async function refreshMiningStats() {
         
 
     // Check loan eligibility and update UI
-async function checkLoanEligibility() {
+async function checkLoanEligibility(showNotification = false) {
     try {
         const token = localStorage.getItem('jwtToken');
         if (!token) {
-            showNotification('error', 'Error', 'Please login to check loan eligibility');
+            if (showNotification) {
+                showNotification('error', 'Error', 'Please login to check loan eligibility');
+            }
             return null;
         }
 
@@ -2261,8 +2263,8 @@ async function checkLoanEligibility() {
             loanLimitElement.textContent = `$${data.data.limit.toFixed(2)}`;
         }
         
-        // Show warning if user doesn't qualify
-        if (!data.data.qualified) {
+        // Only show warning if requested and user doesn't qualify
+        if (showNotification && !data.data.qualified) {
             let message = 'You do not currently qualify for a loan. Reasons:';
             if (!data.data.meetsMinimumRequirement) {
                 message += `\n- Minimum transaction requirement not met ($${data.data.totalTransactions.toFixed(2)} of $5,000 needed)`;
@@ -2277,14 +2279,16 @@ async function checkLoanEligibility() {
         return data.data;
     } catch (error) {
         console.error('Error checking loan eligibility:', error);
-        showNotification('error', 'Error', error.message || 'Failed to check loan eligibility. Please try again later.');
+        if (showNotification) {
+            showNotification('error', 'Error', error.message || 'Failed to check loan eligibility. Please try again later.');
+        }
         return null;
     }
 }
 
 // Function to calculate and display loan limit (wrapper for checkLoanEligibility)
 function calculateLoanLimit() {
-    checkLoanEligibility().then(data => {
+    checkLoanEligibility(false).then(data => { // Pass false to suppress notifications
         if (data) {
             // You can add additional processing here if needed
             console.log('Loan limit calculated:', data);
@@ -2368,44 +2372,56 @@ document.addEventListener('DOMContentLoaded', initLoanCalculator);
         
         // Request a loan
         async function requestLoan() {
-            try {
-                const amount = parseFloat(document.getElementById('loan-amount').value);
-                const duration = parseInt(document.getElementById('loan-duration').value);
-                
-                if (!amount || amount <= 0) {
-                    showNotification('error', 'Validation Error', 'Please enter a valid loan amount', 3000);
-                    return;
-                }
-                
-                const token = localStorage.getItem('jwtToken');
-                const response = await fetch('https://website-backendd-1.onrender.com/api/loans', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify({
-                        amount,
-                        duration
-                    })
-                });
-                
-                if (response.ok) {
-                    const result = await response.json();
-                    showNotification('success', 'Loan Approved', `Your loan of $${amount.toFixed(2)} has been approved and credited to your account. Facility fee of $${result.fee.toFixed(2)} applied.`, 5000);
-                    
-                    // Refresh balances and loan limit
-                    loadBalances();
-                    calculateLoanLimit();
-                } else {
-                    const error = await response.json();
-                    throw new Error(error.message || 'Failed to request loan');
-                }
-            } catch (error) {
-                console.error('Error requesting loan:', error);
-                showNotification('error', 'Loan Error', error.message || 'Failed to process loan request. Please try again later.');
-            }
+    try {
+        const amount = parseFloat(document.getElementById('loan-amount').value);
+        const duration = parseInt(document.getElementById('loan-duration').value);
+        
+        if (!amount || amount <= 0) {
+            showNotification('error', 'Validation Error', 'Please enter a valid loan amount', 3000);
+            return;
         }
+        
+        // Check eligibility and show notification if not qualified
+        const eligibility = await checkLoanEligibility(true); // Pass true to show notifications
+        
+        if (!eligibility || !eligibility.qualified) {
+            return; // Notification already shown by checkLoanEligibility
+        }
+        
+        if (amount > eligibility.limit) {
+            showNotification('error', 'Loan Error', `Requested amount exceeds your loan limit of $${eligibility.limit.toFixed(2)}`);
+            return;
+        }
+
+        const token = localStorage.getItem('jwtToken');
+        const response = await fetch('https://website-backendd-1.onrender.com/api/loans', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({
+                amount,
+                duration
+            })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            showNotification('success', 'Loan Approved', `Your loan of $${amount.toFixed(2)} has been approved and credited to your account. Facility fee of $${result.fee.toFixed(2)} applied.`, 5000);
+            
+            // Refresh balances and loan limit
+            loadBalances();
+            calculateLoanLimit();
+        } else {
+            const error = await response.json();
+            throw new Error(error.message || 'Failed to request loan');
+        }
+    } catch (error) {
+        console.error('Error requesting loan:', error);
+        showNotification('error', 'Loan Error', error.message || 'Failed to process loan request. Please try again later.');
+    }
+}
         
         // Show loan form
         function showLoanForm() {
