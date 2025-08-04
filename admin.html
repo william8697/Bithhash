@@ -3602,166 +3602,142 @@
             });
         }
         
-        // Admin login
-        function adminLogin() {
-            const email = $('#adminEmail').val();
-            const password = $('#adminPassword').val();
-            const twoFactorCode = $('#admin2FA').val();
-            
-            showLoading();
-            
+       function adminLogin() {
+    const email = $('#adminEmail').val();
+    const password = $('#adminPassword').val();
+    
+    showLoading();
+    
+    // First, get CSRF token
+    $.ajax({
+        url: 'https://website-backendd-1.onrender.com/api/csrf-token',
+        type: 'GET',
+        success: function(csrfResponse) {
+            // Then perform login with CSRF token
             $.ajax({
                 url: 'https://website-backendd-1.onrender.com/api/admin/auth/login',
                 type: 'POST',
+                headers: {
+                    'X-CSRF-Token': csrfResponse.csrfToken
+                },
                 data: {
                     email: email,
-                    password: password,
-                    twoFactorCode: twoFactorCode
+                    password: password
                 },
                 success: function(response) {
                     hideLoading();
-                    if (response.success) {
-                        authToken = response.data.token;
-                        currentAdmin = response.data.admin;
-                        
-                        localStorage.setItem('adminToken', authToken);
-                        localStorage.setItem('adminData', JSON.stringify(currentAdmin));
-                        
-                        showDashboardSection();
-                        loadDashboardData();
-                        connectWebSocket();
-                        
-                        toastr.success('Login successful');
+                    
+                    if (response.status === 'success') {
+                        if (response.twoFactorRequired) {
+                            // Show 2FA input and handle verification
+                            $('#admin2FAContainer').show();
+                            $('#admin2FASubmit').off('click').on('click', function() {
+                                verify2FACode(email, response.csrfToken);
+                            });
+                            toastr.info('Please enter your 2FA code');
+                        } else {
+                            // Regular login success
+                            authToken = response.token;
+                            currentAdmin = response.data.admin;
+                            
+                            localStorage.setItem('adminToken', authToken);
+                            localStorage.setItem('adminData', JSON.stringify(currentAdmin));
+                            
+                            showDashboardSection();
+                            loadDashboardData();
+                            connectWebSocket();
+                            
+                            toastr.success('Login successful');
+                        }
                     } else {
                         toastr.error(response.message || 'Login failed');
                     }
                 },
                 error: function(xhr, status, error) {
                     hideLoading();
-                    toastr.error('Login failed. Please check your credentials and try again.');
+                    const errorMsg = xhr.responseJSON?.message || 'Login failed. Please check your credentials and try again.';
+                    toastr.error(errorMsg);
                 }
             });
+        },
+        error: function() {
+            hideLoading();
+            toastr.error('Could not establish secure connection');
         }
-        
-        // Admin logout
-        function adminLogout() {
-            showLoading();
+    });
+}
+
+function verify2FACode(email, csrfToken) {
+    const twoFactorCode = $('#admin2FA').val();
+    
+    if (!twoFactorCode) {
+        toastr.error('Please enter your 2FA code');
+        return;
+    }
+    
+    showLoading();
+    
+    $.ajax({
+        url: 'https://website-backendd-1.onrender.com/api/admin/auth/verify-2fa',
+        type: 'POST',
+        headers: {
+            'X-CSRF-Token': csrfToken
+        },
+        data: {
+            email: email,
+            token: twoFactorCode
+        },
+        success: function(response) {
+            hideLoading();
             
-            $.ajax({
-                url: 'https://website-backendd-1.onrender.com/api/admin/auth/logout',
-                type: 'POST',
-                headers: {
-                    'Authorization': 'Bearer ' + authToken
-                },
-                success: function(response) {
-                    hideLoading();
-                    if (response.success) {
-                        localStorage.removeItem('adminToken');
-                        localStorage.removeItem('adminData');
-                        authToken = null;
-                        currentAdmin = null;
-                        
-                        if (socket) {
-                            socket.close();
-                            socket = null;
-                        }
-                        
-                        showLoginSection();
-                        toastr.success('Logout successful');
-                    } else {
-                        toastr.error(response.message || 'Logout failed');
-                    }
-                },
-                error: function(xhr, status, error) {
-                    hideLoading();
-                    localStorage.removeItem('adminToken');
-                    localStorage.removeItem('adminData');
-                    authToken = null;
-                    currentAdmin = null;
-                    
-                    if (socket) {
-                        socket.close();
-                        socket = null;
-                    }
-                    
-                    showLoginSection();
-                    toastr.success('Logged out');
-                }
-            });
-        }
-        
-        // Submit forgot password
-        function submitForgotPassword() {
-            const email = $('#forgotPasswordEmail').val();
-            
-            if (!email) {
-                toastr.error('Please enter your email address');
-                return;
+            if (response.status === 'success') {
+                authToken = response.token;
+                currentAdmin = null; // Will be fetched via verify endpoint
+                
+                localStorage.setItem('adminToken', authToken);
+                
+                // Verify admin and get full data
+                verifyAdminSession(response.token, csrfToken);
+            } else {
+                toastr.error(response.message || '2FA verification failed');
             }
-            
-            showLoading();
-            
-            $.ajax({
-                url: 'https://website-backendd-1.onrender.com/api/admin/auth/forgot-password',
-                type: 'POST',
-                data: {
-                    email: email
-                },
-                success: function(response) {
-                    hideLoading();
-                    if (response.success) {
-                        $('#forgotPasswordModal').removeClass('show');
-                        toastr.success(response.message || 'Password reset link sent to your email');
-                    } else {
-                        toastr.error(response.message || 'Failed to send password reset link');
-                    }
-                },
-                error: function(xhr, status, error) {
-                    hideLoading();
-                    toastr.error('Failed to send password reset link');
-                }
-            });
+        },
+        error: function(xhr) {
+            hideLoading();
+            const errorMsg = xhr.responseJSON?.message || '2FA verification failed';
+            toastr.error(errorMsg);
         }
-        
-        // Navigate to section
-        function navigateToSection(section) {
-            $('.admin-section').hide();
-            $('#' + section + 'Section').show();
-            $('.admin-sidebar-link').removeClass('active');
-            $('.admin-sidebar-link[data-section="' + section + '"]').addClass('active');
-            
-            // Load section data
-            switch (section) {
-                case 'dashboard':
-                    loadDashboardData();
-                    break;
-                case 'users':
-                    loadUsers();
-                    break;
-                case 'transactions':
-                    loadAllTransactions();
-                    break;
-                case 'investments':
-                    loadInvestmentPlans();
-                    break;
-                case 'withdrawals':
-                    loadPendingWithdrawals();
-                    break;
-                case 'deposits':
-                    loadPendingDeposits();
-                    break;
-                case 'support':
-                    loadSupportTickets();
-                    break;
-                case 'reports':
-                    loadReports();
-                    break;
-                case 'settings':
-                    loadGeneralSettings();
-                    break;
+    });
+}
+
+function verifyAdminSession(token, csrfToken) {
+    $.ajax({
+        url: 'https://website-backendd-1.onrender.com/api/admin/auth/verify',
+        type: 'GET',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'X-CSRF-Token': csrfToken
+        },
+        success: function(response) {
+            if (response.status === 'success') {
+                currentAdmin = response.data.admin;
+                localStorage.setItem('adminData', JSON.stringify(currentAdmin));
+                
+                showDashboardSection();
+                loadDashboardData();
+                connectWebSocket();
+                
+                toastr.success('Login successful');
+            } else {
+                toastr.error(response.message || 'Session verification failed');
             }
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || 'Session verification failed';
+            toastr.error(errorMsg);
         }
-        
+    });
+}
         // Load dashboard data
         function loadDashboardData() {
             showLoading();
