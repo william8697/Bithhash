@@ -4423,106 +4423,111 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 
-
-
-
 /**
- * Enterprise-grade Chat Widget for BitHash Support System
- * Designed to handle 5M+ users with high reliability and scalability
+ * Enterprise Chat Widget for BitHash Support System
+ * Designed to handle 5M+ users with high reliability
+ * Connects to backend: https://website-backendd-1.onrender.com
  */
-class BitHashChat {
-  constructor() {
-    // Configuration constants
-    this.CONFIG = {
-      WS_RECONNECT_INTERVAL: 5000, // 5 seconds
-      HEARTBEAT_INTERVAL: 25000, // 25 seconds
-      TYPING_INDICATOR_TIMEOUT: 3000, // 3 seconds
-      MAX_MESSAGE_LENGTH: 2000,
-      MAX_RETRIES: 3,
-      API_TIMEOUT: 10000, // 10 seconds
-      MESSAGE_HISTORY_LIMIT: 50,
-      RATE_LIMIT: {
-        MESSAGES: 10, // per 10 seconds
-        INTERVAL: 10000 // 10 seconds
-      }
-    };
 
-    // State management
+class BitHashEnterpriseChat {
+  constructor() {
+    // Core state management
     this.state = {
-      sessionId: this.generateUUID(),
+      sessionId: this.generateSessionId(),
       conversationId: null,
       userId: null,
       isAgent: false,
       isTyping: false,
       unreadMessages: 0,
-      socket: null,
-      heartbeatInterval: null,
-      typingTimeout: null,
-      retryCount: 0,
+      connectionAttempts: 0,
+      maxConnectionAttempts: 5,
+      reconnectDelay: 5000,
       messageQueue: [],
-      rateLimit: {
-        count: 0,
-        lastReset: Date.now()
-      },
-      online: navigator.onLine
+      isSending: false,
+      lastActivity: null,
+      connectionStatus: 'disconnected'
     };
 
-    // Initialize
+    // Performance tracking
+    this.metrics = {
+      messagesSent: 0,
+      messagesReceived: 0,
+      connectionTime: null,
+      latency: null
+    };
+
+    // DOM elements
+    this.elements = {};
+    
+    // WebSocket and API configuration
+    this.config = {
+      wsEndpoint: 'wss://website-backendd-1.onrender.com/api/support/ws',
+      apiBaseUrl: 'https://website-backendd-1.onrender.com/api/support',
+      heartbeatInterval: 25000, // 25 seconds
+      typingTimeoutDuration: 3000, // 3 seconds
+      maxMessageLength: 2000,
+      maxMessageQueueSize: 50,
+      messageRetryInterval: 3000 // 3 seconds
+    };
+
+    this.initialize();
+  }
+
+  // Initialization sequence
+  initialize() {
     this.initializeElements();
     this.setupEventListeners();
-    this.setupNetworkMonitoring();
-    this.initializeChat();
+    this.checkAuthentication();
+    this.setupActivityMonitor();
+    this.setupPerformanceMonitoring();
+    this.renderInitialState();
   }
 
-  // ======================
-  // Initialization Methods
-  // ======================
-
+  // DOM element initialization with error handling
   initializeElements() {
-    // Cache DOM elements
-    this.elements = {
-      container: document.getElementById('chat-widget-container'),
-      minimized: document.getElementById('chat-widget-minimized'),
-      toggleButton: document.getElementById('chat-toggle'),
-      openButton: document.getElementById('chat-open-button'),
-      chatWindow: document.querySelector('.chat-window'),
-      chatMessages: document.getElementById('chat-messages'),
-      chatInput: document.getElementById('chat-input'),
-      sendButton: document.getElementById('send-button'),
-      optionButtons: document.querySelectorAll('.option-button'),
-      endChatButton: document.getElementById('end-chat-button'),
-      unreadBadge: document.getElementById('unread-badge'),
-      statusIndicator: document.querySelector('.chat-status-indicator'),
-      loadingIndicator: document.getElementById('chat-loading-indicator'),
-      attachmentButton: document.getElementById('attachment-button'),
-      fileInput: document.getElementById('file-input'),
-      uploadProgress: document.getElementById('upload-progress')
-    };
+    try {
+      this.elements = {
+        container: document.getElementById('chat-widget-container'),
+        minimized: document.getElementById('chat-widget-minimized'),
+        toggleButton: document.getElementById('chat-toggle'),
+        openButton: document.getElementById('chat-open-button'),
+        chatWindow: document.querySelector('.chat-window'),
+        chatMessages: document.getElementById('chat-messages'),
+        chatInput: document.getElementById('chat-input'),
+        sendButton: document.getElementById('send-button'),
+        optionButtons: document.querySelectorAll('.option-button'),
+        endChatButton: document.getElementById('end-chat-button'),
+        unreadBadge: document.getElementById('unread-badge'),
+        statusIndicator: document.querySelector('.chat-status-indicator'),
+        loadingIndicator: document.getElementById('chat-loading-indicator'),
+        errorDisplay: document.getElementById('chat-error-display')
+      };
 
-    // Add ARIA attributes for accessibility
-    this.setAccessibilityAttributes();
+      // Validate all required elements exist
+      Object.entries(this.elements).forEach(([key, element]) => {
+        if (!element && key !== 'optionButtons') {
+          throw new Error(`Critical element missing: ${key}`);
+        }
+      });
+    } catch (error) {
+      console.error('Element initialization failed:', error);
+      this.showCriticalError('Chat system initialization failed. Please refresh the page.');
+    }
   }
 
-  setAccessibilityAttributes() {
-    this.elements.toggleButton.setAttribute('aria-label', 'Toggle chat window');
-    this.elements.openButton.setAttribute('aria-label', 'Open chat window');
-    this.elements.sendButton.setAttribute('aria-label', 'Send message');
-    this.elements.chatInput.setAttribute('aria-label', 'Type your message');
-    this.elements.chatMessages.setAttribute('aria-live', 'polite');
-  }
-
+  // Event listeners with proper memory management
   setupEventListeners() {
-    // Chat visibility
-    this.elements.toggleButton.addEventListener('click', () => this.toggleChat());
-    this.elements.openButton.addEventListener('click', () => this.openChat());
-
+    // Main chat controls
+    this.elements.toggleButton?.addEventListener('click', () => this.toggleChat());
+    this.elements.openButton?.addEventListener('click', () => this.openChat());
+    
     // Message sending
-    this.elements.sendButton.addEventListener('click', (e) => {
+    this.elements.sendButton?.addEventListener('click', (e) => {
       e.preventDefault();
       this.sendMessage();
     });
     
-    this.elements.chatInput.addEventListener('keydown', (e) => {
+    this.elements.chatInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         this.sendMessage();
@@ -4530,852 +4535,1067 @@ class BitHashChat {
         this.handleTyping();
       }
     });
-
-    // Quick options
-    this.elements.optionButtons.forEach(button => {
+    
+    // Quick option buttons
+    this.elements.optionButtons?.forEach(button => {
       button.addEventListener('click', () => {
         const question = button.getAttribute('data-question');
-        this.elements.chatInput.value = question;
-        this.elements.chatInput.focus();
+        this.setInputValue(question);
       });
     });
-
+    
     // Chat management
-    this.elements.endChatButton.addEventListener('click', () => this.endChat());
-
-    // Input adjustments
-    this.elements.chatInput.addEventListener('input', () => {
-      this.adjustTextareaHeight();
-      this.validateInput();
+    this.elements.endChatButton?.addEventListener('click', () => this.endChat());
+    
+    // Input auto-resize
+    this.elements.chatInput?.addEventListener('input', () => {
+      this.adjustInputHeight();
     });
-
-    // File attachments
-    this.elements.attachmentButton.addEventListener('click', () => {
-      this.elements.fileInput.click();
-    });
-
-    this.elements.fileInput.addEventListener('change', (e) => {
-      this.handleFileUpload(e.target.files[0]);
-      e.target.value = ''; // Reset file input
-    });
-
-    // Window events
-    window.addEventListener('beforeunload', () => this.cleanup());
-    window.addEventListener('online', () => this.handleOnlineStatusChange(true));
-    window.addEventListener('offline', () => this.handleOnlineStatusChange(false));
+    
+    // Window events for connection management
+    window.addEventListener('focus', () => this.checkConnectionState());
+    window.addEventListener('online', () => this.handleOnlineStatus());
+    window.addEventListener('offline', () => this.handleOfflineStatus());
   }
 
-  setupNetworkMonitoring() {
-    // Monitor network connectivity
-    this.networkCheckInterval = setInterval(() => {
-      const nowOnline = navigator.onLine;
-      if (nowOnline !== this.state.online) {
-        this.state.online = nowOnline;
-        this.handleOnlineStatusChange(nowOnline);
-      }
-    }, 5000);
-  }
-
-  // ======================
-  // Core Chat Functionality
-  // ======================
-
-  async initializeChat() {
+  // Authentication and session management
+  async checkAuthentication() {
     try {
-      this.showLoading(true);
-      
-      // Check authentication
       const token = this.getAuthToken();
+      
       if (!token) {
         this.showLoginPrompt();
         return;
       }
-
-      // Decode token to get user info
-      const userInfo = this.decodeJWT(token);
-      if (!userInfo) {
+      
+      const payload = this.decodeJWT(token);
+      
+      if (!payload || !payload.id) {
         this.showLoginPrompt();
         return;
       }
-
-      this.state.userId = userInfo.id;
-      this.state.isAgent = userInfo.isAdmin;
-
-      // Initialize WebSocket connection
-      this.connectWebSocket(token);
-
+      
+      this.state.userId = payload.id;
+      this.state.isAgent = payload.isAdmin || false;
+      
+      // Initialize connection
+      await this.initializeConnection(token);
+      
       // Load conversation history
       await this.loadConversation();
-
-      // Initialize analytics
-      this.logEvent('chat_widget_initialized');
+      
     } catch (error) {
-      console.error('Chat initialization error:', error);
-      this.addSystemMessage('Failed to initialize chat. Please refresh the page.', 'error');
-      this.logError('initialize_chat', error);
-    } finally {
-      this.showLoading(false);
+      console.error('Authentication check failed:', error);
+      this.showError('Failed to initialize chat session. Please try again.');
     }
   }
 
-  connectWebSocket(token) {
-    // Clean up any existing connection
-    if (this.state.socket) {
-      this.cleanupWebSocket();
-    }
-
-    // Create new WebSocket connection with retry logic
-    const wsEndpoint = this.getWSEndpoint();
-    this.state.socket = new WebSocket(wsEndpoint);
-
-    // Set up event handlers
-    this.state.socket.onopen = () => this.handleSocketOpen(token);
-    this.state.socket.onmessage = (event) => this.handleSocketMessage(event);
-    this.state.socket.onclose = (event) => this.handleSocketClose(event, token);
-    this.state.socket.onerror = (error) => this.handleSocketError(error);
-  }
-
-  handleSocketOpen(token) {
-    // Reset retry count on successful connection
-    this.state.retryCount = 0;
+  // Connection management
+  async initializeConnection(token) {
+    if (this.state.connectionStatus === 'connected') return;
     
-    // Update UI
-    this.updateConnectionStatus(true);
+    this.state.connectionStatus = 'connecting';
+    this.updateConnectionUI();
     
-    // Authenticate with the server
-    this.sendSocketMessage({
-      type: 'authenticate',
-      token: token,
-      sessionId: this.state.sessionId,
-      deviceInfo: this.getDeviceInfo()
-    });
-
-    // Start heartbeat
-    this.state.heartbeatInterval = setInterval(() => {
-      if (this.state.socket && this.state.socket.readyState === WebSocket.OPEN) {
-        this.sendSocketMessage({ type: 'heartbeat' });
-      }
-    }, this.CONFIG.HEARTBEAT_INTERVAL);
-
-    // Process any queued messages
-    this.processMessageQueue();
-  }
-
-  handleSocketMessage(event) {
     try {
-      const data = JSON.parse(event.data);
-      
-      // Validate message structure
-      if (!data || !data.type) {
-        console.warn('Received malformed message:', data);
-        return;
+      // Clear any existing connection
+      if (this.socket) {
+        this.socket.close();
+        clearInterval(this.heartbeatInterval);
       }
-
-      // Handle different message types
-      switch (data.type) {
-        case 'authentication':
-          this.handleAuthResponse(data);
-          break;
-        case 'new_message':
-          this.handleNewMessage(data);
-          break;
-        case 'system_message':
-          this.handleSystemMessage(data);
-          break;
-        case 'typing_indicator':
-          this.handleTypingIndicator(data);
-          break;
-        case 'conversation_update':
-          this.handleConversationUpdate(data);
-          break;
-        case 'message_read':
-          this.handleMessageRead(data);
-          break;
-        case 'file_upload':
-          this.handleFileUploadResponse(data);
-          break;
-        case 'heartbeat':
-          this.handleHeartbeat();
-          break;
-        default:
-          console.log('Unhandled message type:', data.type);
-      }
-    } catch (error) {
-      console.error('Error processing WebSocket message:', error);
-      this.logError('socket_message_processing', error);
-    }
-  }
-
-  handleSocketClose(event, token) {
-    this.updateConnectionStatus(false);
-    clearInterval(this.state.heartbeatInterval);
-
-    // Handle unexpected disconnects with exponential backoff
-    if (event.code !== 1000 && this.state.retryCount < this.CONFIG.MAX_RETRIES) {
-      const delay = Math.min(30000, 1000 * Math.pow(2, this.state.retryCount));
-      this.state.retryCount++;
       
-      setTimeout(() => {
-        if (!this.state.socket || this.state.socket.readyState === WebSocket.CLOSED) {
-          this.connectWebSocket(token);
+      // Initialize WebSocket
+      this.socket = new WebSocket(this.config.wsEndpoint);
+      
+      // Connection established
+      this.socket.onopen = () => {
+        this.state.connectionAttempts = 0;
+        this.state.connectionStatus = 'connected';
+        this.metrics.connectionTime = new Date();
+        this.updateConnectionUI();
+        
+        // Authenticate
+        this.socket.send(JSON.stringify({
+          type: 'authenticate',
+          token: token,
+          sessionId: this.state.sessionId,
+          userId: this.state.userId
+        }));
+        
+        // Start heartbeat
+        this.heartbeatInterval = setInterval(() => {
+          if (this.socket?.readyState === WebSocket.OPEN) {
+            const startTime = Date.now();
+            this.socket.send(JSON.stringify({ 
+              type: 'heartbeat',
+              timestamp: startTime
+            }));
+          }
+        }, this.config.heartbeatInterval);
+        
+        // Process any queued messages
+        this.processMessageQueue();
+      };
+      
+      // Message handling
+      this.socket.onmessage = (event) => {
+        this.state.lastActivity = new Date();
+        try {
+          const data = JSON.parse(event.data);
+          this.handleSocketMessage(data);
+        } catch (error) {
+          console.error('Message parsing error:', error);
+          this.logError('MESSAGE_PARSE_ERROR', error);
         }
-      }, delay);
+      };
+      
+      // Connection closed
+      this.socket.onclose = (event) => {
+        this.state.connectionStatus = 'disconnected';
+        this.updateConnectionUI();
+        clearInterval(this.heartbeatInterval);
+        
+        // Reconnect logic (only for unexpected closures)
+        if (event.code !== 1000 && this.state.connectionAttempts < this.state.maxConnectionAttempts) {
+          this.state.connectionAttempts++;
+          const delay = this.calculateReconnectDelay();
+          
+          setTimeout(() => {
+            if (this.state.connectionStatus !== 'connected') {
+              this.initializeConnection(token);
+            }
+          }, delay);
+        }
+      };
+      
+      // Error handling
+      this.socket.onerror = (error) => {
+        this.state.connectionStatus = 'error';
+        this.updateConnectionUI();
+        console.error('WebSocket error:', error);
+        this.logError('WEBSOCKET_ERROR', error);
+      };
+      
+    } catch (error) {
+      console.error('Connection initialization failed:', error);
+      this.state.connectionStatus = 'error';
+      this.updateConnectionUI();
+      this.logError('CONNECTION_INIT_ERROR', error);
     }
   }
 
-  handleSocketError(error) {
-    console.error('WebSocket error:', error);
-    this.logError('websocket_error', error);
-    this.updateConnectionStatus(false);
+  // Message handling with proper validation
+  handleSocketMessage(data) {
+    if (!data || !data.type) {
+      console.warn('Received malformed message:', data);
+      return;
+    }
+
+    // Update last activity timestamp
+    this.state.lastActivity = new Date();
+    
+    // Handle heartbeat responses for latency calculation
+    if (data.type === 'heartbeat_response' && data.timestamp) {
+      this.metrics.latency = Date.now() - data.timestamp;
+      return;
+    }
+
+    // Process different message types
+    switch (data.type) {
+      case 'authentication':
+        this.handleAuthResponse(data);
+        break;
+      
+      case 'new_message':
+        this.handleNewMessage(data);
+        break;
+        
+      case 'system_message':
+        this.handleSystemMessage(data);
+        break;
+        
+      case 'typing_indicator':
+        this.handleTypingIndicator(data);
+        break;
+        
+      case 'conversation_update':
+        this.handleConversationUpdate(data);
+        break;
+        
+      case 'conversations_list':
+        this.handleConversationsList(data);
+        break;
+        
+      case 'error':
+        this.handleErrorMessage(data);
+        break;
+        
+      case 'rate_limit':
+        this.handleRateLimit(data);
+        break;
+        
+      default:
+        console.warn('Unhandled message type:', data.type);
+        this.logError('UNHANDLED_MESSAGE_TYPE', data);
+    }
   }
 
-  // ======================
-  // Message Handling
-  // ======================
+  // Specific message handlers
+  handleAuthResponse(data) {
+    if (data.success) {
+      console.log('WebSocket authenticated successfully');
+      if (data.userType === 'agent') {
+        this.state.isAgent = true;
+      }
+      this.state.connectionStatus = 'connected';
+      this.updateConnectionUI();
+    } else {
+      this.state.connectionStatus = 'authentication_failed';
+      this.updateConnectionUI();
+      this.showError('Authentication failed. Please login again.');
+      this.logError('AUTHENTICATION_FAILED', data);
+    }
+  }
 
+  handleNewMessage(data) {
+    if (!this.validateMessage(data.message)) return;
+    
+    const { message, sender, conversationId, timestamp } = data.message;
+    
+    // Only display if it's for the current conversation or a new one
+    if (!this.state.conversationId || conversationId === this.state.conversationId) {
+      this.addMessage(message, sender, new Date(timestamp));
+      this.metrics.messagesReceived++;
+      
+      if (!this.elements.container.classList.contains('open')) {
+        this.incrementUnread();
+      }
+      
+      // Update conversation ID if this is a new conversation
+      if (!this.state.conversationId && conversationId) {
+        this.state.conversationId = conversationId;
+      }
+    }
+  }
+
+  handleSystemMessage(data) {
+    if (!data.message) return;
+    
+    this.addSystemMessage(data.message);
+    this.metrics.messagesReceived++;
+    
+    if (!this.elements.container.classList.contains('open')) {
+      this.incrementUnread();
+    }
+  }
+
+  handleTypingIndicator(data) {
+    if (!data.conversationId || data.conversationId !== this.state.conversationId) return;
+    
+    if (data.isTyping) {
+      this.showTypingIndicator(data.senderName || 'Agent');
+    } else {
+      this.hideTypingIndicator();
+    }
+  }
+
+  handleConversationUpdate(data) {
+    if (!data.conversationId) return;
+    
+    if (data.status === 'closed' && data.conversationId === this.state.conversationId) {
+      this.showRatingSystem();
+      this.state.conversationId = null;
+      this.addSystemMessage('The support agent has ended the chat session.');
+    }
+  }
+
+  handleConversationsList(data) {
+    if (!data.conversations || !Array.isArray(data.conversations)) return;
+    
+    const activeConv = data.conversations.find(c => 
+      ['open', 'active', 'waiting'].includes(c.status)
+    );
+    
+    if (activeConv) {
+      this.state.conversationId = activeConv.conversationId;
+      this.loadMessages();
+    } else if (this.state.isAgent) {
+      // Agent-specific handling for available conversations
+    }
+  }
+
+  handleErrorMessage(data) {
+    console.error('Server error:', data.error);
+    this.addSystemMessage(`Error: ${data.error || 'An unknown error occurred'}`);
+    this.logError('SERVER_ERROR', data);
+  }
+
+  handleRateLimit(data) {
+    console.warn('Rate limit exceeded:', data);
+    this.addSystemMessage('Please wait a moment before sending another message.');
+    this.logError('RATE_LIMIT_EXCEEDED', data);
+  }
+
+  // Message sending with queue management
   async sendMessage() {
-    const message = this.elements.chatInput.value.trim();
+    const message = this.getInputValue().trim();
     
     // Validate message
     if (!message) return;
-    if (message.length > this.CONFIG.MAX_MESSAGE_LENGTH) {
-      this.addSystemMessage(`Message too long. Maximum ${this.CONFIG.MAX_MESSAGE_LENGTH} characters allowed.`, 'error');
+    if (message.length > this.config.maxMessageLength) {
+      this.addSystemMessage(`Message too long. Maximum ${this.config.maxMessageLength} characters allowed.`);
       return;
     }
-
-    // Check rate limiting
-    if (this.isRateLimited()) {
-      this.addSystemMessage('Sending messages too quickly. Please wait a moment.', 'warning');
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.queueMessage(message);
       return;
     }
-
+    
+    // Add to UI immediately for better UX
+    this.addMessage(message, 'user', new Date());
+    this.clearInput();
+    
     try {
-      // Add to UI immediately for better UX
-      this.addMessage(message, 'user');
-      this.elements.chatInput.value = '';
-      this.adjustTextareaHeight();
-      this.updateRateLimit();
-
-      // If socket is not ready, queue the message
-      if (!this.state.socket || this.state.socket.readyState !== WebSocket.OPEN) {
-        this.queueMessage(message);
-        this.addSystemMessage('Connection lost. Messages will be sent when reconnected.', 'warning');
-        return;
-      }
-
       // Create conversation if needed
       if (!this.state.conversationId) {
         await this.createConversation(message);
       }
-
-      // Send message via WebSocket
-      this.sendSocketMessage({
+      
+      // Send via WebSocket
+      const messageData = {
         type: 'new_message',
         conversationId: this.state.conversationId,
         message: message,
         sender: 'user',
         senderId: this.state.userId,
-        timestamp: new Date().toISOString(),
-        messageId: this.generateUUID()
-      });
-
-      // Reset typing indicator
-      this.resetTypingIndicator();
-
-      // Analytics
-      this.logEvent('message_sent', { length: message.length });
-
+        sessionId: this.state.sessionId,
+        timestamp: new Date().toISOString()
+      };
+      
+      this.socket.send(JSON.stringify(messageData));
+      this.metrics.messagesSent++;
+      
+      // Clear typing indicator
+      this.sendTypingIndicator(false);
+      
     } catch (error) {
-      console.error('Error sending message:', error);
-      this.addSystemMessage('Failed to send message. Please try again.', 'error');
-      this.logError('send_message', error);
+      console.error('Message sending failed:', error);
+      this.queueMessage(message);
+      this.addSystemMessage('Failed to send message. Will retry...');
+      this.logError('MESSAGE_SEND_ERROR', error);
     }
   }
 
+  // Queue management for offline/error scenarios
   queueMessage(message) {
-    this.state.messageQueue.push({
-      type: 'new_message',
-      message: message,
-      timestamp: Date.now()
-    });
-    
-    // Store in localStorage for persistence
-    this.persistMessageQueue();
-  }
-
-  processMessageQueue() {
-    while (this.state.messageQueue.length > 0) {
-      const queuedMessage = this.state.messageQueue.shift();
-      this.sendSocketMessage({
-        type: queuedMessage.type,
-        conversationId: this.state.conversationId,
-        message: queuedMessage.message,
-        sender: 'user',
-        senderId: this.state.userId,
-        timestamp: new Date(queuedMessage.timestamp).toISOString(),
-        messageId: this.generateUUID()
-      });
-    }
-    
-    // Clear persisted queue
-    this.clearPersistedQueue();
-  }
-
-  handleNewMessage(data) {
-    // Validate message data
-    if (!data.message || !data.sender || !data.messageId) {
-      console.warn('Invalid message format:', data);
+    if (this.state.messageQueue.length >= this.config.maxMessageQueueSize) {
+      this.addSystemMessage('Too many pending messages. Please try again later.');
       return;
     }
-
-    // Add message to UI
-    this.addMessage(data.message, data.sender, data.timestamp, data.messageId);
-
-    // Mark as read if chat is open
-    if (this.elements.container.classList.contains('open')) {
-      this.sendReadReceipt(data.messageId);
-    } else {
-      this.incrementUnread();
+    
+    this.state.messageQueue.push(message);
+    this.addSystemMessage('Message queued. Will send when connection is restored.');
+    
+    // Start processing if not already doing so
+    if (!this.state.isSending) {
+      this.processMessageQueue();
     }
   }
 
-  sendReadReceipt(messageId) {
-    if (this.state.socket && this.state.socket.readyState === WebSocket.OPEN) {
-      this.sendSocketMessage({
-        type: 'message_read',
-        messageId: messageId,
-        conversationId: this.state.conversationId,
-        readerId: this.state.userId,
-        timestamp: new Date().toISOString()
-      });
-    }
-  }
-
-  // ======================
-  // Conversation Management
-  // ======================
-
-  async loadConversation() {
+  async processMessageQueue() {
+    if (this.state.isSending || this.state.messageQueue.length === 0) return;
+    
+    this.state.isSending = true;
+    
     try {
-      const response = await this.apiRequest(
-        'GET',
-        '/api/support/conversations',
-        null,
-        true
-      );
-
-      if (response && response.data) {
-        const activeConversation = response.data.find(c => 
-          ['open', 'active', 'waiting'].includes(c.status)
-        );
-
-        if (activeConversation) {
-          this.state.conversationId = activeConversation.conversationId;
-          await this.loadMessages();
-          this.logEvent('existing_conversation_loaded');
+      while (this.state.messageQueue.length > 0) {
+        const message = this.state.messageQueue[0];
+        
+        // Ensure we have an active conversation
+        if (!this.state.conversationId) {
+          await this.createConversation(message);
+        }
+        
+        // Send the message
+        if (this.socket?.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({
+            type: 'new_message',
+            conversationId: this.state.conversationId,
+            message: message,
+            sender: 'user',
+            senderId: this.state.userId,
+            sessionId: this.state.sessionId,
+            timestamp: new Date().toISOString()
+          }));
+          
+          this.metrics.messagesSent++;
+          this.state.messageQueue.shift();
         } else {
-          this.addSystemMessage('Welcome to BitHash support. How can we help you today?');
-          this.logEvent('new_conversation_started');
+          // Wait for connection to be restored
+          await new Promise(resolve => setTimeout(resolve, this.config.messageRetryInterval));
         }
       }
     } catch (error) {
-      console.error('Error loading conversation:', error);
-      this.addSystemMessage('Failed to load conversation history.', 'error');
-      this.logError('load_conversation', error);
+      console.error('Message queue processing failed:', error);
+      this.logError('QUEUE_PROCESSING_ERROR', error);
+    } finally {
+      this.state.isSending = false;
     }
   }
 
+  // Conversation management
   async createConversation(initialMessage) {
     try {
-      const response = await this.apiRequest(
-        'POST',
-        '/api/support/conversations',
-        {
-          message: initialMessage,
-          topic: 'general',
-          priority: 'medium',
-          metadata: {
-            userAgent: navigator.userAgent,
-            pageUrl: window.location.href,
-            referrer: document.referrer
-          }
-        },
-        true
-      );
-
-      if (response && response.data && response.data.conversation) {
+      const response = await this.apiRequest('/conversations', 'POST', {
+        message: initialMessage,
+        topic: 'general',
+        priority: 'medium',
+        sessionId: this.state.sessionId
+      });
+      
+      if (response?.data?.conversation?.conversationId) {
         this.state.conversationId = response.data.conversation.conversationId;
-        this.logEvent('conversation_created');
+        return true;
       }
+      
+      throw new Error('Invalid response format');
     } catch (error) {
-      console.error('Error creating conversation:', error);
+      console.error('Conversation creation failed:', error);
+      this.addSystemMessage('Failed to start conversation. Please try again.');
+      this.logError('CONVERSATION_CREATION_ERROR', error);
       throw error;
     }
   }
 
-  async loadMessages() {
-    if (!this.state.conversationId) return;
-
+  async loadConversation() {
     try {
-      const response = await this.apiRequest(
-        'GET',
-        `/api/support/conversations/${this.state.conversationId}/messages`,
-        null,
-        true
-      );
+      const response = await this.apiRequest('/conversations');
+      
+      if (response?.data) {
+        const activeConversation = response.data.find(c => 
+          ['open', 'active', 'waiting'].includes(c.status)
+        );
+        
+        if (activeConversation) {
+          this.state.conversationId = activeConversation.conversationId;
+          await this.loadMessages();
+        } else {
+          this.addSystemMessage('Welcome to BitHash support. How can we help you today?');
+        }
+        return true;
+      }
+      
+      throw new Error('Invalid response format');
+    } catch (error) {
+      console.error('Conversation loading failed:', error);
+      this.addSystemMessage('Failed to load conversation history.');
+      this.logError('CONVERSATION_LOAD_ERROR', error);
+      return false;
+    }
+  }
 
-      if (response && response.data) {
-        // Clear existing messages but keep system messages
-        const systemMessages = Array.from(this.elements.chatMessages.querySelectorAll('.message-system'));
+  async loadMessages() {
+    if (!this.state.conversationId) return false;
+    
+    try {
+      this.showLoading(true);
+      
+      const response = await this.apiRequest(`/conversations/${this.state.conversationId}/messages`);
+      
+      if (response?.data) {
         this.elements.chatMessages.innerHTML = '';
-        systemMessages.forEach(msg => this.elements.chatMessages.appendChild(msg));
-
-        // Add loaded messages
-        response.data.slice(-this.CONFIG.MESSAGE_HISTORY_LIMIT).forEach(message => {
+        response.data.forEach(message => {
           if (message.sender === 'system') {
-            this.addSystemMessage(message.content);
+            this.addSystemMessage(message.content, new Date(message.timestamp));
           } else {
-            this.addMessage(message.content, message.sender, message.timestamp, message.messageId);
+            this.addMessage(message.content, message.sender, new Date(message.timestamp));
           }
         });
-
+        
         this.scrollToBottom();
+        return true;
       }
+      
+      throw new Error('Invalid response format');
     } catch (error) {
-      console.error('Error loading messages:', error);
-      this.addSystemMessage('Failed to load messages.', 'error');
-      this.logError('load_messages', error);
+      console.error('Message loading failed:', error);
+      this.addSystemMessage('Failed to load messages.');
+      this.logError('MESSAGE_LOAD_ERROR', error);
+      return false;
+    } finally {
+      this.showLoading(false);
     }
   }
 
   async endChat() {
     if (!this.state.conversationId) return;
-
+    
     try {
-      await this.apiRequest(
-        'POST',
-        `/api/support/conversations/${this.state.conversationId}/end`,
-        null,
-        true
-      );
-
-      this.addSystemMessage('Chat session ended. Thank you for contacting BitHash support.');
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify({
+          type: 'close_conversation',
+          conversationId: this.state.conversationId,
+          sessionId: this.state.sessionId
+        }));
+      }
+      
+      await this.apiRequest(`/conversations/${this.state.conversationId}/close`, 'POST');
+      
+      this.addSystemMessage('You have ended the chat session. Thank you for contacting BitHash support.');
       this.state.conversationId = null;
-      this.logEvent('conversation_ended');
+      
+      // Show rating for ended chats
+      this.showRatingSystem();
     } catch (error) {
-      console.error('Error ending chat:', error);
-      this.addSystemMessage('Failed to end chat session.', 'error');
-      this.logError('end_chat', error);
+      console.error('Chat ending failed:', error);
+      this.addSystemMessage('Failed to end chat session.');
+      this.logError('CHAT_END_ERROR', error);
     }
   }
 
-  // ======================
-  // File Handling
-  // ======================
-
-  async handleFileUpload(file) {
-    if (!file) return;
-
-    // Validate file
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    if (file.size > maxSize) {
-      this.addSystemMessage('File too large. Maximum size is 10MB.', 'error');
-      return;
+  // Typing indicators
+  handleTyping() {
+    if (!this.state.isTyping && this.state.conversationId) {
+      this.state.isTyping = true;
+      this.sendTypingIndicator(true);
+      
+      clearTimeout(this.typingTimeout);
+      this.typingTimeout = setTimeout(() => {
+        if (this.state.isTyping) {
+          this.sendTypingIndicator(false);
+        }
+      }, this.config.typingTimeoutDuration);
     }
+  }
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf', 'text/plain'];
-    if (!allowedTypes.includes(file.type)) {
-      this.addSystemMessage('File type not supported. Please upload JPEG, PNG, PDF, or TXT.', 'error');
-      return;
-    }
-
+  sendTypingIndicator(isTyping) {
+    if (!this.state.conversationId || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    
     try {
-      // Show upload progress
-      this.showUploadProgress(true);
-
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('conversationId', this.state.conversationId || '');
-      formData.append('senderId', this.state.userId);
-
-      const response = await fetch(this.getAPIEndpoint('/api/support/upload'), {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.getAuthToken()}`
-        },
-        body: formData
-      });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.status}`);
-      }
-
-      const data = await response.json();
-      this.addSystemMessage('File uploaded successfully!');
-      this.logEvent('file_uploaded', { fileType: file.type, fileSize: file.size });
-
-      // If we don't have a conversation, create one with the file as first message
-      if (!this.state.conversationId && data.conversationId) {
-        this.state.conversationId = data.conversationId;
-      }
-
+      this.socket.send(JSON.stringify({
+        type: 'typing_indicator',
+        conversationId: this.state.conversationId,
+        isTyping: isTyping,
+        senderId: this.state.userId,
+        sessionId: this.state.sessionId
+      }));
+      
+      this.state.isTyping = !isTyping;
     } catch (error) {
-      console.error('File upload error:', error);
-      this.addSystemMessage('Failed to upload file. Please try again.', 'error');
-      this.logError('file_upload', error);
-    } finally {
-      this.showUploadProgress(false);
+      console.error('Typing indicator failed:', error);
+      this.logError('TYPING_INDICATOR_ERROR', error);
     }
   }
 
-  handleFileUploadResponse(data) {
-    if (!data.success || !data.fileUrl) {
-      this.addSystemMessage('Failed to process file upload.', 'error');
-      return;
-    }
-
-    // Add file message to chat
-    const fileType = data.fileType || 'file';
-    const message = `[${fileType.toUpperCase()}] ${data.fileName || 'Attachment'}: ${data.fileUrl}`;
-    this.addMessage(message, data.sender, data.timestamp, data.messageId);
+  // Rating system
+  showRatingSystem() {
+    // Remove any existing rating UI
+    const existingRating = this.elements.chatMessages.querySelector('.rating-container');
+    if (existingRating) return;
+    
+    const ratingContainer = document.createElement('div');
+    ratingContainer.classList.add('rating-container');
+    ratingContainer.innerHTML = `
+      <div class="rating-title">How would you rate your support experience?</div>
+      <div class="rating-stars">
+        <span class="rating-star" data-rating="1">★</span>
+        <span class="rating-star" data-rating="2">★</span>
+        <span class="rating-star" data-rating="3">★</span>
+        <span class="rating-star" data-rating="4">★</span>
+        <span class="rating-star" data-rating="5">★</span>
+      </div>
+      <textarea class="rating-feedback" placeholder="Optional feedback (max 500 chars)" maxlength="500"></textarea>
+      <button class="rating-submit">Submit Rating</button>
+    `;
+    
+    this.elements.chatMessages.appendChild(ratingContainer);
+    
+    // Star interaction
+    const stars = ratingContainer.querySelectorAll('.rating-star');
+    stars.forEach(star => {
+      star.addEventListener('click', () => {
+        stars.forEach((s, i) => {
+          s.classList.toggle('active', i < star.dataset.rating);
+        });
+      });
+    });
+    
+    // Rating submission
+    const submitButton = ratingContainer.querySelector('.rating-submit');
+    submitButton.addEventListener('click', async () => {
+      const selectedStar = ratingContainer.querySelector('.rating-star.active:last-child');
+      if (!selectedStar) {
+        this.addSystemMessage('Please select a rating before submitting.');
+        return;
+      }
+      
+      const rating = parseInt(selectedStar.dataset.rating);
+      const feedback = ratingContainer.querySelector('.rating-feedback').value.trim();
+      
+      await this.submitRating(rating, feedback);
+    });
   }
 
-  // ======================
-  // UI Methods
-  // ======================
+  async submitRating(rating, feedback = '') {
+    if (!this.state.conversationId) return;
+    
+    try {
+      const response = await this.apiRequest(
+        `/conversations/${this.state.conversationId}/rating`, 
+        'POST', 
+        { rating, feedback }
+      );
+      
+      if (response.success) {
+        this.addSystemMessage('Thank you for your feedback!');
+        
+        // Remove rating UI
+        const ratingContainer = this.elements.chatMessages.querySelector('.rating-container');
+        if (ratingContainer) {
+          ratingContainer.remove();
+        }
+      } else {
+        throw new Error(response.error || 'Failed to submit rating');
+      }
+    } catch (error) {
+      console.error('Rating submission failed:', error);
+      this.addSystemMessage('Failed to submit rating. Please try again.');
+      this.logError('RATING_SUBMISSION_ERROR', error);
+    }
+  }
 
-  addMessage(content, sender, timestamp, messageId) {
+  // UI Helpers
+  addMessage(content, sender, timestamp = new Date()) {
+    if (!content || !sender) return;
+    
     const messageElement = document.createElement('div');
     messageElement.classList.add('message', `message-${sender}`);
-    if (messageId) messageElement.dataset.messageId = messageId;
-
+    
     const messageContent = document.createElement('div');
     messageContent.classList.add('message-content');
-    
-    // Handle URLs and file links
-    if (typeof content === 'string' && content.match(/(http|https):\/\/([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:\/~+#-]*[\w@?^=%&\/~+#-])/)) {
-      content = this.linkify(content);
-    }
-    messageContent.innerHTML = content;
-
+    messageContent.textContent = content;
     messageElement.appendChild(messageContent);
-
+    
+    const messageMeta = document.createElement('div');
+    messageMeta.classList.add('message-meta');
+    
     const timeElement = document.createElement('span');
     timeElement.classList.add('message-time');
-    timeElement.textContent = this.formatTime(timestamp ? new Date(timestamp) : new Date());
-    messageElement.appendChild(timeElement);
-
+    timeElement.textContent = this.formatTime(timestamp);
+    messageMeta.appendChild(timeElement);
+    
+    if (sender !== 'user') {
+      const senderElement = document.createElement('span');
+      senderElement.classList.add('message-sender');
+      senderElement.textContent = sender === 'agent' ? 'Support Agent' : 'System';
+      messageMeta.appendChild(senderElement);
+    }
+    
+    messageElement.appendChild(messageMeta);
     this.elements.chatMessages.appendChild(messageElement);
     this.scrollToBottom();
   }
 
-  addSystemMessage(content, type = 'info') {
+  addSystemMessage(content, timestamp = new Date()) {
+    if (!content) return;
+    
     const messageElement = document.createElement('div');
-    messageElement.classList.add('message', 'message-system', `system-${type}`);
-    messageElement.textContent = content;
+    messageElement.classList.add('message', 'message-system');
+    
+    const messageContent = document.createElement('div');
+    messageContent.classList.add('message-content');
+    messageContent.textContent = content;
+    messageElement.appendChild(messageContent);
+    
+    const timeElement = document.createElement('span');
+    timeElement.classList.add('message-time');
+    timeElement.textContent = this.formatTime(timestamp);
+    messageElement.appendChild(timeElement);
+    
     this.elements.chatMessages.appendChild(messageElement);
     this.scrollToBottom();
   }
 
-  showTypingIndicator() {
+  showTypingIndicator(senderName = 'Agent') {
     this.hideTypingIndicator();
     
     const typingElement = document.createElement('div');
     typingElement.classList.add('typing-indicator');
-    typingElement.setAttribute('aria-label', 'Agent is typing');
     typingElement.innerHTML = `
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
+      <div class="typing-sender">${senderName} is typing</div>
+      <div class="typing-dots">
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+      </div>
     `;
     this.elements.chatMessages.appendChild(typingElement);
     this.scrollToBottom();
   }
 
-  showRatingSystem() {
-    const ratingContainer = document.createElement('div');
-    ratingContainer.classList.add('rating-container');
-    ratingContainer.innerHTML = `
-      <div class="rating-title">How would you rate this support session?</div>
-      <div class="rating-stars" role="radiogroup">
-        <span class="rating-star" data-rating="1" role="radio" aria-checked="false" tabindex="0">★</span>
-        <span class="rating-star" data-rating="2" role="radio" aria-checked="false" tabindex="0">★</span>
-        <span class="rating-star" data-rating="3" role="radio" aria-checked="false" tabindex="0">★</span>
-        <span class="rating-star" data-rating="4" role="radio" aria-checked="false" tabindex="0">★</span>
-        <span class="rating-star" data-rating="5" role="radio" aria-checked="false" tabindex="0">★</span>
-      </div>
+  hideTypingIndicator() {
+    const existingIndicator = this.elements.chatMessages.querySelector('.typing-indicator');
+    if (existingIndicator) {
+      existingIndicator.remove();
+    }
+  }
+
+  showLoading(show) {
+    if (this.elements.loadingIndicator) {
+      this.elements.loadingIndicator.style.display = show ? 'block' : 'none';
+    }
+  }
+
+  showError(message) {
+    if (this.elements.errorDisplay) {
+      this.elements.errorDisplay.textContent = message;
+      this.elements.errorDisplay.style.display = 'block';
+      
+      setTimeout(() => {
+        this.elements.errorDisplay.style.display = 'none';
+      }, 5000);
+    }
+  }
+
+  showCriticalError(message) {
+    const errorElement = document.createElement('div');
+    errorElement.classList.add('chat-critical-error');
+    errorElement.innerHTML = `
+      <div class="error-icon">!</div>
+      <div class="error-message">${message}</div>
+      <button class="error-retry">Retry</button>
     `;
     
-    this.elements.chatMessages.appendChild(ratingContainer);
+    this.elements.chatWindow.innerHTML = '';
+    this.elements.chatWindow.appendChild(errorElement);
     
-    const stars = ratingContainer.querySelectorAll('.rating-star');
-    stars.forEach(star => {
-      star.addEventListener('click', () => this.submitRating(star.dataset.rating));
-      star.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          this.submitRating(star.dataset.rating);
-        }
-      });
-      star.addEventListener('mouseover', () => this.highlightStars(star.dataset.rating));
-    });
-    
-    ratingContainer.addEventListener('mouseleave', () => {
-      stars.forEach(star => star.classList.remove('active'));
+    errorElement.querySelector('.error-retry').addEventListener('click', () => {
+      window.location.reload();
     });
   }
 
-  // ======================
-  // Utility Methods
-  // ======================
-
-  async apiRequest(method, endpoint, data = null, auth = false) {
-    const url = this.getAPIEndpoint(endpoint);
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-
-    if (auth) {
-      const token = this.getAuthToken();
-      if (!token) throw new Error('No auth token available');
-      headers['Authorization'] = `Bearer ${token}`;
+  showLoginPrompt() {
+    this.addSystemMessage('Please login to use the chat support.');
+    
+    if (this.elements.chatInput && this.elements.sendButton) {
+      this.elements.chatInput.disabled = true;
+      this.elements.sendButton.disabled = true;
     }
+    
+    // Add login button
+    const loginButton = document.createElement('button');
+    loginButton.classList.add('chat-login-button');
+    loginButton.textContent = 'Login to BitHash';
+    loginButton.addEventListener('click', () => {
+      window.location.href = '/login?redirect=' + encodeURIComponent(window.location.pathname);
+    });
+    
+    this.elements.chatMessages.appendChild(loginButton);
+  }
 
-    const options = {
-      method: method,
-      headers: headers,
-      signal: AbortSignal.timeout(this.CONFIG.API_TIMEOUT)
-    };
-
-    if (data) {
-      options.body = JSON.stringify(data);
-    }
-
-    try {
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `API request failed with status ${response.status}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error(`API request error (${method} ${endpoint}):`, error);
-      throw error;
+  // Chat window management
+  toggleChat() {
+    this.elements.container.classList.toggle('open');
+    this.elements.minimized.style.display = this.elements.container.classList.contains('open') ? 'none' : 'flex';
+    
+    if (this.elements.container.classList.contains('open')) {
+      this.resetUnread();
+      this.scrollToBottom();
     }
   }
 
-  sendSocketMessage(data) {
-    if (this.state.socket && this.state.socket.readyState === WebSocket.OPEN) {
-      try {
-        this.state.socket.send(JSON.stringify(data));
-      } catch (error) {
-        console.error('Error sending WebSocket message:', error);
-        this.logError('send_socket_message', error);
-      }
+  openChat() {
+    this.elements.container.classList.add('open');
+    this.elements.minimized.style.display = 'none';
+    this.resetUnread();
+    this.scrollToBottom();
+  }
+
+  closeChat() {
+    this.elements.container.classList.remove('open');
+    this.elements.minimized.style.display = 'flex';
+  }
+
+  incrementUnread() {
+    this.state.unreadMessages++;
+    
+    if (this.elements.unreadBadge) {
+      this.elements.unreadBadge.textContent = Math.min(this.state.unreadMessages, 99);
+      this.elements.unreadBadge.style.display = 'flex';
     }
   }
 
-  adjustTextareaHeight() {
+  resetUnread() {
+    this.state.unreadMessages = 0;
+    
+    if (this.elements.unreadBadge) {
+      this.elements.unreadBadge.style.display = 'none';
+    }
+  }
+
+  scrollToBottom() {
+    if (this.elements.chatMessages) {
+      this.elements.chatMessages.scrollTop = this.elements.chatMessages.scrollHeight;
+    }
+  }
+
+  adjustInputHeight() {
+    if (!this.elements.chatInput) return;
+    
     this.elements.chatInput.style.height = 'auto';
-    this.elements.chatInput.style.height = `${Math.min(this.elements.chatInput.scrollHeight, 100)}px`;
+    this.elements.chatInput.style.height = `${Math.min(this.elements.chatInput.scrollHeight, 150)}px`;
   }
 
-  validateInput() {
-    const message = this.elements.chatInput.value;
-    if (message.length > this.CONFIG.MAX_MESSAGE_LENGTH) {
-      this.elements.chatInput.classList.add('invalid');
-    } else {
-      this.elements.chatInput.classList.remove('invalid');
+  setInputValue(value) {
+    if (this.elements.chatInput) {
+      this.elements.chatInput.value = value;
+      this.elements.chatInput.focus();
+      this.adjustInputHeight();
     }
   }
 
-  updateConnectionStatus(connected) {
-    this.elements.statusIndicator.style.backgroundColor = connected ? 'var(--success)' : 'var(--error)';
-    this.elements.statusIndicator.setAttribute('title', connected ? 'Connected' : 'Disconnected');
+  getInputValue() {
+    return this.elements.chatInput?.value || '';
+  }
+
+  clearInput() {
+    if (this.elements.chatInput) {
+      this.elements.chatInput.value = '';
+      this.elements.chatInput.style.height = 'auto';
+    }
+  }
+
+  updateConnectionUI() {
+    if (!this.elements.statusIndicator) return;
     
-    if (!connected) {
-      this.addSystemMessage('Connection lost. Reconnecting...', 'warning');
-    } else if (this.state.retryCount > 0) {
-      this.addSystemMessage('Connection restored!', 'success');
+    switch (this.state.connectionStatus) {
+      case 'connected':
+        this.elements.statusIndicator.style.backgroundColor = '#4CAF50';
+        this.elements.statusIndicator.title = 'Connected';
+        break;
+      case 'connecting':
+        this.elements.statusIndicator.style.backgroundColor = '#FFC107';
+        this.elements.statusIndicator.title = 'Connecting...';
+        break;
+      case 'disconnected':
+        this.elements.statusIndicator.style.backgroundColor = '#F44336';
+        this.elements.statusIndicator.title = 'Disconnected';
+        break;
+      case 'error':
+        this.elements.statusIndicator.style.backgroundColor = '#9C27B0';
+        this.elements.statusIndicator.title = 'Connection Error';
+        break;
+      default:
+        this.elements.statusIndicator.style.backgroundColor = '#9E9E9E';
     }
   }
 
-  handleOnlineStatusChange(online) {
-    this.state.online = online;
-    if (online) {
-      this.addSystemMessage('You are back online.', 'success');
-      const token = this.getAuthToken();
-      if (token) this.connectWebSocket(token);
-    } else {
-      this.addSystemMessage('You are offline. Messages will be sent when you reconnect.', 'warning');
-    }
+  // Utility functions
+  generateSessionId() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
   }
 
-  // ======================
-  // Cleanup Methods
-  // ======================
-
-  cleanup() {
-    // Close WebSocket connection
-    this.cleanupWebSocket();
-    
-    // Clear intervals
-    clearInterval(this.state.heartbeatInterval);
-    clearInterval(this.networkCheckInterval);
-    
-    // Clear timeouts
-    clearTimeout(this.state.typingTimeout);
-    
-    // Persist any unsent messages
-    if (this.state.messageQueue.length > 0) {
-      this.persistMessageQueue();
-    }
-  }
-
-  cleanupWebSocket() {
-    if (this.state.socket) {
-      // Remove event listeners to prevent memory leaks
-      this.state.socket.onopen = null;
-      this.state.socket.onmessage = null;
-      this.state.socket.onclose = null;
-      this.state.socket.onerror = null;
-      
-      // Close connection if not already closed
-      if (this.state.socket.readyState === WebSocket.OPEN) {
-        this.state.socket.close(1000, 'User navigating away');
-      }
-      
-      this.state.socket = null;
-    }
-  }
-
-  // ======================
-  // Helper Methods
-  // ======================
-
-  getAuthToken() {
-    return localStorage.getItem('jwtToken') || sessionStorage.getItem('jwtToken');
+  formatTime(date) {
+    if (!(date instanceof Date)) return '';
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
   decodeJWT(token) {
     try {
       const base64Url = token.split('.')[1];
       const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-      const payload = JSON.parse(decodeURIComponent(atob(base64).split('').map(c => 
-        '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('')));
-      return payload;
+      const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+      }).join(''));
+      
+      return JSON.parse(jsonPayload);
     } catch (error) {
-      console.error('Error decoding JWT:', error);
+      console.error('JWT decode error:', error);
       return null;
     }
   }
 
-  generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
-  }
-
-  formatTime(date) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  scrollToBottom() {
-    this.elements.chatMessages.scrollTop = this.elements.chatMessages.scrollHeight;
-  }
-
-  linkify(text) {
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    return text.replace(urlRegex, url => 
-      `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
-    );
-  }
-
-  getAPIEndpoint(path) {
-    const baseUrl = 'https://website-backendd-1.onrender.com';
-    return baseUrl + path;
-  }
-
-  getWSEndpoint() {
-    return 'wss://website-backendd-1.onrender.com/api/support/ws';
-  }
-
-  getDeviceInfo() {
-    return {
-      userAgent: navigator.userAgent,
-      screenWidth: window.screen.width,
-      screenHeight: window.screen.height,
-      language: navigator.language,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-    };
-  }
-
-  isRateLimited() {
-    const now = Date.now();
-    if (now - this.state.rateLimit.lastReset > this.CONFIG.RATE_LIMIT.INTERVAL) {
-      this.state.rateLimit.count = 0;
-      this.state.rateLimit.lastReset = now;
-    }
-    return this.state.rateLimit.count >= this.CONFIG.RATE_LIMIT.MESSAGES;
-  }
-
-  updateRateLimit() {
-    this.state.rateLimit.count++;
-  }
-
-  persistMessageQueue() {
+  getAuthToken() {
     try {
-      localStorage.setItem('bitHashChatQueue', JSON.stringify(this.state.messageQueue));
+      return localStorage.getItem('jwtToken') || sessionStorage.getItem('jwtToken');
     } catch (error) {
-      console.error('Error persisting message queue:', error);
+      console.error('Token access error:', error);
+      return null;
     }
   }
 
-  clearPersistedQueue() {
-    localStorage.removeItem('bitHashChatQueue');
+  validateMessage(message) {
+    return message && 
+           typeof message === 'object' && 
+           message.message && 
+           message.sender && 
+           message.timestamp;
   }
 
-  logEvent(eventName, data = {}) {
-    // In a real implementation, this would send to your analytics service
-    console.log(`[Analytics] ${eventName}`, {
-      ...data,
-      userId: this.state.userId,
-      conversationId: this.state.conversationId,
-      sessionId: this.state.sessionId,
-      timestamp: new Date().toISOString()
-    });
+  calculateReconnectDelay() {
+    // Exponential backoff with jitter
+    const baseDelay = Math.min(
+      this.state.reconnectDelay * Math.pow(2, this.state.connectionAttempts - 1),
+      30000 // Max 30 seconds
+    );
+    
+    return baseDelay * (0.7 + Math.random() * 0.6); // Add 30% jitter
   }
 
-  logError(errorType, error) {
-    // In a real implementation, this would send to your error tracking service
-    console.error(`[Error] ${errorType}`, {
-      error: error.toString(),
-      stack: error.stack,
+  // API request helper
+  async apiRequest(endpoint, method = 'GET', body = null) {
+    const url = `${this.config.apiBaseUrl}${endpoint}`;
+    const headers = {
+      'Authorization': `Bearer ${this.getAuthToken()}`,
+      'Content-Type': 'application/json'
+    };
+    
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : null
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error(`API request failed (${method} ${endpoint}):`, error);
+      throw error;
+    }
+  }
+
+  // Activity monitoring
+  setupActivityMonitor() {
+    setInterval(() => {
+      if (this.state.lastActivity && (Date.now() - this.state.lastActivity.getTime()) > 60000) {
+        // Send heartbeat to keep connection alive
+        if (this.socket?.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({ type: 'heartbeat' }));
+        }
+      }
+    }, 30000);
+  }
+
+  // Performance monitoring
+  setupPerformanceMonitoring() {
+    if (window.PerformanceObserver) {
+      const observer = new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        entries.forEach(entry => {
+          if (entry.entryType === 'measure') {
+            console.debug(`Performance: ${entry.name} took ${entry.duration}ms`);
+          }
+        });
+      });
+      
+      observer.observe({ entryTypes: ['measure'] });
+    }
+    
+    // Log connection metrics periodically
+    setInterval(() => {
+      if (this.metrics.connectionTime) {
+        const connectionDuration = (new Date() - this.metrics.connectionTime) / 1000;
+        console.debug(`Connection metrics: ${connectionDuration}s uptime, ${this.metrics.messagesSent} sent, ${this.metrics.messagesReceived} received, latency ${this.metrics.latency || 'N/A'}ms`);
+      }
+    }, 60000);
+  }
+
+  // Error logging
+  logError(type, error, additionalData = {}) {
+    const errorData = {
+      type,
+      timestamp: new Date().toISOString(),
+      sessionId: this.state.sessionId,
       userId: this.state.userId,
       conversationId: this.state.conversationId,
-      sessionId: this.state.sessionId,
-      timestamp: new Date().toISOString()
-    });
+      error: error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      } : error,
+      ...additionalData
+    };
+    
+    // Send to error tracking service
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/error-log', JSON.stringify(errorData));
+    } else {
+      console.error('Error occurred:', errorData);
+    }
+  }
+
+  // Network status handling
+  handleOnlineStatus() {
+    if (this.state.connectionStatus !== 'connected') {
+      this.checkAuthentication();
+    }
+    this.addSystemMessage('Connection restored.');
+  }
+
+  handleOfflineStatus() {
+    this.addSystemMessage('Connection lost. Messages will be queued and sent when back online.');
+  }
+
+  checkConnectionState() {
+    if (this.state.connectionStatus !== 'connected' && navigator.onLine) {
+      this.checkAuthentication();
+    }
+  }
+
+  // Initial rendering
+  renderInitialState() {
+    this.updateConnectionUI();
+    
+    if (this.elements.chatInput && this.elements.sendButton) {
+      this.elements.chatInput.disabled = false;
+      this.elements.sendButton.disabled = false;
+    }
   }
 }
 
-// Initialize chat when DOM is loaded
+// Initialize chat with error handling
 document.addEventListener('DOMContentLoaded', () => {
-  if (typeof WebSocket === 'undefined') {
-    console.error('WebSocket is not supported in this browser');
-    return;
-  }
-
   try {
-    new BitHashChat();
+    // Performance mark for initialization
+    if (window.performance?.mark) {
+      performance.mark('chat-widget-init-start');
+    }
+    
+    const chatWidget = new BitHashEnterpriseChat();
+    
+    // Expose for debugging if needed
+    window.BitHashChat = chatWidget;
+    
+    if (window.performance?.mark) {
+      performance.mark('chat-widget-init-end');
+      performance.measure('chat-widget-init', 'chat-widget-init-start', 'chat-widget-init-end');
+    }
   } catch (error) {
-    console.error('Failed to initialize chat widget:', error);
+    console.error('Chat widget initialization failed:', error);
+    
+    // Fallback UI
+    const fallbackElement = document.createElement('div');
+    fallbackElement.className = 'chat-fallback';
+    fallbackElement.innerHTML = `
+      <p>We're having trouble loading the chat system.</p>
+      <button onclick="window.location.reload()">Try Again</button>
+      <p>Or contact us at <a href="mailto:support@bithash.com">support@bithash.com</a></p>
+    `;
+    
+    const container = document.getElementById('chat-widget-container') || document.body;
+    container.innerHTML = '';
+    container.appendChild(fallbackElement);
   }
 });
+
+
 
 
 
