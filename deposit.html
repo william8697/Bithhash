@@ -1790,7 +1790,7 @@
         </div>
     </div>
 
-    <!-- Deferred JavaScript -->
+       <!-- Deferred JavaScript -->
     <script>
         // Initialize all functionality when DOM is loaded
         document.addEventListener('DOMContentLoaded', function() {
@@ -1874,7 +1874,7 @@
                 // Check auth state
                 checkAuthState();
                 
-                // Setup BTC amount conversion
+                // Setup BTC amount conversion with real-time rates
                 setupBtcConversion();
             });
         });
@@ -2012,7 +2012,7 @@
                 
                 if (!response.ok) {
                     localStorage.removeItem('jwtToken');
-                    window.location.href = 'login.html';
+                    window.location.href = 'login.html');
                 }
             } catch (error) {
                 console.error('Authentication check failed:', error);
@@ -2058,13 +2058,14 @@
         }
         
         /* ============================================= */
-        /* Bitcoin Deposit Functionality */
+        /* Bitcoin Deposit Functionality - UPDATED FOR REAL-TIME CONVERSION */
         /* ============================================= */
         
         // Load BTC deposit address from backend
         let currentBtcAddress = '';
         let currentBtcRate = 0;
         let rateExpiry = 0;
+        let rateUpdateInProgress = false;
         
         async function loadBtcDepositAddress() {
             try {
@@ -2137,40 +2138,139 @@
             }
         }
         
-        // Get BTC price from CoinGecko
+        // Get BTC price from CoinGecko with enhanced error handling
         async function getBtcPrice() {
             try {
-                const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
-                if (response.ok) {
-                    const data = await response.json();
-                    return data.bitcoin.usd;
+                // Add timestamp to prevent caching
+                const timestamp = Date.now();
+                const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&_=${timestamp}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
                 }
-                throw new Error('Failed to fetch BTC price');
+                
+                const data = await response.json();
+                
+                if (!data.bitcoin || !data.bitcoin.usd) {
+                    throw new Error('Invalid response format from CoinGecko API');
+                }
+                
+                return data.bitcoin.usd;
             } catch (error) {
-                console.error('Error fetching BTC price:', error);
-                // Fallback rate if API fails
-                return 50000; // Conservative estimate
+                console.error('Error fetching BTC price from CoinGecko:', error);
+                
+                // Try alternative API endpoint as fallback
+                try {
+                    const fallbackResponse = await fetch('https://api.coincap.io/v2/assets/bitcoin');
+                    if (fallbackResponse.ok) {
+                        const fallbackData = await fallbackResponse.json();
+                        return parseFloat(fallbackData.data.priceUsd);
+                    }
+                } catch (fallbackError) {
+                    console.error('Fallback API also failed:', fallbackError);
+                }
+                
+                // Final fallback - use cached rate or conservative estimate
+                showNotification('warning', 'Rate Update Failed', 'Using last known rate. Conversion may not be exact.', 3000);
+                return currentBtcRate > 0 ? currentBtcRate : 50000; // Conservative estimate
             }
         }
         
-        // Setup BTC amount conversion
+        // Update BTC rate with real-time accuracy
+        async function updateBtcRate() {
+            if (rateUpdateInProgress) return;
+            
+            rateUpdateInProgress = true;
+            try {
+                const newRate = await getBtcPrice();
+                currentBtcRate = newRate;
+                rateExpiry = Date.now() + 900000; // 15 minutes
+                
+                // Update rate display if it exists
+                const rateDisplay = document.getElementById('btc-rate-display');
+                if (rateDisplay) {
+                    rateDisplay.textContent = `1 BTC = $${newRate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                }
+                
+                // Recalculate any existing conversion
+                const usdAmountInput = document.getElementById('btc-amount');
+                if (usdAmountInput && usdAmountInput.value) {
+                    const usdAmount = parseFloat(usdAmountInput.value);
+                    if (!isNaN(usdAmount) && usdAmount >= 10) {
+                        const btcAmount = usdAmount / currentBtcRate;
+                        document.getElementById('btc-equivalent').value = btcAmount.toFixed(8) + ' BTC';
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to update BTC rate:', error);
+            } finally {
+                rateUpdateInProgress = false;
+            }
+        }
+        
+        // Setup BTC amount conversion with real-time rates
         function setupBtcConversion() {
             const btcAmountInput = document.getElementById('btc-amount');
+            const btcEquivalentInput = document.getElementById('btc-equivalent');
+            
+            // Add rate display element if it doesn't exist
+            if (!document.getElementById('btc-rate-display')) {
+                const rateDisplay = document.createElement('div');
+                rateDisplay.id = 'btc-rate-display';
+                rateDisplay.className = 'btc-rate-info';
+                rateDisplay.style.cssText = 'font-size: 0.9em; color: #666; margin-bottom: 10px; text-align: center;';
+                btcAmountInput.parentNode.insertBefore(rateDisplay, btcAmountInput);
+            }
+            
+            // Initial rate update
+            updateBtcRate();
+            
+            // Update rate every 60 seconds for real-time accuracy
+            setInterval(updateBtcRate, 60000);
+            
+            // USD to BTC conversion
             btcAmountInput.addEventListener('input', async function() {
                 const usdAmount = parseFloat(this.value);
-                if (!usdAmount || usdAmount < 10) {
-                    document.getElementById('btc-equivalent').value = '';
+                
+                if (isNaN(usdAmount) || usdAmount < 10) {
+                    btcEquivalentInput.value = '';
                     return;
                 }
                 
-                // Check if rate is expired
+                // Ensure we have a fresh rate
                 if (Date.now() > rateExpiry) {
-                    currentBtcRate = await getBtcPrice();
-                    rateExpiry = Date.now() + 900000; // 15 minutes
+                    await updateBtcRate();
                 }
                 
                 const btcAmount = usdAmount / currentBtcRate;
-                document.getElementById('btc-equivalent').value = btcAmount.toFixed(8) + ' BTC';
+                btcEquivalentInput.value = btcAmount.toFixed(8) + ' BTC';
+            });
+            
+            // BTC to USD conversion (optional reverse conversion)
+            btcEquivalentInput.addEventListener('input', async function() {
+                const btcValue = this.value.replace(' BTC', '');
+                const btcAmount = parseFloat(btcValue);
+                
+                if (isNaN(btcAmount) || btcAmount <= 0) {
+                    return;
+                }
+                
+                // Ensure we have a fresh rate
+                if (Date.now() > rateExpiry) {
+                    await updateBtcRate();
+                }
+                
+                const usdAmount = btcAmount * currentBtcRate;
+                if (usdAmount >= 10) {
+                    btcAmountInput.value = usdAmount.toFixed(2);
+                }
+            });
+            
+            // Update rate when user focuses on input
+            btcAmountInput.addEventListener('focus', async () => {
+                if (Date.now() > rateExpiry - 30000) { // Update if less than 30 seconds left
+                    await updateBtcRate();
+                }
             });
         }
         
@@ -2188,6 +2288,7 @@
             document.getElementById('modal-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
             document.getElementById('modal-btc-amount').textContent = btcAmount;
             document.getElementById('modal-btc-address').textContent = currentBtcAddress;
+            document.getElementById('modal-btc-rate').textContent = `1 BTC = $${currentBtcRate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             
             // Start countdown timer (15 minutes)
             startCountdown(15 * 60);
@@ -2200,8 +2301,9 @@
         function copyBtcDetails() {
             const btcAmount = document.getElementById('modal-btc-amount').textContent;
             const address = document.getElementById('modal-btc-address').textContent;
+            const usdAmount = document.getElementById('modal-usd-amount').textContent;
             
-            const textToCopy = `Please send exactly ${btcAmount} to:\n${address}\n\nThank you for choosing BitHash!`;
+            const textToCopy = `Please send exactly ${btcAmount} (${usdAmount}) to:\n${address}\n\nThank you for choosing BitHash!`;
             
             navigator.clipboard.writeText(textToCopy).then(() => {
                 showNotification('success', 'Copied!', 'BTC address and amount copied to clipboard', 3000);
