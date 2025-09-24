@@ -2851,7 +2851,6 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-
 <script>
     // Initialize AOS animation
     AOS.init({
@@ -3422,8 +3421,9 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             
             const plansData = await plansResponse.json();
             let userBalance = null;
+            let userMaturedBalance = null;
             
-            // If user is logged in, fetch their balance using the same endpoint as dashboard
+            // If user is logged in, fetch their balances using the same endpoint as dashboard
             if (token) {
                 const balanceResponse = await fetch('https://website-backendd-1.onrender.com/api/users/balances', {
                     headers: headers
@@ -3432,10 +3432,11 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                 if (balanceResponse.ok) {
                     const balanceData = await balanceResponse.json();
                     userBalance = balanceData.data.balances?.main || 0;
+                    userMaturedBalance = balanceData.data.balances?.matured || 0;
                 }
             }
             
-            renderPlans(plansData.data.plans, userBalance);
+            renderPlans(plansData.data.plans, userBalance, userMaturedBalance);
         } catch (error) {
             console.error('Error loading plans data:', error);
             showNotification('error', 'Connection Error', 'Failed to connect to plans service. Please check your connection.');
@@ -3443,15 +3444,16 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
     }
 
     // Render plans to the DOM
-    function renderPlans(plans, userBalance = null) {
+    function renderPlans(plans, userBalance = null, userMaturedBalance = null) {
         const plansContainer = document.getElementById('plans-container');
         plansContainer.innerHTML = '';
         
-        // Show user balance if logged in
+        // Show user balances if logged in
         const balanceDisplay = document.getElementById('balance-display');
         if (userBalance !== null) {
             balanceDisplay.style.display = 'block';
             document.getElementById('current-balance').textContent = '$' + userBalance.toFixed(2);
+            document.getElementById('matured-balance').textContent = '$' + userMaturedBalance.toFixed(2);
         } else {
             balanceDisplay.style.display = 'none';
         }
@@ -3475,7 +3477,8 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                 `Min: $${plan.minAmount}`,
                 `Max: $${plan.maxAmount}`,
                 `Referral bonus: ${plan.referralBonus}%`,
-                'Principal protection'
+                'Principal protection',
+                '3% company fee upon maturity'
             ].map(feature => `
                 <div class="plan-feature">
                     <i class="fas fa-check"></i>
@@ -3484,7 +3487,9 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             `).join('');
             
             const isLoggedIn = localStorage.getItem('jwtToken') !== null;
-            const hasSufficientBalance = userBalance !== null && userBalance >= plan.minAmount;
+            const hasSufficientMainBalance = userBalance !== null && userBalance >= plan.minAmount;
+            const hasSufficientMaturedBalance = userMaturedBalance !== null && userMaturedBalance >= plan.minAmount;
+            const canInvest = hasSufficientMainBalance || hasSufficientMaturedBalance;
             
             planCard.innerHTML = `
                 <h3 class="plan-name">${plan.name}</h3>
@@ -3502,12 +3507,19 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                         <span>$${plan.maxAmount}</span>
                     </div>
                 </div>
+                <div class="balance-selection" style="margin: 15px 0; ${!isLoggedIn ? 'display: none;' : ''}">
+                    <label>Fund from:</label>
+                    <select id="balance-source-${plan.id}" class="balance-source-select">
+                        <option value="main" ${hasSufficientMainBalance ? '' : 'disabled'}>Main Balance ($${userBalance?.toFixed(2) || '0.00'})</option>
+                        <option value="matured" ${hasSufficientMaturedBalance ? '' : 'disabled'}>Matured Balance ($${userMaturedBalance?.toFixed(2) || '0.00'})</option>
+                    </select>
+                </div>
                 <button class="btn plan-button" 
                     onclick="handlePlanSelection('${plan.id}', ${plan.minAmount}, ${plan.maxAmount}, ${plan.percentage}, ${plan.duration}, '${plan.name}')" 
-                    ${!isLoggedIn ? 'disabled' : hasSufficientBalance ? '' : 'disabled'}
-                    title="${!isLoggedIn ? 'Please login to invest' : !hasSufficientBalance ? `Minimum balance required: $${plan.minAmount}` : ''}">
+                    ${!isLoggedIn ? 'disabled' : canInvest ? '' : 'disabled'}
+                    title="${!isLoggedIn ? 'Please login to invest' : !canInvest ? `Minimum balance required: $${plan.minAmount}` : ''}">
                     <i class="fas ${isLoggedIn ? 'fa-coins' : 'fa-lock'}"></i>
-                    ${isLoggedIn ? (hasSufficientBalance ? 'Invest Now' : 'Insufficient Balance') : 'Login to Invest'}
+                    ${isLoggedIn ? (canInvest ? 'Invest Now' : 'Insufficient Balance') : 'Login to Invest'}
                 </button>
             `;
             
@@ -3530,7 +3542,10 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         }
         
         try {
-            // Double-check user balance before opening modal - using same endpoint as dashboard
+            // Get selected balance source
+            const balanceSource = document.getElementById(`balance-source-${planId}`).value;
+            
+            // Double-check user balance before opening modal
             const response = await fetch('https://website-backendd-1.onrender.com/api/users/balances', {
                 headers: {
                     'Authorization': `Bearer ${token}`
@@ -3539,17 +3554,17 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             
             if (response.ok) {
                 const balanceData = await response.json();
-                const userBalance = balanceData.data.balances?.main || 0;
+                const selectedBalance = balanceData.data.balances?.[balanceSource] || 0;
                 
-                if (userBalance < minAmount) {
-                    showNotification('error', 'Insufficient Balance', `You need at least $${minAmount} to invest in this plan. Current balance: $${userBalance.toFixed(2)}`);
+                if (selectedBalance < minAmount) {
+                    showNotification('error', 'Insufficient Balance', `You need at least $${minAmount} in your ${balanceSource} balance to invest in this plan. Current ${balanceSource} balance: $${selectedBalance.toFixed(2)}`);
                     // Refresh plans to update UI
                     loadPlansData();
                     return;
                 }
                 
                 // Open investment modal with plan details
-                openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName);
+                openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName, balanceSource);
             } else {
                 throw new Error('Failed to verify balance');
             }
@@ -3560,13 +3575,14 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
     }
 
     // Open investment modal
-    function openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName) {
+    function openInvestmentModal(planId, minAmount, maxAmount, percentage, duration, planName, balanceSource) {
         const modal = document.getElementById('investment-modal');
         const modalPlanName = document.getElementById('modal-plan-name');
         const modalPlanReturn = document.getElementById('modal-plan-return');
         const modalPlanDuration = document.getElementById('modal-plan-duration');
         const modalPlanMin = document.getElementById('modal-plan-min');
         const modalPlanMax = document.getElementById('modal-plan-max');
+        const modalBalanceSource = document.getElementById('modal-balance-source');
         
         // Set plan details
         modalPlanName.textContent = planName;
@@ -3574,12 +3590,18 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         modalPlanDuration.textContent = `${duration} hours`;
         modalPlanMin.textContent = `$${minAmount}`;
         modalPlanMax.textContent = `$${maxAmount}`;
+        modalBalanceSource.textContent = balanceSource === 'main' ? 'Main Balance' : 'Matured Balance';
+        
+        // Store balance source in modal for later use
+        modal.dataset.balanceSource = balanceSource;
+        modal.dataset.planId = planId;
         
         // Reset form
         document.getElementById('investment-amount').value = minAmount;
         document.getElementById('amount-error').textContent = '';
         document.getElementById('expected-return').textContent = '$0.00';
         document.getElementById('investment-status').textContent = '';
+        document.getElementById('fee-notice').style.display = 'block';
         
         // Calculate initial expected return
         calculateExpectedReturn(minAmount, percentage);
@@ -3590,14 +3612,14 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         // Add event listeners
         document.getElementById('investment-amount').addEventListener('input', function() {
             const amount = parseFloat(this.value) || 0;
-            validateInvestmentAmount(amount, minAmount, maxAmount);
+            validateInvestmentAmount(amount, minAmount, maxAmount, balanceSource);
             calculateExpectedReturn(amount, percentage);
         });
         
         document.getElementById('confirm-investment').addEventListener('click', function() {
             const amount = parseFloat(document.getElementById('investment-amount').value);
-            if (validateInvestmentAmount(amount, minAmount, maxAmount)) {
-                createInvestment(planId, amount);
+            if (validateInvestmentAmount(amount, minAmount, maxAmount, balanceSource)) {
+                createInvestment(planId, amount, balanceSource);
             }
         });
     }
@@ -3609,7 +3631,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
     }
 
     // Validate investment amount
-    async function validateInvestmentAmount(amount, minAmount, maxAmount) {
+    async function validateInvestmentAmount(amount, minAmount, maxAmount, balanceSource) {
         const errorElement = document.getElementById('amount-error');
         
         if (isNaN(amount)) {
@@ -3627,7 +3649,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             return false;
         }
         
-        // Check if user has sufficient balance using same endpoint as dashboard
+        // Check if user has sufficient balance in selected source
         try {
             const token = localStorage.getItem('jwtToken');
             if (!token) {
@@ -3643,10 +3665,10 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             
             if (response.ok) {
                 const balanceData = await response.json();
-                const userBalance = balanceData.data.balances?.main || 0;
+                const selectedBalance = balanceData.data.balances?.[balanceSource] || 0;
                 
-                if (userBalance < amount) {
-                    errorElement.textContent = `Insufficient balance. Current balance: $${userBalance.toFixed(2)}`;
+                if (selectedBalance < amount) {
+                    errorElement.textContent = `Insufficient ${balanceSource} balance. Current ${balanceSource} balance: $${selectedBalance.toFixed(2)}`;
                     return false;
                 }
             } else {
@@ -3662,19 +3684,26 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         return true;
     }
 
-    // Calculate expected return
+    // Calculate expected return with fee information
     function calculateExpectedReturn(amount, percentage) {
         if (isNaN(amount)) {
             document.getElementById('expected-return').textContent = '$0.00';
+            document.getElementById('fee-amount').textContent = '$0.00';
+            document.getElementById('net-return').textContent = '$0.00';
             return;
         }
         
-        const expectedReturn = amount + (amount * percentage / 100);
-        document.getElementById('expected-return').textContent = '$' + expectedReturn.toFixed(2);
+        const grossReturn = amount + (amount * percentage / 100);
+        const companyFee = grossReturn * 0.03;
+        const netReturn = grossReturn - companyFee;
+        
+        document.getElementById('expected-return').textContent = '$' + grossReturn.toFixed(2);
+        document.getElementById('fee-amount').textContent = '$' + companyFee.toFixed(2);
+        document.getElementById('net-return').textContent = '$' + netReturn.toFixed(2);
     }
 
-    // Create investment via API - MODIFIED TO HANDLE 500 ERROR AS SUCCESS
-    async function createInvestment(planId, amount) {
+    // Create investment via API
+    async function createInvestment(planId, amount, balanceSource) {
         const token = localStorage.getItem('jwtToken');
         if (!token) return;
         
@@ -3694,7 +3723,8 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                 },
                 body: JSON.stringify({
                     planId,
-                    amount
+                    amount,
+                    balanceSource
                 })
             });
             
@@ -3712,7 +3742,9 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                 setTimeout(() => {
                     closeInvestmentModal();
                     loadPlansData(); // Refresh plans to update balances
-                    showNotification('success', 'Investment Created', `You've successfully invested $${amount} in the plan.`);
+                    showNotification('success', 'Investment Created', 
+                        `You've successfully invested $${amount} from your ${balanceSource} balance. ` +
+                        `Upon maturity, a 3% fee will be deducted as company revenue.`);
                     
                     // After creating investment, check for completed investments
                     checkAndCompleteInvestments();
@@ -3730,7 +3762,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         }
     }
 
-    // NEW FUNCTION: Check for and complete matured investments
+    // Check for and complete matured investments
     async function checkAndCompleteInvestments() {
         const token = localStorage.getItem('jwtToken');
         if (!token) return;
@@ -3764,7 +3796,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         }
     }
 
-    // NEW FUNCTION: Complete a specific investment
+    // Complete a specific investment
     async function completeInvestment(investmentId) {
         const token = localStorage.getItem('jwtToken');
         if (!token) return;
@@ -3784,9 +3816,10 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
                 // Refresh balance display
                 fetchAndUpdateBalance();
                 
-                // Show notification
+                // Show notification with fee details
                 showNotification('success', 'Investment Completed', 
-                    `Your investment has matured and funds have been transferred to your matured balance.`);
+                    `Your investment has matured! $${data.data.investment.companyFee} (3%) was deducted as company revenue. ` +
+                    `Net amount: $${data.data.investment.netPayout} transferred to your matured balance.`);
             }
         } catch (error) {
             console.error('Error completing investment:', error);
@@ -3803,7 +3836,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         }
     });
 
-    // Function to fetch and update the balance (using same endpoint as dashboard)
+    // Function to fetch and update the balance
     async function fetchAndUpdateBalance() {
         try {
             const token = localStorage.getItem('jwtToken');
@@ -3820,8 +3853,11 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
             
             if (response.ok) {
                 const data = await response.json();
-                const balance = data.data.balances?.main || 0;
-                document.getElementById('balance-amount').textContent = `$${balance.toFixed(2)}`;
+                const mainBalance = data.data.balances?.main || 0;
+                const maturedBalance = data.data.balances?.matured || 0;
+                
+                document.getElementById('balance-amount').textContent = `$${mainBalance.toFixed(2)}`;
+                document.getElementById('matured-balance-amount').textContent = `$${maturedBalance.toFixed(2)}`;
                 document.getElementById('user-balance-container').style.display = 'block';
             } else {
                 throw new Error('Failed to fetch balance');
@@ -3829,6 +3865,7 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         } catch (error) {
             console.error('Error fetching balance:', error);
             document.getElementById('balance-amount').textContent = '$0.00';
+            document.getElementById('matured-balance-amount').textContent = '$0.00';
         }
     }
 
@@ -3863,252 +3900,13 @@ Track real time mining stats, hash rate, rewards, and uptime, all from your dash
         // Check for completed investments on page load
         checkAndCompleteInvestments();
     });
-    
-    // Loan calculator - now based on transaction history
-    async function checkLoanEligibility() {
-        const loanAmount = parseFloat(document.getElementById('loan-amount-input').value);
-        const term = parseInt(document.getElementById('loan-term').value);
-        
-        if (isNaN(loanAmount)) {
-            showNotification('error', 'Invalid Input', 'Please enter a valid loan amount.');
-            return;
-        }
-        
-        if (loanAmount < 1000) {
-            showNotification('error', 'Minimum Loan', 'Minimum loan amount is $1,000');
-            return;
-        }
-        
-        // Check if user is authenticated
-        const token = localStorage.getItem('jwtToken');
-        if (!token) {
-            showNotification('error', 'Authentication Required', 'Please login to check your loan eligibility.');
-            return;
-        }
-        
-        try {
-            // Calculate loan details
-            const monthlyInterestRate = 0.0999; // 9.99% monthly
-            const monthlyPayment = (loanAmount * monthlyInterestRate) / (1 - Math.pow(1 + monthlyInterestRate, -term));
-            const totalRepayment = monthlyPayment * term;
-            
-            // Format currency
-            const formatCurrency = num => '$' + num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-            
-            // Update UI
-            document.getElementById('monthly-payment').textContent = formatCurrency(monthlyPayment);
-            document.getElementById('total-repayment').textContent = formatCurrency(totalRepayment);
-            
-            // Check eligibility with backend
-            const eligibilityResponse = await fetch('https://website-backendd-1.onrender.com/api/loans/limit', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    loanAmount,
-                    term
-                })
-            });
-            
-            if (eligibilityResponse.ok) {
-                const eligibilityData = await eligibilityResponse.json();
-                
-                // Show qualification popup
-                showLoanQualificationPopup({
-                    qualified: eligibilityData.qualified,
-                    loanAmount: loanAmount,
-                    term: term,
-                    monthlyPayment: monthlyPayment,
-                    totalRepayment: totalRepayment,
-                    message: eligibilityData.message
-                });
-            } else {
-                throw new Error('Failed to check eligibility');
-            }
-            
-        } catch (error) {
-            console.error('Error checking loan eligibility:', error);
-            showNotification('error', 'Loan Error', 'Failed to check loan eligibility. Please try again later.');
-        }
-    }
-    
-    // Show loan qualification popup
-    function showLoanQualificationPopup(data) {
-        const popup = document.getElementById('loan-popup');
-        const popupContent = document.getElementById('loan-popup-content');
-        
-        if (data.qualified) {
-            popupContent.innerHTML = `
-                <p>${data.message || 'Congratulations! Based on your transaction history, you qualify for this loan.'}</p>
-                <p><strong>Loan Amount:</strong> ${formatCurrency(data.loanAmount)}</p>
-                <p><strong>Term:</strong> ${data.term} months</p>
-                <p><strong>Monthly Payment:</strong> ${formatCurrency(data.monthlyPayment)}</p>
-                <p><strong>Total Repayment:</strong> ${formatCurrency(data.totalRepayment)}</p>
-            `;
-            
-            // Show apply button
-            document.getElementById('loan-popup-apply').style.display = 'inline-block';
-        } else {
-            popupContent.innerHTML = `
-                <p>${data.message || 'Based on your transaction history, you currently do not qualify for this loan amount.'}</p>
-                <p><strong>Suggested Actions:</strong></p>
-                <ul>
-                    <li>Increase your transaction volume</li>
-                    <li>Maintain consistent activity for 3+ months</li>
-                    <li>Consider a smaller loan amount</li>
-                </ul>
-            `;
-            
-            // Hide apply button
-            document.getElementById('loan-popup-apply').style.display = 'none';
-        }
-        
-        // Show popup
-        popup.classList.add('active');
-    }
-    
-    // Close loan popup
-    document.getElementById('loan-popup-close').addEventListener('click', function() {
-        document.getElementById('loan-popup').classList.remove('active');
-    });
-    
-    document.getElementById('loan-popup-cancel').addEventListener('click', function() {
-        document.getElementById('loan-popup').classList.remove('active');
-    });
-    
-    // Apply for loan
-    document.getElementById('loan-popup-apply').addEventListener('click', function() {
-        // Redirect to dashboard for loan application
-        window.location.href = 'dashboard.html#loans';
-    });
-
-    // Enhanced Smartsupp Chat for Dark Themes
-    (function() {
-        // Configuration with dark theme options
-        var smartsuppConfig = {
-            key: 'e05771d98dbccee702f23d0d80949fe0e3d7c7ee',
-            options: {
-                theme: {
-                    primary: '#5d8bf4',       // Primary brand color
-                    secondary: '#3a4f8a',     // Darker accent color
-                    text: '#e0e0e0',         // Light text
-                    background: '#1e1e28',   // Dark background
-                    card: '#252535',          // Message card background
-                    accent: '#7da1f8',        // Accent color for buttons
-                    border: 'rgba(255,255,255,0.1)' // Subtle borders
-                },
-                position: 'right',          // Position on screen
-                mobilePosition: 'right',    // Mobile position
-                avatar: 'default',         // Professional avatar style
-                sounds: true,              // Enable subtle notification sounds
-                autofocus: false           // Don't auto-focus chat input
-            }
-        };
-        
-        if (window.smartsupp) return;
-        
-        window._smartsupp = window._smartsupp || {};
-        _smartsupp.key = smartsuppConfig.key;
-        
-        var script = document.createElement('script');
-        script.type = 'text/javascript';
-        script.charset = 'utf-8';
-        script.async = true;
-        script.src = 'https://www.smartsuppchat.com/loader.js?';
-        
-        script.onload = function() {
-            console.log('Smartsupp chat loaded successfully');
-            // Apply theme and options after load
-            if (smartsuppConfig.options) {
-                window.smartsupp('options', smartsuppConfig.options);
-            }
-            
-            // Optional: Add custom event listeners
-            window.smartsupp('on', 'chat:opened', function() {
-                console.log('Chat opened by user');
-            });
-        };
-        
-        script.onerror = function() {
-            console.error('Failed to load Smartsupp chat');
-        };
-        
-        document.body.appendChild(script);
-    })();
-
-    // Initialize all functionality when DOM is loaded
-    document.addEventListener('DOMContentLoaded', function() {
-        // Smooth scrolling for anchor links
-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function(e) {
-                e.preventDefault();
-                
-                const targetId = this.getAttribute('href');
-                if (targetId === '#') return;
-                
-                const targetElement = document.querySelector(targetId);
-                if (targetElement) {
-                    targetElement.scrollIntoView({
-                        behavior: 'smooth'
-                    });
-                }
-            });
-        });
-        
-        // Header scroll effect
-        window.addEventListener('scroll', function() {
-            const header = document.getElementById('main-header');
-            if (window.scrollY > 50) {
-                header.classList.add('scrolled');
-            } else {
-                header.classList.remove('scrolled');
-            }
-        });
-        
-        // Security badge animation
-        const securityBadge = document.querySelector('.security-badge');
-        if (securityBadge) {
-            setInterval(() => {
-                securityBadge.style.boxShadow = `0 0 10px ${Math.random() > 0.5 ? 'rgba(52, 168, 83, 0.5)' : 'rgba(26, 115, 232, 0.5)'}`;
-            }, 2000);
-        }
-        
-        // Auto-calculate loan when amount changes
-        document.getElementById('loan-amount-input').addEventListener('input', function() {
-            if (parseFloat(this.value) >= 1000) {
-                const term = parseInt(document.getElementById('loan-term').value);
-                const loanAmount = parseFloat(this.value);
-                const monthlyInterestRate = 0.0999;
-                const monthlyPayment = (loanAmount * monthlyInterestRate) / (1 - Math.pow(1 + monthlyInterestRate, -term));
-                const totalRepayment = monthlyPayment * term;
-                
-                document.getElementById('monthly-payment').textContent = formatCurrency(monthlyPayment);
-                document.getElementById('total-repayment').textContent = formatCurrency(totalRepayment);
-            }
-        });
-        
-        // Auto-calculate loan when term changes
-        document.getElementById('loan-term').addEventListener('change', function() {
-            const loanAmount = parseFloat(document.getElementById('loan-amount-input').value);
-            if (loanAmount >= 1000) {
-                const term = parseInt(this.value);
-                const monthlyInterestRate = 0.0999;
-                const monthlyPayment = (loanAmount * monthlyInterestRate) / (1 - Math.pow(1 + monthlyInterestRate, -term));
-                const totalRepayment = monthlyPayment * term;
-                
-                document.getElementById('monthly-payment').textContent = formatCurrency(monthlyPayment);
-                document.getElementById('total-repayment').textContent = formatCurrency(totalRepayment);
-            }
-        });
-    });
 
     // Utility function to format currency
     function formatCurrency(amount) {
         return '$' + parseFloat(amount).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
     }
 </script>
+
        
 </body>
 </html>
