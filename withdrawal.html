@@ -2076,7 +2076,7 @@
         }
         
         /* ============================================= */
-        /* Balance Check Functionality */
+        /* Enhanced Balance Check Functionality */
         /* ============================================= */
         
         let pendingWithdrawalData = null;
@@ -2090,16 +2090,9 @@
             // Get withdrawal data
             const withdrawalData = getWithdrawalData(method);
             
-            // Calculate available balance from both main and matured balances
+            // Get current balances
             const mainBalance = parseFloat(document.getElementById('main-balance-display').textContent.replace('$', ''));
             const maturedBalance = parseFloat(document.getElementById('matured-balance-display').textContent.replace('$', ''));
-            const availableBalance = mainBalance + maturedBalance;
-            
-            // Check if user has enough balance for the withdrawal amount
-            if (withdrawalData.usdAmount > availableBalance) {
-                showNotification('error', 'Insufficient Balance', 'You do not have enough available balance for this withdrawal.', 3000);
-                return;
-            }
             
             // Check minimum withdrawal amount
             if (withdrawalData.usdAmount < MIN_WITHDRAWAL) {
@@ -2107,11 +2100,71 @@
                 return;
             }
             
+            // Enhanced balance checking logic
+            const balanceCheck = checkAvailableBalance(withdrawalData.usdAmount, mainBalance, maturedBalance);
+            
+            if (!balanceCheck.hasSufficientBalance) {
+                showNotification('error', 'Insufficient Balance', 
+                    `You need $${withdrawalData.usdAmount.toFixed(2)} but only have $${(mainBalance + maturedBalance).toFixed(2)} available.`, 3000);
+                return;
+            }
+            
             // Store withdrawal data for later use
-            pendingWithdrawalData = withdrawalData;
+            pendingWithdrawalData = {
+                ...withdrawalData,
+                balanceSource: balanceCheck.source,
+                mainAmountUsed: balanceCheck.mainAmountUsed,
+                maturedAmountUsed: balanceCheck.maturedAmountUsed
+            };
             
             // Check if user has enough balance for the gas fee - ONLY FROM MAIN BALANCE
             await checkGasFeeBalance();
+        }
+        
+        // Enhanced balance checking function
+        function checkAvailableBalance(requestedAmount, mainBalance, maturedBalance) {
+            const totalBalance = mainBalance + maturedBalance;
+            
+            // Check if user has enough total balance
+            if (requestedAmount > totalBalance) {
+                return {
+                    hasSufficientBalance: false,
+                    source: 'none',
+                    mainAmountUsed: 0,
+                    maturedAmountUsed: 0
+                };
+            }
+            
+            // Check if main balance alone is sufficient
+            if (mainBalance >= requestedAmount) {
+                return {
+                    hasSufficientBalance: true,
+                    source: 'main',
+                    mainAmountUsed: requestedAmount,
+                    maturedAmountUsed: 0
+                };
+            }
+            
+            // Check if matured balance alone is sufficient
+            if (maturedBalance >= requestedAmount) {
+                return {
+                    hasSufficientBalance: true,
+                    source: 'matured',
+                    mainAmountUsed: 0,
+                    maturedAmountUsed: requestedAmount
+                };
+            }
+            
+            // Use both balances to cover the requested amount
+            const mainAmountUsed = mainBalance;
+            const maturedAmountUsed = requestedAmount - mainBalance;
+            
+            return {
+                hasSufficientBalance: true,
+                source: 'both',
+                mainAmountUsed: mainAmountUsed,
+                maturedAmountUsed: maturedAmountUsed
+            };
         }
         
         function validateWithdrawalForm(method) {
@@ -2284,17 +2337,31 @@
         /* ============================================= */
         
         function showBtcConfirmationModal() {
-            const { usdAmount, btcAmount, walletAddress } = pendingWithdrawalData;
+            const { usdAmount, btcAmount, walletAddress, balanceSource, mainAmountUsed, maturedAmountUsed } = pendingWithdrawalData;
             
             document.getElementById('modal-withdraw-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
             document.getElementById('modal-withdraw-btc-amount').textContent = btcAmount;
             document.getElementById('modal-btc-wallet-address').textContent = walletAddress;
             
+            // Show balance source information
+            let sourceInfo = '';
+            if (balanceSource === 'main') {
+                sourceInfo = ` (from Main Balance)`;
+            } else if (balanceSource === 'matured') {
+                sourceInfo = ` (from Matured Balance)`;
+            } else if (balanceSource === 'both') {
+                sourceInfo = ` (from both balances: $${mainAmountUsed.toFixed(2)} Main + $${maturedAmountUsed.toFixed(2)} Matured)`;
+            }
+            
+            // Update modal to show balance source
+            const amountElement = document.getElementById('modal-withdraw-usd-amount');
+            amountElement.textContent = `$${usdAmount.toFixed(2)}${sourceInfo}`;
+            
             openModal('btc-confirm-modal');
         }
         
         function showBankConfirmationModal() {
-            const { usdAmount, bankName, accountHolder, accountNumber, routingNumber } = pendingWithdrawalData;
+            const { usdAmount, bankName, accountHolder, accountNumber, routingNumber, balanceSource, mainAmountUsed, maturedAmountUsed } = pendingWithdrawalData;
             
             document.getElementById('modal-bank-amount').textContent = `$${usdAmount.toFixed(2)}`;
             document.getElementById('modal-bank-name').textContent = bankName;
@@ -2305,6 +2372,20 @@
             
             const total = (usdAmount - (WITHDRAWAL_PROCESSING_FEE_BTC * currentBtcRate)).toFixed(2);
             document.getElementById('modal-bank-total').textContent = `$${total}`;
+            
+            // Show balance source information
+            let sourceInfo = '';
+            if (balanceSource === 'main') {
+                sourceInfo = ` (from Main Balance)`;
+            } else if (balanceSource === 'matured') {
+                sourceInfo = ` (from Matured Balance)`;
+            } else if (balanceSource === 'both') {
+                sourceInfo = ` (from both balances: $${mainAmountUsed.toFixed(2)} Main + $${maturedAmountUsed.toFixed(2)} Matured)`;
+            }
+            
+            // Update modal to show balance source
+            const amountElement = document.getElementById('modal-bank-amount');
+            amountElement.textContent = `$${usdAmount.toFixed(2)}${sourceInfo}`;
             
             openModal('bank-confirm-modal');
         }
@@ -2328,7 +2409,7 @@
         /* ============================================= */
         
         async function submitBtcWithdrawal() {
-            const { usdAmount, walletAddress } = pendingWithdrawalData;
+            const { usdAmount, walletAddress, balanceSource, mainAmountUsed, maturedAmountUsed } = pendingWithdrawalData;
             
             openModal('withdraw-processing-modal');
             
@@ -2355,7 +2436,10 @@
                     },
                     body: JSON.stringify({
                         amount: usdAmount,
-                        walletAddress: walletAddress
+                        walletAddress: walletAddress,
+                        balanceSource: balanceSource,
+                        mainAmountUsed: mainAmountUsed,
+                        maturedAmountUsed: maturedAmountUsed
                     })
                 });
                 
@@ -2366,8 +2450,17 @@
                     
                     closeModal('withdraw-processing-modal');
                     
+                    let sourceInfo = '';
+                    if (balanceSource === 'main') {
+                        sourceInfo = ' from your Main Balance';
+                    } else if (balanceSource === 'matured') {
+                        sourceInfo = ' from your Matured Balance';
+                    } else if (balanceSource === 'both') {
+                        sourceInfo = ` using $${mainAmountUsed.toFixed(2)} from Main Balance and $${maturedAmountUsed.toFixed(2)} from Matured Balance`;
+                    }
+                    
                     document.getElementById('success-message').textContent = 
-                        `Your Bitcoin withdrawal of $${usdAmount.toFixed(2)} has been submitted. Transaction ID: ${data.txId || 'Pending'}`;
+                        `Your Bitcoin withdrawal of $${usdAmount.toFixed(2)}${sourceInfo} has been submitted. Transaction ID: ${data.txId || 'Pending'}`;
                     openModal('withdraw-success-modal');
                     
                     loadUserData();
@@ -2391,7 +2484,7 @@
         }
         
         async function submitBankWithdrawal() {
-            const { usdAmount, bankName, accountHolder, accountNumber, routingNumber } = pendingWithdrawalData;
+            const { usdAmount, bankName, accountHolder, accountNumber, routingNumber, balanceSource, mainAmountUsed, maturedAmountUsed } = pendingWithdrawalData;
             
             openModal('withdraw-processing-modal');
             
@@ -2421,7 +2514,10 @@
                         bankName: bankName,
                         accountHolder: accountHolder,
                         accountNumber: accountNumber,
-                        routingNumber: routingNumber
+                        routingNumber: routingNumber,
+                        balanceSource: balanceSource,
+                        mainAmountUsed: mainAmountUsed,
+                        maturedAmountUsed: maturedAmountUsed
                     })
                 });
                 
@@ -2432,8 +2528,17 @@
                     
                     closeModal('withdraw-processing-modal');
                     
+                    let sourceInfo = '';
+                    if (balanceSource === 'main') {
+                        sourceInfo = ' from your Main Balance';
+                    } else if (balanceSource === 'matured') {
+                        sourceInfo = ' from your Matured Balance';
+                    } else if (balanceSource === 'both') {
+                        sourceInfo = ` using $${mainAmountUsed.toFixed(2)} from Main Balance and $${maturedAmountUsed.toFixed(2)} from Matured Balance`;
+                    }
+                    
                     document.getElementById('success-message').textContent = 
-                        `Your bank withdrawal of $${usdAmount.toFixed(2)} has been submitted. Reference ID: ${data.refId || 'Pending'}`;
+                        `Your bank withdrawal of $${usdAmount.toFixed(2)}${sourceInfo} has been submitted. Reference ID: ${data.refId || 'Pending'}`;
                     openModal('withdraw-success-modal');
                     
                     loadUserData();
