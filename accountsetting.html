@@ -774,6 +774,11 @@
             color: var(--error);
         }
         
+        .verification-badge.submitted {
+            background-color: rgba(0, 123, 255, 0.1);
+            color: #007bff;
+        }
+        
         .two-factor-methods {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -2063,7 +2068,6 @@
                         </p>
                         
                         <div class="form-actions">
-                            <!-- CHANGED: Removed disabled attribute to make button always clickable -->
                             <button type="button" class="btn btn-primary" id="submit-kyc-btn">
                                 <i class="fas fa-paper-plane"></i> Submit KYC Application
                             </button>
@@ -2448,7 +2452,8 @@
         kycStatus: {
             identity: 'unverified',
             address: 'unverified',
-            facial: 'unverified'
+            facial: 'unverified',
+            overall: 'unverified'
         },
         kycDocuments: {
             identity: {
@@ -2493,7 +2498,8 @@
         mediaRecorder: null,
         recordedChunks: [],
         isRecording: false,
-        recordingTimer: null
+        recordingTimer: null,
+        kycSubmitted: false // Track if KYC has been submitted
     };
 
     // Hide loading overlay when page is loaded
@@ -2534,6 +2540,9 @@
             
             // Initialize form submissions
             initFormSubmissions();
+            
+            // Initialize KYC button state
+            updateKYCButtonState();
             
         }, 1000);
     });
@@ -2830,7 +2839,7 @@
         document.getElementById('save-document-btn').addEventListener('click', saveIdentityDocuments);
         document.getElementById('save-address-document-btn').addEventListener('click', saveAddressDocument);
         
-        // Submit KYC button - CHANGED: Always enabled
+        // Submit KYC button
         document.getElementById('submit-kyc-btn').addEventListener('click', submitKYCApplication);
     }
     
@@ -3014,10 +3023,29 @@
         
         const isKYCReady = identityComplete && addressComplete && facialComplete;
         
-        // CHANGED: No longer disable the button based on completion status
-        // The button is always enabled now
         if (isKYCReady) {
             showNotification('success', 'KYC Ready', 'All verification steps completed. You can now submit your KYC application.');
+        }
+        
+        updateKYCButtonState();
+    }
+    
+    // Update KYC button state - ENHANCED to always be clickable
+    function updateKYCButtonState() {
+        const submitKYCButton = document.getElementById('submit-kyc-btn');
+        
+        // Always enable the button - user can click it regardless of completion status
+        submitKYCButton.disabled = false;
+        
+        // Update button text based on KYC status
+        if (AppState.kycStatus.overall === 'submitted' || AppState.kycSubmitted) {
+            submitKYCButton.innerHTML = '<i class="fas fa-hourglass-half"></i> KYC Submitted - Under Review';
+            submitKYCButton.disabled = true;
+        } else if (AppState.kycStatus.overall === 'verified') {
+            submitKYCButton.innerHTML = '<i class="fas fa-check-circle"></i> KYC Verified';
+            submitKYCButton.disabled = true;
+        } else {
+            submitKYCButton.innerHTML = '<i class="fas fa-paper-plane"></i> Submit KYC Application';
         }
     }
     
@@ -3209,7 +3237,7 @@
         }, 'image/jpeg', 0.95);
     }
 
-    // Submit facial verification - CORRECTED VERSION
+    // Submit facial verification
     async function submitFacialVerification() {
         if (!AppState.kycDocuments.facial) {
             showNotification('error', 'Verification Error', 'No verification media captured. Please try again.');
@@ -3575,8 +3603,12 @@
                 AppState.kycStatus = kycData.status || {
                     identity: 'unverified',
                     address: 'unverified',
-                    facial: 'unverified'
+                    facial: 'unverified',
+                    overall: 'unverified'
                 };
+                
+                // Track if KYC has been submitted
+                AppState.kycSubmitted = kycData.status.overall === 'submitted' || kycData.status.overall === 'verified';
                 
                 // Update KYC verification badges
                 updateVerificationBadge('identity-verification-badge', AppState.kycStatus.identity);
@@ -3686,7 +3718,7 @@
     /* KYC Document Submission */
     /* ============================================= */
     
-   // Save identity documents - UPDATED
+    // Save identity documents
     async function saveIdentityDocuments() {
         try {
             const token = localStorage.getItem('jwtToken');
@@ -3757,7 +3789,7 @@
         }
     }
 
-    // Save address document - UPDATED
+    // Save address document
     async function saveAddressDocument() {
         try {
             const token = localStorage.getItem('jwtToken');
@@ -3820,11 +3852,29 @@
         }
     }
     
-    // Submit KYC application
+    // Submit KYC application - ENHANCED to always be clickable
     function submitKYCApplication() {
-        // CHANGED: Always allow submission regardless of completion status
-        // Open email and password verification modal
-        openModal('email-password-modal');
+        // Check if KYC has already been submitted
+        if (AppState.kycSubmitted || AppState.kycStatus.overall === 'submitted' || AppState.kycStatus.overall === 'verified') {
+            showNotification('info', 'KYC Already Submitted', 'Your KYC application has already been submitted and is under review.');
+            return;
+        }
+        
+        // Check if all required documents are uploaded
+        const identityComplete = AppState.kycStatus.identity === 'pending' || AppState.kycStatus.identity === 'verified';
+        const addressComplete = AppState.kycStatus.address === 'pending' || AppState.kycStatus.address === 'verified';
+        const facialComplete = AppState.kycStatus.facial === 'pending' || AppState.kycStatus.facial === 'verified';
+        
+        if (!identityComplete || !addressComplete || !facialComplete) {
+            // Show warning but allow submission anyway
+            if (confirm('Some verification steps are not yet complete. Are you sure you want to submit your KYC application now? You can always complete missing steps later.')) {
+                // Open email and password verification modal
+                openModal('email-password-modal');
+            }
+        } else {
+            // All steps complete, proceed with submission
+            openModal('email-password-modal');
+        }
     }
     
     // Verify credentials for KYC submission
@@ -3907,16 +3957,19 @@
             if (response.ok) {
                 showNotification('success', 'KYC Submitted', 'Your KYC application has been submitted for review. You will be notified once it is processed.');
                 
-                // Update all badges to pending
-                updateVerificationBadge('identity-verification-badge', 'pending');
-                updateVerificationBadge('address-verification-badge', 'pending');
-                updateVerificationBadge('facial-verification-badge', 'pending');
+                // Update all badges to submitted
+                updateVerificationBadge('identity-verification-badge', 'submitted');
+                updateVerificationBadge('address-verification-badge', 'submitted');
+                updateVerificationBadge('facial-verification-badge', 'submitted');
                 
-                AppState.kycStatus.identity = 'pending';
-                AppState.kycStatus.address = 'pending';
-                AppState.kycStatus.facial = 'pending';
+                AppState.kycStatus.identity = 'submitted';
+                AppState.kycStatus.address = 'submitted';
+                AppState.kycStatus.facial = 'submitted';
+                AppState.kycStatus.overall = 'submitted';
+                AppState.kycSubmitted = true;
                 
-                // CHANGED: No longer disable the submit button
+                // Update KYC button state
+                updateKYCButtonState();
             } else {
                 const error = await response.json();
                 throw new Error(error.message || 'Failed to submit KYC application');
@@ -4179,6 +4232,8 @@
             badge.innerHTML = '<i class="fas fa-check-circle"></i> Verified';
         } else if (status === 'pending') {
             badge.innerHTML = '<i class="fas fa-clock"></i> Pending';
+        } else if (status === 'submitted') {
+            badge.innerHTML = '<i class="fas fa-hourglass-half"></i> Submitted';
         } else {
             badge.innerHTML = '<i class="fas fa-times-circle"></i> Unverified';
         }
