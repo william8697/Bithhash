@@ -3011,7 +3011,13 @@
         const addressComplete = AppState.kycStatus.address === 'pending' || AppState.kycStatus.address === 'verified';
         const facialComplete = AppState.kycStatus.facial === 'pending' || AppState.kycStatus.facial === 'verified';
         
-        document.getElementById('submit-kyc-btn').disabled = !(identityComplete && addressComplete && facialComplete);
+        const isKYCReady = identityComplete && addressComplete && facialComplete;
+        
+        document.getElementById('submit-kyc-btn').disabled = !isKYCReady;
+        
+        if (isKYCReady) {
+            showNotification('success', 'KYC Ready', 'All verification steps completed. You can now submit your KYC application.');
+        }
     }
     
     // Initialize facial verification
@@ -3189,21 +3195,54 @@
     }
     
     // Submit facial verification
-    function submitFacialVerification() {
+    async function submitFacialVerification() {
         if (!AppState.kycDocuments.facial) {
             showNotification('error', 'Verification Error', 'No verification media captured. Please try again.');
             return;
         }
         
-        // In a real implementation, you would upload the media to your server here
-        showNotification('success', 'Verification Submitted', 'Your facial verification has been submitted for review.');
-        
-        // Stop any active streams
-        if (AppState.webcamStream) {
-            AppState.webcamStream.getTracks().forEach(track => track.stop());
-        }
-        if (AppState.recordingStream) {
-            AppState.recordingStream.getTracks().forEach(track => track.stop());
+        try {
+            const token = localStorage.getItem('jwtToken');
+            if (!token) {
+                window.location.href = 'login.html';
+                return;
+            }
+            
+            showNotification('info', 'Submitting Facial Verification', 'Uploading your verification data...', 0);
+            
+            // Create FormData to send the facial verification data
+            const formData = new FormData();
+            formData.append('facialData', AppState.kycDocuments.facial);
+            
+            const response = await fetch('https://website-backendd-1.onrender.com/api/users/kyc/facial', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                body: formData
+            });
+            
+            if (response.ok) {
+                showNotification('success', 'Verification Submitted', 'Your facial verification has been submitted for review.');
+                AppState.kycStatus.facial = 'pending';
+                updateVerificationBadge('facial-verification-badge', 'pending');
+                
+                // Stop any active streams
+                if (AppState.webcamStream) {
+                    AppState.webcamStream.getTracks().forEach(track => track.stop());
+                }
+                if (AppState.recordingStream) {
+                    AppState.recordingStream.getTracks().forEach(track => track.stop());
+                }
+                
+                checkKYCCompletion();
+            } else {
+                const error = await response.json();
+                throw new Error(error.message || 'Failed to submit facial verification');
+            }
+        } catch (error) {
+            console.error('Error submitting facial verification:', error);
+            showNotification('error', 'Submission Error', error.message || 'Failed to submit facial verification. Please try again.');
         }
     }
     
@@ -3679,6 +3718,7 @@ async function saveIdentityDocuments() {
             showNotification('success', 'Documents Saved', 'Your identity documents have been saved successfully.');
             AppState.kycStatus.identity = 'pending';
             updateVerificationBadge('identity-verification-badge', 'pending');
+            checkKYCCompletion();
         } else {
             const error = await response.json();
             throw new Error(error.message || 'Failed to save identity documents');
@@ -3741,6 +3781,7 @@ async function saveAddressDocument() {
             showNotification('success', 'Document Saved', 'Your address document has been saved successfully.');
             AppState.kycStatus.address = 'pending';
             updateVerificationBadge('address-verification-badge', 'pending');
+            checkKYCCompletion();
         } else {
             const error = await response.json();
             throw new Error(error.message || 'Failed to save address document');
