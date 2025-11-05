@@ -25,7 +25,7 @@
     
     <style>
         :root {
-            --primary: #00D395; /* Crypto.com green */
+            --primary: #00D395;
             --primary-dark: #00B783;
             --primary-light: #00E5A1;
             --secondary: #1E1E1E;
@@ -43,7 +43,7 @@
             --gold: #D4AF37;
             --gold-light: #FFD700;
             --gold-dark: #996515;
-            --blue: #003366; /* Dark blue for plans */
+            --blue: #003366;
             --blue-dark: #002244;
             --blue-light: #004488;
             --purple: #784FED;
@@ -335,6 +335,12 @@
         .two-step-status.error {
             background-color: var(--error);
             display: block;
+        }
+        
+        .two-step-status.warning {
+            background-color: var(--warning);
+            display: block;
+            color: var(--darker);
         }
         
         .container {
@@ -752,6 +758,12 @@
         .login-status.error {
             background-color: var(--error);
             display: block;
+        }
+        
+        .login-status.warning {
+            background-color: var(--warning);
+            display: block;
+            color: var(--darker);
         }
         
         /* Two-Factor Authentication Section */
@@ -1222,6 +1234,9 @@
             <div class="two-step-status error" id="otp-error" style="display: none;">
                 Invalid verification code. Please try again.
             </div>
+            <div class="two-step-status warning" id="otp-warning" style="display: none;">
+                Please wait before requesting a new code.
+            </div>
             
             <div class="two-step-buttons">
                 <button class="btn btn-outline" id="cancel-otp-btn">Cancel</button>
@@ -1367,6 +1382,9 @@
                         </div>
                         <div class="login-status error" id="login-error" style="display: none;">
                             Login failed. Please check your email and password.
+                        </div>
+                        <div class="login-status warning" id="login-warning" style="display: none;">
+                            Please wait before trying again.
                         </div>
                         
                         <div class="divider">OR</div>
@@ -1589,6 +1607,8 @@
         let resendTimer;
         let currentUserEmail = '';
         let currentTempToken = '';
+        let lastOtpRequestTime = 0;
+        const OTP_COOLDOWN_PERIOD = 60000; // 60 seconds cooldown
         
         // Show two-step verification modal
         function showTwoStepModal(email, tempToken) {
@@ -1627,8 +1647,22 @@
             return `${maskedLocal}@${domain}`;
         }
         
-        // Send OTP to user's email
+        // Send OTP to user's email with rate limiting
         async function sendOtpToEmail(email) {
+            const now = Date.now();
+            const timeSinceLastRequest = now - lastOtpRequestTime;
+            
+            // Check if we're in cooldown period
+            if (timeSinceLastRequest < OTP_COOLDOWN_PERIOD) {
+                const remainingTime = Math.ceil((OTP_COOLDOWN_PERIOD - timeSinceLastRequest) / 1000);
+                document.getElementById('otp-warning').textContent = `Please wait ${remainingTime} seconds before requesting a new code.`;
+                document.getElementById('otp-warning').style.display = 'block';
+                document.getElementById('otp-error').style.display = 'none';
+                return;
+            }
+            
+            lastOtpRequestTime = now;
+            
             try {
                 const response = await fetch('https://website-backendd-1.onrender.com/api/auth/send-otp', {
                     method: 'POST',
@@ -1640,15 +1674,29 @@
                 
                 const data = await response.json();
                 
-                if (!response.ok) {
-                    console.error('Failed to send OTP:', data.message);
-                    document.getElementById('otp-error').textContent = 'Failed to send OTP. Please try again.';
+                if (response.status === 429) {
+                    // Rate limited - show warning
+                    document.getElementById('otp-warning').textContent = data.message || 'Please wait before requesting a new OTP.';
+                    document.getElementById('otp-warning').style.display = 'block';
+                    document.getElementById('otp-error').style.display = 'none';
+                    
+                    // Extend the resend timer to match backend cooldown
+                    const retryAfter = 60; // Default to 60 seconds
+                    startResendTimer(retryAfter);
+                } else if (!response.ok) {
+                    document.getElementById('otp-error').textContent = data.message || 'Failed to send OTP. Please try again.';
                     document.getElementById('otp-error').style.display = 'block';
+                    document.getElementById('otp-warning').style.display = 'none';
+                } else {
+                    // Success - clear any previous messages
+                    document.getElementById('otp-error').style.display = 'none';
+                    document.getElementById('otp-warning').style.display = 'none';
                 }
             } catch (error) {
                 console.error('Error sending OTP:', error);
                 document.getElementById('otp-error').textContent = 'Network error. Please check your connection.';
                 document.getElementById('otp-error').style.display = 'block';
+                document.getElementById('otp-warning').style.display = 'none';
             }
         }
         
@@ -1720,6 +1768,9 @@
                 } else {
                     this.classList.remove('filled');
                 }
+                
+                // Clear error messages when user starts typing
+                document.getElementById('otp-error').style.display = 'none';
             });
             
             // Handle backspace
@@ -1744,7 +1795,7 @@
             });
         });
         
-        // Verify OTP
+        // Verify OTP with enhanced error handling
         document.getElementById('verify-otp-btn').addEventListener('click', async function() {
             const otpInputs = document.querySelectorAll('.otp-input');
             const otpCode = Array.from(otpInputs).map(input => input.value).join('');
@@ -1778,6 +1829,7 @@
                     // OTP verification successful
                     document.getElementById('otp-success').style.display = 'block';
                     document.getElementById('otp-error').style.display = 'none';
+                    document.getElementById('otp-warning').style.display = 'none';
                     
                     // Store final token and redirect to dashboard
                     if (data.token) {
@@ -1791,7 +1843,17 @@
                     }, 1500);
                 } else {
                     // OTP verification failed
-                    document.getElementById('otp-error').textContent = data.message || 'Invalid verification code. Please try again.';
+                    let errorMessage = 'Invalid verification code. Please try again.';
+                    
+                    if (data.message) {
+                        errorMessage = data.message;
+                    } else if (response.status === 429) {
+                        errorMessage = 'Too many failed attempts. Please try again later.';
+                    } else if (response.status === 500) {
+                        errorMessage = 'Server error. Please try again in a moment.';
+                    }
+                    
+                    document.getElementById('otp-error').textContent = errorMessage;
                     document.getElementById('otp-error').style.display = 'block';
                     document.getElementById('otp-success').style.display = 'none';
                     
@@ -1801,7 +1863,7 @@
                 }
             } catch (error) {
                 console.error('OTP verification error:', error);
-                document.getElementById('otp-error').textContent = 'Verification failed. Please try again.';
+                document.getElementById('otp-error').textContent = 'Network error. Please check your connection and try again.';
                 document.getElementById('otp-error').style.display = 'block';
                 
                 // Reset button state
@@ -1842,11 +1904,24 @@
             clearInterval(resendTimer);
             currentUserEmail = '';
             currentTempToken = '';
+            lastOtpRequestTime = 0;
         });
         
-        // Handle form submission
+        // Handle form submission with rate limiting
+        let lastLoginAttempt = 0;
+        const LOGIN_COOLDOWN = 5000; // 5 seconds between login attempts
+        
         document.getElementById('login-form').addEventListener('submit', async function(e) {
             e.preventDefault();
+            
+            const now = Date.now();
+            if (now - lastLoginAttempt < LOGIN_COOLDOWN) {
+                document.getElementById('login-warning').textContent = 'Please wait a few seconds before trying again.';
+                document.getElementById('login-warning').style.display = 'block';
+                return;
+            }
+            
+            lastLoginAttempt = now;
             
             if (!validateLoginForm()) {
                 return;
@@ -1861,6 +1936,7 @@
             // Hide any previous messages
             document.getElementById('login-success').style.display = 'none';
             document.getElementById('login-error').style.display = 'none';
+            document.getElementById('login-warning').style.display = 'none';
             
             // Prepare form data
             const formData = {
@@ -1943,8 +2019,19 @@
             }
         }
         
-        // Handle Google Sign-In
+        // Handle Google Sign-In with rate limiting
+        let lastGoogleSignIn = 0;
+        
         function handleGoogleSignIn(response) {
+            const now = Date.now();
+            if (now - lastGoogleSignIn < LOGIN_COOLDOWN) {
+                document.getElementById('login-warning').textContent = 'Please wait a few seconds before trying again.';
+                document.getElementById('login-warning').style.display = 'block';
+                return;
+            }
+            
+            lastGoogleSignIn = now;
+            
             // Show loading state
             const buttonText = document.getElementById('login-button-text');
             const spinner = document.getElementById('login-spinner');
@@ -1954,6 +2041,7 @@
             // Hide any previous messages
             document.getElementById('login-success').style.display = 'none';
             document.getElementById('login-error').style.display = 'none';
+            document.getElementById('login-warning').style.display = 'none';
             
             // Send Google credential to backend
             fetch('https://website-backendd-1.onrender.com/api/auth/google', {
