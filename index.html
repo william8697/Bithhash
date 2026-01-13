@@ -6930,7 +6930,7 @@
         }
     }
 
-    // Check loan eligibility - UPDATED WITH NEW ENDPOINTS
+    // UPDATED LOAN ELIGIBILITY CHECK - NOW USING NEW REQUIREMENTS
     async function checkLoanEligibility() {
         const token = localStorage.getItem('jwtToken');
         const loanAmountInput = document.getElementById('loan-amount-input');
@@ -6953,7 +6953,7 @@
         try {
             showNotification('info', 'Checking Eligibility', 'Verifying your loan eligibility...');
             
-            // Fetch user data from new endpoints
+            // Fetch user data from backend
             const [investmentsResponse, kycResponse] = await Promise.all([
                 fetch('https://bithashcapital.onrender.com/api/users/investments/count', {
                     headers: {
@@ -6980,6 +6980,9 @@
                 kycStatus = kycData.status || 'unverified';
             }
             
+            // Check loan eligibility based on the new requirements
+            const isEligible = investmentsCount >= 5 && kycStatus === 'verified';
+            
             // Now check loan eligibility with the collected data
             const eligibilityResponse = await fetch('https://bithashcapital.onrender.com/api/loans/check-eligibility', {
                 method: 'POST',
@@ -6997,6 +7000,9 @@
             if (eligibilityResponse.ok) {
                 const eligibilityData = await eligibilityResponse.json();
                 
+                // Override eligibility based on new requirements
+                eligibilityData.eligible = isEligible;
+                
                 if (eligibilityData.eligible) {
                     // Show loan popup with eligibility details including KYC and investment info
                     showLoanQualificationPopup(eligibilityData, investmentsCount, kycStatus);
@@ -7005,11 +7011,53 @@
                     showLoanRejectionPopup(eligibilityData, investmentsCount, kycStatus);
                 }
             } else {
-                throw new Error('Failed to check eligibility');
+                // If API fails, use local eligibility check
+                const eligibilityData = {
+                    eligible: isEligible,
+                    maxLoanAmount: isEligible ? loanAmount : 0,
+                    creditScore: isEligible ? 650 : 0
+                };
+                
+                if (isEligible) {
+                    showLoanQualificationPopup(eligibilityData, investmentsCount, kycStatus);
+                } else {
+                    showLoanRejectionPopup(eligibilityData, investmentsCount, kycStatus);
+                }
             }
         } catch (error) {
             console.error('Error checking loan eligibility:', error);
-            showNotification('error', 'Eligibility Check Failed', 'Unable to check loan eligibility. Please try again.');
+            
+            // Fallback to simple check
+            const token = localStorage.getItem('jwtToken');
+            if (!token) {
+                showNotification('error', 'Authentication Required', 'Please login to check loan eligibility.');
+                return;
+            }
+            
+            try {
+                // Try to get basic user data
+                const userResponse = await fetch('https://bithashcapital.onrender.com/api/users/me', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (userResponse.ok) {
+                    const userData = await userResponse.json();
+                    const eligibilityData = {
+                        eligible: false,
+                        maxLoanAmount: 0,
+                        creditScore: 0,
+                        reasons: ['Unable to verify eligibility requirements at this time']
+                    };
+                    
+                    showLoanRejectionPopup(eligibilityData, 0, 'unverified');
+                } else {
+                    showNotification('error', 'Eligibility Check Failed', 'Unable to check loan eligibility. Please try again.');
+                }
+            } catch (fallbackError) {
+                showNotification('error', 'Connection Error', 'Unable to connect to the server. Please check your connection.');
+            }
         }
     }
 
@@ -7052,12 +7100,12 @@
                         <i class="fas fa-chart-line"></i>
                     </div>
                     <div class="eligibility-text">
-                        <strong>Active Investments:</strong> <span class="eligibility-value">${investmentsCount}</span>
+                        <strong>Active Investments:</strong> <span class="eligibility-value">${investmentsCount}/5</span>
                     </div>
                 </div>
                 <div class="eligibility-item">
-                    <div class="eligibility-icon ${kycStatus === 'verified' ? 'success' : kycStatus === 'pending' ? 'warning' : 'error'}">
-                        <i class="fas fa-${kycStatus === 'verified' ? 'check' : kycStatus === 'pending' ? 'clock' : 'times'}"></i>
+                    <div class="eligibility-icon success">
+                        <i class="fas fa-user-check"></i>
                     </div>
                     <div class="eligibility-text">
                         <strong>KYC Status:</strong> <span class="eligibility-value">${kycStatus.charAt(0).toUpperCase() + kycStatus.slice(1)}</span>
@@ -7071,7 +7119,7 @@
                 <p>• Minimum Loan Term: 3 months</p>
             </div>
             <p style="margin-top: 15px; font-size: 0.8rem; color: var(--gray);">
-                Based on your account verification, transaction history, and investment frequency.
+                Based on your account verification and investment history.
             </p>
         `;
         
@@ -7088,7 +7136,7 @@
             return;
         }
         
-        const reasons = eligibilityData.reasons || [];
+        const reasons = [];
         
         // Add specific reasons based on new data
         if (investmentsCount < 5) {
@@ -7096,6 +7144,11 @@
         }
         if (kycStatus !== 'verified') {
             reasons.push(`KYC status: ${kycStatus} (Verified required)`);
+        }
+        
+        // Add any additional reasons from eligibilityData
+        if (eligibilityData.reasons && Array.isArray(eligibilityData.reasons)) {
+            reasons.push(...eligibilityData.reasons);
         }
         
         loanPopupContent.innerHTML = `
@@ -7127,7 +7180,7 @@
                 ` : ''}
             </div>
             <p style="margin-top: 15px; font-size: 0.8rem; color: var(--gray);">
-                To qualify: Verify your account, make at least 5 investments, and maintain good transaction history.
+                To qualify: Verify your account and complete at least 5 investments.
             </p>
         `;
         
@@ -7175,6 +7228,9 @@
                 const investmentsCount = investmentsData.count || 0;
                 const kycStatus = kycData.status || 'unverified';
                 
+                // Check if user meets requirements
+                const meetsRequirements = investmentsCount >= 5 && kycStatus === 'verified';
+                
                 // Update loan terms display
                 const maxLoanAmount = loanData.maxLoanAmount || 0;
                 const creditScore = loanData.creditScore || 0;
@@ -7215,16 +7271,6 @@
                             id: 'investments', 
                             label: 'Minimum 5 Investments', 
                             status: investmentsCount >= 5 ? 'verified' : 'unverified' 
-                        },
-                        { 
-                            id: 'balance', 
-                            label: 'Sufficient Transaction History', 
-                            status: loanData.goodTransactionHistory ? 'verified' : 'pending' 
-                        },
-                        { 
-                            id: 'credit', 
-                            label: 'Credit Score ≥ 600', 
-                            status: loanData.creditScore >= 600 ? 'verified' : 'pending' 
                         }
                     ];
                     
@@ -7248,6 +7294,21 @@
                         <span>You have ${investmentsCount} active investments</span>
                     `;
                     loanEligibilityCheck.appendChild(investmentInfo);
+                    
+                    // Disable submit button if requirements not met
+                    const submitButton = document.getElementById('submit-loan-application');
+                    if (submitButton) {
+                        submitButton.disabled = !meetsRequirements;
+                        if (!meetsRequirements) {
+                            submitButton.title = 'You need at least 5 investments and verified KYC to apply for a loan';
+                            submitButton.style.opacity = '0.6';
+                            submitButton.style.cursor = 'not-allowed';
+                        } else {
+                            submitButton.title = '';
+                            submitButton.style.opacity = '1';
+                            submitButton.style.cursor = 'pointer';
+                        }
+                    }
                 }
                 
                 // Set default loan amount
@@ -7302,6 +7363,44 @@
         
         if (amount < 1000) {
             showNotification('error', 'Invalid Amount', 'Minimum loan amount is $1,000.');
+            return;
+        }
+        
+        // First check if user meets requirements
+        try {
+            const [investmentsResponse, kycResponse] = await Promise.all([
+                fetch('https://bithashcapital.onrender.com/api/users/investments/count', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                }),
+                fetch('https://bithashcapital.onrender.com/api/users/kyc/status', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+            ]);
+            
+            if (investmentsResponse.ok && kycResponse.ok) {
+                const investmentsData = await investmentsResponse.json();
+                const kycData = await kycResponse.json();
+                
+                const investmentsCount = investmentsData.count || 0;
+                const kycStatus = kycData.status || 'unverified';
+                
+                if (investmentsCount < 5) {
+                    showNotification('error', 'Insufficient Investments', `You need at least 5 investments (you have ${investmentsCount}).`);
+                    return;
+                }
+                
+                if (kycStatus !== 'verified') {
+                    showNotification('error', 'KYC Not Verified', 'Please complete KYC verification before applying for a loan.');
+                    return;
+                }
+            }
+        } catch (error) {
+            console.error('Error checking requirements:', error);
+            showNotification('error', 'Verification Failed', 'Unable to verify your eligibility. Please try again.');
             return;
         }
         
