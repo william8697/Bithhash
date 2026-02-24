@@ -2107,7 +2107,7 @@
     let filteredAssets = [...topAssets];
     const assetsPerPage = 5;
 
-    // Enhanced fetch with CORS handling - FIXED to handle non-JSON errors
+    // Enhanced fetch with CORS handling and better error reporting
     async function apiCall(url, options = {}) {
         try {
             const token = localStorage.getItem('jwtToken');
@@ -2115,6 +2115,7 @@
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
+                    'Accept': 'application/json',
                     ...options.headers
                 },
                 mode: 'cors',
@@ -2127,24 +2128,41 @@
                 delete mergedOptions.headers['Content-Type'];
             }
 
+            console.log(`Making API call to: ${url}`, { method: mergedOptions.method || 'GET' });
+            
             const response = await fetch(url, mergedOptions);
             
-            // Try to parse response as JSON, but handle non-JSON responses gracefully
-            let data;
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                data = await response.json();
-            } else {
-                // For non-JSON responses, just return the response status
-                data = { status: response.status, statusText: response.statusText };
-            }
+            // Log response status for debugging
+            console.log(`Response from ${url}: ${response.status} ${response.statusText}`);
             
+            // Check if response is OK
             if (!response.ok) {
-                const errorMessage = data.message || `HTTP ${response.status}: ${response.statusText}`;
+                let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                let errorData = null;
+                
+                try {
+                    // Try to parse error response as JSON
+                    const contentType = response.headers.get('content-type');
+                    if (contentType && contentType.includes('application/json')) {
+                        errorData = await response.json();
+                        errorMessage = errorData.message || errorData.error || errorMessage;
+                    } else {
+                        // If not JSON, get text
+                        errorMessage = await response.text();
+                    }
+                } catch (parseError) {
+                    console.warn('Could not parse error response:', parseError);
+                }
+                
+                console.error('API error details:', { status: response.status, message: errorMessage, data: errorData });
                 throw new Error(errorMessage);
             }
             
+            // Parse JSON response
+            const data = await response.json();
+            console.log(`API call successful to ${url}:`, data);
             return data;
+            
         } catch (error) {
             console.error('API call failed:', error);
             throw error;
@@ -2237,9 +2255,9 @@
             
             if (depositResponse.ok) {
                 const data = await depositResponse.json();
-                if (data.asset) {
-                    AppState.depositAsset = data.asset;
-                    AppState.userPreferences.displayAsset = data.asset;
+                if (data.data && data.data.asset) {
+                    AppState.depositAsset = data.data.asset;
+                    AppState.userPreferences.displayAsset = data.data.asset;
                 }
             }
         } catch (error) {
@@ -2720,51 +2738,59 @@
     }
     
     async function confirmAssetDeposit() {
-    const usdAmount = parseFloat(document.getElementById('asset-amount-usd').value);
-    const assetAmount = document.getElementById('asset-amount').value;
-    const asset = AppState.selectedAsset || topAssets[0];
-    
-    if (!usdAmount || usdAmount < 10 || !assetAmount) {
-        showNotification('error', 'Validation Error', 'Please enter a valid amount (minimum $10)', 3000);
-        return;
-    }
-    
-    // Update modal with details
-    document.getElementById('modal-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
-    document.getElementById('modal-asset-amount').textContent = `${assetAmount} ${asset.symbol.toUpperCase()}`;
-    document.getElementById('modal-asset').textContent = `${asset.name} (${asset.symbol.toUpperCase()})`;
-    document.getElementById('modal-asset-address').textContent = AppState.currentAssetAddress;
-    
-    // Send deposit request to backend for admin approval
-    try {
-        const token = localStorage.getItem('jwtToken');
+        const usdAmount = parseFloat(document.getElementById('asset-amount-usd').value);
+        const assetAmount = document.getElementById('asset-amount').value;
+        const asset = AppState.selectedAsset || topAssets[0];
         
-        // Using apiCall which now handles non-JSON errors gracefully
-        await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
-            method: 'POST',
-            body: JSON.stringify({
+        if (!usdAmount || usdAmount < 10 || !assetAmount) {
+            showNotification('error', 'Validation Error', 'Please enter a valid amount (minimum $10)', 3000);
+            return;
+        }
+        
+        // Update modal with details
+        document.getElementById('modal-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
+        document.getElementById('modal-asset-amount').textContent = `${assetAmount} ${asset.symbol.toUpperCase()}`;
+        document.getElementById('modal-asset').textContent = `${asset.name} (${asset.symbol.toUpperCase()})`;
+        document.getElementById('modal-asset-address').textContent = AppState.currentAssetAddress;
+        
+        // Send deposit request to backend for admin approval
+        try {
+            const token = localStorage.getItem('jwtToken');
+            
+            // Prepare the deposit data with all required fields
+            const depositData = {
                 amount: usdAmount,
                 assetAmount: parseFloat(assetAmount),
                 asset: asset.symbol,
                 address: AppState.currentAssetAddress,
-                method: 'asset', // Changed from 'crypto' to 'asset' to match the enum expected by backend
+                method: 'crypto',
                 status: 'pending'
-            })
-        });
-        
-        showNotification('success', 'Deposit Request Submitted', 'Your deposit request has been sent for admin approval.', 5000);
-        
-        // Refresh deposit history
-        await loadDepositHistory();
-        
-    } catch (error) {
-        console.error('Error submitting deposit request:', error);
-        showNotification('error', 'Request Failed', error.message || 'Failed to submit deposit request. Please try again.', 5000);
-        return;
+            };
+            
+            console.log('Submitting deposit request:', depositData);
+            
+            // Using apiCall which now handles non-JSON errors gracefully
+            const response = await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
+                method: 'POST',
+                body: JSON.stringify(depositData)
+            });
+            
+            console.log('Deposit request response:', response);
+            
+            showNotification('success', 'Deposit Request Submitted', 'Your deposit request has been sent for admin approval.', 5000);
+            
+            // Refresh deposit history
+            await loadDepositHistory();
+            
+            // Open the confirmation modal
+            openModal('asset-confirm-modal');
+            
+        } catch (error) {
+            console.error('Error submitting deposit request:', error);
+            showNotification('error', 'Request Failed', error.message || 'Failed to submit deposit request. Please try again.', 5000);
+            return;
+        }
     }
-    
-    openModal('asset-confirm-modal');
-}
     
     function copyAssetDetails() {
         const assetAmount = document.getElementById('modal-asset-amount').textContent;
@@ -3055,7 +3081,7 @@
                 });
                 
                 let statusBadge;
-                if (deposit.status === 'completed') {
+                if (deposit.status === 'completed' || deposit.status === 'confirmed') {
                     statusBadge = '<span class="status-badge success">Completed</span>';
                 } else if (deposit.status === 'pending') {
                     statusBadge = '<span class="status-badge pending">Pending Approval</span>';
