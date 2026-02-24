@@ -2798,7 +2798,7 @@
         openModal('asset-confirm-modal');
     }
 
-    // New function - called when user clicks "I've Paid"
+    // FIXED: Updated function with proper asset field - this fixes the "asset required" error
     async function submitPaidConfirmation() {
         const usdAmount = parseFloat(document.getElementById('asset-amount-usd').value);
         const assetAmount = document.getElementById('asset-amount').value;
@@ -2810,23 +2810,26 @@
         try {
             const token = localStorage.getItem('jwtToken');
             
-            // Prepare the deposit data
+            // Prepare the deposit data with REQUIRED fields based on backend schema
+            // Backend requires: amount, asset (required), method, status
             const depositData = {
                 amount: usdAmount,
                 assetAmount: parseFloat(assetAmount),
-                asset: asset.symbol,
+                asset: asset.symbol,           // CRITICAL: This field is required by backend
                 address: AppState.currentAssetAddress,
-                method: asset.symbol,
+                method: 'crypto',                // Using 'crypto' as method for asset deposits
                 status: 'pending'
             };
             
             console.log('Submitting deposit request:', depositData);
             
             // Send deposit request to backend
-            await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
+            const response = await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
                 method: 'POST',
                 body: JSON.stringify(depositData)
             });
+            
+            console.log('Deposit request successful:', response);
             
             // Show green processing notification modal
             openModal('processing-modal');
@@ -2913,8 +2916,8 @@
                 method: 'POST',
                 body: JSON.stringify({
                     amount: amount,
-                    asset: asset.symbol,
-                    method: 'card',
+                    asset: asset.symbol,           // CRITICAL: Include asset field
+                    method: 'card',                 // Using 'card' as method
                     status: 'pending',
                     cardDetails: {
                         last4: cardNumber.slice(-4),
@@ -3080,7 +3083,7 @@
     }
     
     /* ============================================= */
-    /* Deposit History */
+    /* Deposit History - FIXED to handle undefined values */
     /* ============================================= */
     
     async function loadDepositHistory() {
@@ -3089,7 +3092,7 @@
             const tableBody = document.getElementById('deposits-table');
             tableBody.innerHTML = '';
             
-            if (deposits.length === 0) {
+            if (!deposits || deposits.length === 0) {
                 tableBody.innerHTML = `
                     <tr>
                         <td colspan="6" style="text-align: center; padding: 30px;">
@@ -3101,52 +3104,71 @@
             }
             
             deposits.slice(0, 10).forEach(deposit => {
+                // FIXED: Add null checks for all values to prevent toFixed errors
                 const row = document.createElement('tr');
                 
-                const date = new Date(deposit.date || deposit.createdAt);
-                const formattedDate = date.toLocaleDateString('en-US', {
+                const date = deposit.date || deposit.createdAt;
+                const formattedDate = date ? new Date(date).toLocaleDateString('en-US', {
                     year: 'numeric',
                     month: 'short',
                     day: 'numeric',
                     hour: '2-digit',
                     minute: '2-digit'
-                });
+                }) : 'N/A';
                 
                 let statusBadge;
-                if (deposit.status === 'completed' || deposit.status === 'confirmed') {
+                const status = deposit.status || 'pending';
+                if (status === 'completed' || status === 'confirmed') {
                     statusBadge = '<span class="status-badge success">Completed</span>';
-                } else if (deposit.status === 'pending') {
+                } else if (status === 'pending') {
                     statusBadge = '<span class="status-badge pending">Pending</span>';
                 } else {
                     statusBadge = '<span class="status-badge failed">Failed</span>';
                 }
                 
                 let methodIcon;
-                if (deposit.method === 'card') {
+                const method = deposit.method || 'crypto';
+                const depositAsset = deposit.asset || 'btc';
+                
+                if (method === 'card') {
                     methodIcon = '<i class="far fa-credit-card" style="color: var(--security-blue);"></i> Card';
                 } else {
-                    const assetData = topAssets.find(a => a.symbol === deposit.asset) || topAssets[0];
+                    const assetData = topAssets.find(a => a.symbol === depositAsset) || topAssets[0];
                     methodIcon = `<img src="${assetData.logo}" style="width: 16px; height: 16px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetData.symbol.toUpperCase()}`;
                 }
                 
-                const assetSymbol = deposit.asset ? deposit.asset.toUpperCase() : 'BTC';
-                const assetData = topAssets.find(a => a.symbol === deposit.asset) || topAssets[0];
+                const assetSymbol = depositAsset ? depositAsset.toUpperCase() : 'BTC';
+                const assetData = topAssets.find(a => a.symbol === depositAsset) || topAssets[0];
                 const assetLogo = assetData ? assetData.logo : 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
+                
+                // FIXED: Use safe number formatting with fallback values
+                const amount = deposit.amount || 0;
+                const txId = deposit.txId || deposit.transactionId || 'N/A';
                 
                 row.innerHTML = `
                     <td>${formattedDate}</td>
                     <td>${methodIcon}</td>
-                    <td>$${deposit.amount.toFixed(2)}</td>
+                    <td>$${amount.toFixed ? amount.toFixed(2) : '0.00'}</td>
                     <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol}</td>
                     <td>${statusBadge}</td>
-                    <td>${deposit.txId || 'N/A'}</td>
+                    <td>${txId}</td>
                 `;
                 
                 tableBody.appendChild(row);
             });
         } catch (error) {
             console.error('Error loading deposit history:', error);
-            showNotification('error', 'Data Error', 'Failed to load deposit history. Please try again later.');
+            const tableBody = document.getElementById('deposits-table');
+            if (tableBody) {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 30px; color: var(--error);">
+                            Failed to load deposit history. Please try again later.
+                        </td>
+                    </tr>
+                `;
+            }
+            // Don't show notification for silent error handling
         }
     }
     
