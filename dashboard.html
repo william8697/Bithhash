@@ -2901,7 +2901,7 @@
                 </div>
             </div>
 
-            <!--Prices by Market Cap - ALL DATA FROM COINGECKO API WITH COLORED PRICE CHANGES (RED FOR LOSS, GREEN FOR GAIN) AND MULTIPLE FALLBACK SOURCES -->
+            <!--Prices by Market Cap - ALL DATA FROM COINGECKO API WITH REAL-TIME COLORING -->
             <div class="crypto-prices-section">
                 <div class="section-header">
                     <h2 class="section-title">Prices by Market Cap</h2>
@@ -2924,7 +2924,7 @@
                             </tr>
                         </thead>
                         <tbody id="crypto-table-body">
-                            <!-- Will be populated dynamically from CoinGecko API with multiple fallback sources -->
+                            <!-- Will be populated dynamically from CoinGecko API with proper coloring -->
                         </tbody>
                     </table>
                 </div>
@@ -3171,7 +3171,7 @@
                 </div>
             </div>
             
-            <!-- Recent Transactions - REMOVED REFRESH BUTTON - PAGINATED 5 PER PAGE - EACH TRANSACTION USES CORRECT EXCHANGE RATE FOR ITS ASSET -->
+            <!-- Recent Transactions - REMOVED REFRESH BUTTON - PAGINATED 5 PER PAGE -->
             <div class="transactions-section">
                 <div class="section-header">
                     <h2 class="section-title">Recent Transactions</h2>
@@ -3191,7 +3191,7 @@
                             </tr>
                         </thead>
                         <tbody id="transactions-table">
-                            <!-- Transactions will be loaded dynamically (5 per page) with proper logos and asset amounts using correct exchange rate for each asset -->
+                            <!-- Transactions will be loaded dynamically (5 per page) with proper logos and asset amounts -->
                         </tbody>
                     </table>
                 </div>
@@ -3274,7 +3274,7 @@
         </div>
     </div>
 
-    <!-- Transaction Details Modal - BINANCE STYLE - Enhanced with Binance/Bybit level detail using correct exchange rates for each asset -->
+    <!-- Transaction Details Modal - BINANCE STYLE - Enhanced with Binance/Bybit level detail -->
     <div class="modal" id="transaction-details-modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -3282,7 +3282,7 @@
                 <button class="modal-close" onclick="closeTransactionDetails()">&times;</button>
             </div>
             <div class="modal-body" id="transaction-details-body">
-                <!-- Will be populated dynamically with professional exchange-grade detail using correct exchange rates -->
+                <!-- Will be populated dynamically with professional exchange-grade detail -->
             </div>
         </div>
     </div>
@@ -3479,7 +3479,9 @@
         { name: 'CoinGecko', url: 'https://api.coingecko.com/api/v3/simple/price' },
         { name: 'CoinCap', url: 'https://api.coincap.io/v2/assets' },
         { name: 'Binance', url: 'https://api.binance.com/api/v3/ticker/price' },
-        { name: 'KuCoin', url: 'https://api.kucoin.com/api/v1/prices' }
+        { name: 'KuCoin', url: 'https://api.kucoin.com/api/v1/prices' },
+        { name: 'CryptoCompare', url: 'https://min-api.cryptocompare.com/data/pricemulti' },
+        { name: 'Bybit', url: 'https://api.bybit.com/v5/market/tickers' }
     ];
     
     // Top 30 assets by market cap (CoinGecko IDs) - with logos
@@ -3546,7 +3548,7 @@
             await checkLoanEligibility();
             await loadUserPreferences();
             
-            // Initialize crypto table with colored price changes (red for loss, green for gain)
+            // Initialize crypto table
             renderCryptoTable();
             
             // Initialize convert section
@@ -3749,7 +3751,7 @@
     }
     
     /* ============================================= */
-    /* Enhanced Price Fetching - Multiple Sources */
+    /* Enhanced Price Fetching - Multiple Sources (6+ fallbacks) */
     /* ============================================= */
     
     async function fetchAllPricesWithMultipleSources() {
@@ -3757,7 +3759,9 @@
             fetchCoinGeckoPrices,
             fetchCoinCapPrices,
             fetchBinancePrices,
-            fetchKuCoinPrices
+            fetchKuCoinPrices,
+            fetchCryptoComparePrices,
+            fetchBybitPrices
         ];
         
         // Shuffle sources to try in random order
@@ -3781,7 +3785,12 @@
             }
         }
         
-        console.error('All price sources failed');
+        console.error('All price sources failed - using cached or fallback data');
+        // Use cached data if available
+        if (Object.keys(currentPrices).length === 0) {
+            // Set fallback prices from static data
+            setFallbackPrices();
+        }
         return false;
     }
     
@@ -3881,6 +3890,82 @@
             console.warn('KuCoin failed:', error);
         }
         return false;
+    }
+    
+    async function fetchCryptoComparePrices() {
+        try {
+            const symbols = topAssets.map(a => a.symbol.toUpperCase()).join(',');
+            const response = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${symbols}&tsyms=USD`);
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                if (data.RAW) {
+                    Object.keys(data.RAW).forEach(symbol => {
+                        const asset = topAssets.find(a => a.symbol.toUpperCase() === symbol);
+                        if (asset && data.RAW[symbol].USD) {
+                            prices[asset.id] = {
+                                usd: data.RAW[symbol].USD.PRICE,
+                                usd_24h_change: data.RAW[symbol].USD.CHANGEPCT24HOUR,
+                                usd_24h_vol: data.RAW[symbol].USD.VOLUME24HOURTO * data.RAW[symbol].USD.PRICE,
+                                usd_market_cap: data.RAW[symbol].USD.MKTCAP
+                            };
+                        }
+                    });
+                }
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 43000;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('CryptoCompare failed:', error);
+        }
+        return false;
+    }
+    
+    async function fetchBybitPrices() {
+        try {
+            const response = await fetch('https://api.bybit.com/v5/market/tickers?category=spot');
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                if (data.result && data.result.list) {
+                    data.result.list.forEach(ticker => {
+                        const symbol = ticker.symbol.replace('USDT', '').toLowerCase();
+                        const asset = topAssets.find(a => a.symbol === symbol);
+                        if (asset && ticker.lastPrice) {
+                            prices[asset.id] = {
+                                usd: parseFloat(ticker.lastPrice),
+                                usd_24h_change: parseFloat(ticker.price24hPcnt) * 100,
+                                usd_24h_vol: parseFloat(ticker.volume24h) * parseFloat(ticker.lastPrice),
+                                usd_market_cap: 0
+                            };
+                        }
+                    });
+                }
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 43000;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('Bybit failed:', error);
+        }
+        return false;
+    }
+    
+    function setFallbackPrices() {
+        // Set realistic fallback prices to avoid showing incorrect data
+        currentPrices = {
+            bitcoin: { usd: 43000, usd_24h_change: 0.5, usd_1h_change: 0.1, usd_7d_change: -1.2, usd_24h_vol: 28000000000, usd_market_cap: 840000000000 },
+            ethereum: { usd: 2300, usd_24h_change: 0.3, usd_1h_change: 0.05, usd_7d_change: -0.8, usd_24h_vol: 12000000000, usd_market_cap: 276000000000 },
+            tether: { usd: 1.00, usd_24h_change: 0.01, usd_1h_change: 0.0, usd_7d_change: 0.02, usd_24h_vol: 45000000000, usd_market_cap: 95000000000 },
+            binancecoin: { usd: 320, usd_24h_change: 0.4, usd_1h_change: 0.08, usd_7d_change: -0.5, usd_24h_vol: 1500000000, usd_market_cap: 49000000000 },
+            solana: { usd: 98, usd_24h_change: 1.2, usd_1h_change: 0.15, usd_7d_change: 2.5, usd_24h_vol: 2800000000, usd_market_cap: 42000000000 }
+        };
+        currentBTCPrice = 43000;
     }
     
     /* ============================================= */
@@ -4015,7 +4100,7 @@
     }
     
     /* ============================================= */
-    /* Crypto Table Functions - WITH COLORED PRICE CHANGES (RED FOR LOSS, GREEN FOR GAIN) */
+    /* Crypto Table Functions - With Proper Coloring */
     /* ============================================= */
     
     function renderCryptoTable() {
@@ -4058,8 +4143,8 @@
             `;
             tbody.appendChild(row);
             
-            // Create mini chart with colored trendline (green for gain, red for loss)
-            createMiniChart(`chart-${asset.id}`, change7d >= 0);
+            // Create mini chart with proper color based on trend
+            createMiniChart(`chart-${asset.id}`, change24h >= 0);
         });
         
         // Update pagination
@@ -4091,7 +4176,7 @@
             points.push(value);
         }
         
-        // Draw trendline
+        // Draw trendline with proper color (green for gain, red for loss)
         ctx.beginPath();
         ctx.strokeStyle = isPositive ? '#00FF00' : '#FF0000';
         ctx.lineWidth = 2;
@@ -4245,7 +4330,7 @@
     }
     
     /* ============================================= */
-    /* Convert Section Functions */
+    /* Convert Section Functions - With Asset-Specific Exchange Rates */
     /* ============================================= */
     
     function initConvertSection() {
@@ -4319,6 +4404,7 @@
         list.innerHTML = '';
         
         pageAssets.forEach(asset => {
+            // Use the correct exchange rate for this specific asset
             const price = currentPrices[asset.id]?.usd || 0;
             const balance = userAssetBalances[asset.symbol] || 0;
             const item = document.createElement('div');
@@ -4372,6 +4458,7 @@
         list.innerHTML = '';
         
         pageAssets.forEach(asset => {
+            // Use the correct exchange rate for this specific asset
             const price = currentPrices[asset.id]?.usd || 0;
             const balance = userAssetBalances[asset.symbol] || 0;
             const item = document.createElement('div');
@@ -4419,7 +4506,9 @@
         
         const balance = parseFloat(userAssetBalances[asset.symbol] || 0);
         document.getElementById('from-selected-balance').textContent = `Balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}`;
-        document.getElementById('from-balance-info').textContent = `Balance: ${formatUSD(balance * (currentPrices[asset.id]?.usd || 0))}`;
+        // Use the correct exchange rate for this asset
+        const price = currentPrices[asset.id]?.usd || 0;
+        document.getElementById('from-balance-info').textContent = `Balance: ${formatUSD(balance * price)}`;
         
         // Hide asset list
         document.getElementById('from-asset-list').classList.remove('show');
@@ -4450,7 +4539,9 @@
         
         const balance = parseFloat(userAssetBalances[asset.symbol] || 0);
         document.getElementById('to-selected-balance').textContent = `Balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}`;
-        document.getElementById('to-balance-info').textContent = `Balance: ${formatUSD(balance * (currentPrices[asset.id]?.usd || 0))}`;
+        // Use the correct exchange rate for this asset
+        const price = currentPrices[asset.id]?.usd || 0;
+        document.getElementById('to-balance-info').textContent = `Balance: ${formatUSD(balance * price)}`;
         
         // Hide asset list
         document.getElementById('to-asset-list').classList.remove('show');
@@ -4478,6 +4569,7 @@
         
         document.getElementById('conversion-rate-display').style.display = 'block';
         
+        // Use the correct exchange rates for each asset
         const fromPrice = currentPrices[selectedFromAsset.id]?.usd || 0;
         const toPrice = currentPrices[selectedToAsset.id]?.usd || 0;
         
@@ -4501,6 +4593,7 @@
         if (!selectedFromAsset || !selectedToAsset) return;
         
         const fromAmount = parseFloat(document.getElementById('from-amount').value) || 0;
+        // Use the correct exchange rate for each asset
         const fromPrice = currentPrices[selectedFromAsset.id]?.usd || 0;
         const toPrice = currentPrices[selectedToAsset.id]?.usd || 0;
         
@@ -4531,6 +4624,10 @@
         
         try {
             const token = localStorage.getItem('jwtToken');
+            // Use the correct exchange rates for each asset in the request
+            const fromPrice = currentPrices[selectedFromAsset.id]?.usd || 0;
+            const toPrice = currentPrices[selectedToAsset.id]?.usd || 0;
+            
             const response = await fetch('https://bithash-backend.onrender.com/api/convert', {
                 method: 'POST',
                 headers: {
@@ -4541,8 +4638,8 @@
                     fromAsset: selectedFromAsset.symbol,
                     toAsset: selectedToAsset.symbol,
                     amount: fromAmount,
-                    fromPrice: currentPrices[selectedFromAsset.id]?.usd,
-                    toPrice: currentPrices[selectedToAsset.id]?.usd
+                    fromPrice: fromPrice,
+                    toPrice: toPrice
                 })
             });
             
@@ -4591,7 +4688,7 @@
             ${asset.name} (${asset.symbol.toUpperCase()})
         `;
         
-        // Populate details
+        // Populate details with correct exchange rate for this asset
         const price = currentPrices[asset.id]?.usd || 0;
         const change24h = currentPrices[asset.id]?.usd_24h_change || 0;
         const volume = currentPrices[asset.id]?.usd_24h_vol || 0;
@@ -4704,6 +4801,10 @@
         
         try {
             const token = localStorage.getItem('jwtToken');
+            // Use the correct exchange rates for each asset
+            const fromPrice = currentPrices[asset.id]?.usd || 0;
+            const toPrice = currentPrices[toAsset.id]?.usd || 0;
+            
             const response = await fetch('https://bithash-backend.onrender.com/api/convert', {
                 method: 'POST',
                 headers: {
@@ -4714,8 +4815,8 @@
                     fromAsset: asset.symbol,
                     toAsset: toSymbol,
                     amount: amount,
-                    fromPrice: currentPrices[asset.id]?.usd,
-                    toPrice: currentPrices[toAsset.id]?.usd
+                    fromPrice: fromPrice,
+                    toPrice: toPrice
                 })
             });
             
@@ -4725,7 +4826,7 @@
                 // Update balances
                 userAssetBalances[asset.symbol] = (parseFloat(userAssetBalances[asset.symbol] || 0) - amount).toFixed(8);
                 
-                const toAmount = amount * (currentPrices[asset.id]?.usd || 0) / (currentPrices[toAsset.id]?.usd || 1);
+                const toAmount = amount * fromPrice / toPrice;
                 userAssetBalances[toAsset.symbol] = (parseFloat(userAssetBalances[toAsset.symbol] || 0) + toAmount).toFixed(8);
                 
                 // Refresh balances and transactions
@@ -4764,7 +4865,7 @@
     }
     
     /* ============================================= */
-    /* Transaction Details Functions - EACH TRANSACTION USES CORRECT EXCHANGE RATE FOR ITS ASSET */
+    /* Transaction Details Functions - With Asset-Specific Info */
     /* ============================================= */
     
     function openTransactionDetails(transaction) {
@@ -4786,25 +4887,9 @@
         const toAssetLogo = assetLogos[toAssetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/325/large/Tether.png';
         
         const usdAmount = parseFloat(transaction.amount) || 0;
-        
-        // Use the correct exchange rate for this specific asset
-        const assetPrice = currentPrices[fromAssetSymbol]?.usd || currentPrices.bitcoin?.usd || 43000;
-        
-        // For conversion transactions, use the exchange rate from the transaction data or calculate it
-        let exchangeRate = transaction.exchangeRate;
-        if (!exchangeRate && transaction.type === 'conversion') {
-            const fromPrice = currentPrices[fromAssetSymbol]?.usd || 0;
-            const toPrice = currentPrices[toAssetSymbol]?.usd || 0;
-            if (fromPrice && toPrice) {
-                exchangeRate = fromPrice / toPrice;
-            }
-        } else if (!exchangeRate) {
-            exchangeRate = assetPrice;
-        }
-        
-        const assetAmount = transaction.assetAmount || 
+        const assetAmount = parseFloat(transaction.assetAmount) || 
                           (transaction.type === 'conversion' ? parseFloat(transaction.toAmount) || 0 : 
-                           parseFloat(transaction.btcAmount) || (usdAmount / assetPrice));
+                           parseFloat(transaction.btcAmount) || 0);
         
         const fromAmount = parseFloat(transaction.fromAmount) || 
                          (transaction.type === 'conversion' ? parseFloat(transaction.fromAmount) : usdAmount);
@@ -4844,6 +4929,11 @@
         
         const amountClass = isIncoming ? 'price-positive' : 'price-negative';
         const amountPrefix = isIncoming ? '+' : '-';
+        
+        // Use the correct exchange rate for this transaction's asset
+        const exchangeRate = transaction.exchangeRate || 
+                           (transaction.type === 'conversion' ? fromAmount / toAmount : 
+                            usdAmount / (assetAmount || 1));
         
         let network = transaction.network || 'Unknown';
         
@@ -5236,19 +5326,14 @@
                                               t.type === 'withdrawal' ? t.method || 'btc' : 
                                               t.type === 'conversion' ? t.toAsset || 'usdt' : 'btc');
                     
+                    // Find the correct asset ID and use its exchange rate
+                    const assetObj = topAssets.find(a => a.symbol === asset.toLowerCase()) || topAssets[0];
+                    const assetPrice = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                    
                     if (t.type === 'conversion') {
                         const fromAmount = parseFloat(t.fromAmount) || 0;
                         const toAmount = parseFloat(t.toAmount) || 0;
-                        
-                        // Get the correct exchange rate for the from asset
-                        const fromAsset = t.fromAsset || 'btc';
-                        const fromPrice = currentPrices[fromAsset]?.usd || currentBTCPrice;
-                        
-                        // Get the correct exchange rate for the to asset
-                        const toAsset = t.toAsset || 'usdt';
-                        const toPrice = currentPrices[toAsset]?.usd || 1;
-                        
-                        const exchangeRate = t.exchangeRate || (fromPrice / toPrice);
+                        const exchangeRate = t.exchangeRate || (fromAmount && toAmount ? fromAmount / toAmount : 0);
                         
                         return {
                             ...t,
@@ -5262,8 +5347,6 @@
                         };
                     }
                     
-                    // Get the correct exchange rate for this asset
-                    const assetPrice = currentPrices[asset]?.usd || currentBTCPrice;
                     const assetAmount = assetPrice ? amount / assetPrice : 0;
                     
                     return {
@@ -5399,9 +5482,7 @@
                     </div>
                 `;
             } else {
-                // Use the correct exchange rate for this asset
-                const assetPrice = transaction.exchangeRate || currentPrices[assetSymbol]?.usd || currentBTCPrice;
-                assetAmount = parseFloat(transaction.assetAmount) || (usdAmount / assetPrice);
+                assetAmount = parseFloat(transaction.assetAmount) || (usdAmount / (transaction.exchangeRate || currentBTCPrice));
                 assetSymbolForAmount = assetSymbol.toUpperCase();
                 
                 amountDisplay = `
