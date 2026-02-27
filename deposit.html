@@ -2059,7 +2059,6 @@
 <!-- Google Places API -->
 <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB6Ty5ZHqoSA2jlyqnyi1c7HqLp6G8Ij7I&libraries=places"></script>
 
-
 <script>
     // Initialize AOS animation
     AOS.init({
@@ -2073,6 +2072,7 @@
         userData: null,
         currentAssetAddress: '',
         currentAssetRate: 0,
+        currentAssetRateChange: 0,
         rateExpiry: 0,
         rateUpdateInProgress: false,
         notificationQueue: [],
@@ -2087,7 +2087,7 @@
         assetAddresses: {} // Cache for addresses by asset symbol
     };
 
-    // ONLY these 10 assets (as requested)
+    // Only these 10 assets (as requested)
     const topAssets = [
         { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', network: 'Bitcoin' },
         { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', network: 'Ethereum (ERC20)' },
@@ -2132,22 +2132,18 @@
             
             const response = await fetch(url, mergedOptions);
             
-            // Log response status for debugging
             console.log(`Response from ${url}: ${response.status} ${response.statusText}`);
             
-            // Check if response is OK
             if (!response.ok) {
                 let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
                 let errorData = null;
                 
                 try {
-                    // Try to parse error response as JSON
                     const contentType = response.headers.get('content-type');
                     if (contentType && contentType.includes('application/json')) {
                         errorData = await response.json();
                         errorMessage = errorData.message || errorData.error || errorMessage;
                     } else {
-                        // If not JSON, get text
                         errorMessage = await response.text();
                     }
                 } catch (parseError) {
@@ -2158,7 +2154,6 @@
                 throw new Error(errorMessage);
             }
             
-            // Parse JSON response
             const data = await response.json();
             console.log(`API call successful to ${url}:`, data);
             return data;
@@ -2183,7 +2178,7 @@
             // Check user's preferred deposit asset
             await checkUserDepositAsset();
             
-            // Load asset deposit address
+            // Load asset deposit address with real-time rate
             await loadAssetDepositAddress();
             
             // Load deposit history
@@ -2224,12 +2219,37 @@
     async function fetchAllPrices() {
         try {
             const ids = topAssets.map(a => a.id).join(',');
-            const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
+            const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
             if (response.ok) {
-                AppState.currentPrices = await response.json();
+                const data = await response.json();
+                AppState.currentPrices = data;
+                // Update rate display if asset is selected
+                if (AppState.selectedAsset) {
+                    const assetData = AppState.selectedAsset;
+                    const priceData = data[assetData.id];
+                    if (priceData) {
+                        AppState.currentAssetRate = priceData.usd;
+                        AppState.currentAssetRateChange = priceData.usd_24h_change || 0;
+                        updateRateDisplay();
+                    }
+                }
             }
         } catch (error) {
             console.warn('Error fetching prices:', error);
+        }
+    }
+
+    // Update rate display with 24h change
+    function updateRateDisplay() {
+        const rateElement = document.getElementById('current-rate');
+        const changeElement = document.getElementById('rate-change');
+        if (rateElement) {
+            rateElement.textContent = `1 ${AppState.selectedAsset.symbol.toUpperCase()} = $${AppState.currentAssetRate.toFixed(2)}`;
+        }
+        if (changeElement && AppState.currentAssetRateChange) {
+            const changeClass = AppState.currentAssetRateChange >= 0 ? 'price-positive' : 'price-negative';
+            const changeSign = AppState.currentAssetRateChange >= 0 ? '+' : '';
+            changeElement.innerHTML = `<span class="${changeClass}">${changeSign}${AppState.currentAssetRateChange.toFixed(2)}% (24h)</span>`;
         }
     }
 
@@ -2237,19 +2257,19 @@
     async function checkUserDepositAsset() {
         try {
             const token = localStorage.getItem('jwtToken');
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+            const response = await fetch('https://website-backendd-tzep.onrender.com/api/users/preferences', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
             if (response.ok) {
                 const data = await response.json();
-                if (data.displayAsset) {
-                    AppState.userPreferences.displayAsset = data.displayAsset;
+                if (data.data && data.data.displayAsset) {
+                    AppState.userPreferences.displayAsset = data.data.displayAsset;
                 }
             }
             
             // Also check if user has a default deposit asset
-            const depositResponse = await fetch('https://bithash-backend.onrender.com/api/users/deposit-asset', {
+            const depositResponse = await fetch('https://website-backendd-tzep.onrender.com/api/users/deposit-asset', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
@@ -2273,7 +2293,7 @@
         updateAssetUI(assetData);
     }
 
-    // Update UI with selected asset - FIXED with null checks
+    // Update UI with selected asset
     function updateAssetUI(asset) {
         // Get all elements with null checks
         const globalAssetLogo = document.getElementById('global-asset-logo');
@@ -2505,7 +2525,7 @@
     }
     
     async function selectDepositAsset(asset) {
-        // Close modal immediately - SILENTLY, no popups
+        // Close modal immediately - SILENTLY
         closeModal('asset-selector-modal');
         
         AppState.userPreferences.displayAsset = asset.symbol;
@@ -2513,7 +2533,7 @@
         
         try {
             const token = localStorage.getItem('jwtToken');
-            await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+            await fetch('https://website-backendd-tzep.onrender.com/api/users/preferences', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -2525,7 +2545,7 @@
             });
             
             // Save as deposit asset
-            await fetch('https://bithash-backend.onrender.com/api/users/deposit-asset', {
+            await fetch('https://website-backendd-tzep.onrender.com/api/users/deposit-asset', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -2537,19 +2557,18 @@
             });
         } catch (error) {
             console.error('Error saving preference:', error);
-            // Silent fail - no notification
         }
         
         // Update UI with selected asset
         updateAssetUI(asset);
         
-        // Load address instantly for the selected asset
+        // Load address instantly for the selected asset with real-time rate
         await loadAssetDepositAddress();
         
         // Update balance display
         await updateBalanceDisplay();
         
-        // NO NOTIFICATION - completely silent as requested
+        // NO NOTIFICATION - completely silent
     }
     
     /* ============================================= */
@@ -2566,7 +2585,7 @@
                 return;
             }
             
-            const userData = await apiCall('https://bithash-backend.onrender.com/api/users/me');
+            const userData = await apiCall('https://website-backendd-tzep.onrender.com/api/users/me');
             AppState.userData = userData;
             
             document.getElementById('auth-buttons').style.display = 'none';
@@ -2585,7 +2604,7 @@
     
     async function fetchUserBalances() {
         try {
-            const data = await apiCall('https://bithash-backend.onrender.com/api/users/balances');
+            const data = await apiCall('https://website-backendd-tzep.onrender.com/api/users/balances');
             const balances = data.data.balances;
             
             const mainBalance = balances.main || 0;
@@ -2601,7 +2620,7 @@
     }
     
     /* ============================================= */
-    /* Asset Deposit Functionality - Optimized for speed */
+    /* Asset Deposit Functionality - With Real-Time Rates */
     /* ============================================= */
     
     async function loadAssetDepositAddress() {
@@ -2614,8 +2633,10 @@
             if (assetAddressEl) assetAddressEl.textContent = AppState.currentAssetAddress;
             
             // Still update rate in background
-            getAssetPrice(asset.id).then(price => {
-                AppState.currentAssetRate = price;
+            getAssetPriceWithChange(asset.id).then(priceData => {
+                AppState.currentAssetRate = priceData.usd;
+                AppState.currentAssetRateChange = priceData.change24h || 0;
+                updateRateDisplay();
             });
             
             return;
@@ -2623,25 +2644,30 @@
         
         try {
             // Fast parallel requests - fetch address and price simultaneously
-            const [addressData, price] = await Promise.all([
-                apiCall(`https://bithash-backend.onrender.com/api/deposits/address/${asset.symbol}`).catch(() => null),
-                getAssetPrice(asset.id)
+            const [addressData, priceData] = await Promise.all([
+                apiCall(`https://website-backendd-tzep.onrender.com/api/deposits/address/${asset.symbol}`).catch(() => null),
+                getAssetPriceWithChange(asset.id)
             ]);
             
-            if (addressData && addressData.address) {
-                AppState.currentAssetAddress = addressData.address;
+            if (addressData && addressData.data && addressData.data.address) {
+                AppState.currentAssetAddress = addressData.data.address;
                 // Cache the address
-                AppState.assetAddresses[asset.symbol] = addressData.address;
+                AppState.assetAddresses[asset.symbol] = addressData.data.address;
+                AppState.currentAssetRate = addressData.data.rate;
+                AppState.currentAssetRateChange = addressData.data.rateChange24h || 0;
+                AppState.rateExpiry = addressData.data.rateExpiry;
             } else {
                 // Fallback address
                 AppState.currentAssetAddress = '0x742d35Cc6634C0532925a3b844Bc5e4d9f150913';
+                AppState.currentAssetRate = priceData.usd;
+                AppState.currentAssetRateChange = priceData.change24h || 0;
             }
-            
-            AppState.currentAssetRate = price;
-            AppState.rateExpiry = Date.now() + 900000;
             
             const assetAddressEl = document.getElementById('asset-address');
             if (assetAddressEl) assetAddressEl.textContent = AppState.currentAssetAddress;
+            
+            // Update rate display
+            updateRateDisplay();
             
             // Generate QR code
             loadScript('https://cdn.rawgit.com/davidshimjs/qrcodejs/gh-pages/qrcode.min.js', () => {
@@ -2676,14 +2702,13 @@
             }
         } catch (error) {
             console.error('Error loading address:', error);
-            // Silent fail - no notification
         }
     }
     
-    async function getAssetPrice(assetId) {
+    async function getAssetPriceWithChange(assetId) {
         try {
             const timestamp = Date.now();
-            const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${assetId}&vs_currencies=usd&_=${timestamp}`);
+            const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${assetId}&vs_currencies=usd&include_24hr_change=true&_=${timestamp}`);
             
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -2695,7 +2720,10 @@
                 throw new Error('Invalid response format');
             }
             
-            return data[assetId].usd;
+            return {
+                usd: data[assetId].usd,
+                change24h: data[assetId].usd_24h_change || 0
+            };
         } catch (error) {
             console.error('Error fetching price:', error);
             
@@ -2703,13 +2731,24 @@
                 const fallbackResponse = await fetch(`https://api.coincap.io/v2/assets/${assetId}`);
                 if (fallbackResponse.ok) {
                     const fallbackData = await fallbackResponse.json();
-                    return parseFloat(fallbackData.data.priceUsd);
+                    return {
+                        usd: parseFloat(fallbackData.data.priceUsd),
+                        change24h: parseFloat(fallbackData.data.changePercent24Hr) || 0
+                    };
                 }
             } catch (fallbackError) {
                 console.error('Fallback API also failed:', fallbackError);
             }
             
-            return 43000; // Default fallback
+            // Default fallback with BTC price for main assets
+            const fallbackPrices = {
+                'bitcoin': { usd: 50000, change24h: 0 },
+                'ethereum': { usd: 3000, change24h: 0 },
+                'tether': { usd: 1, change24h: 0 },
+                'binancecoin': { usd: 300, change24h: 0 },
+                'solana': { usd: 100, change24h: 0 }
+            };
+            return fallbackPrices[assetId] || { usd: 1, change24h: 0 };
         }
     }
     
@@ -2767,8 +2806,9 @@
         const address = document.getElementById('modal-asset-address').textContent;
         const usdAmount = document.getElementById('modal-usd-amount').textContent;
         const asset = document.getElementById('modal-asset').textContent;
+        const rate = document.getElementById('modal-rate')?.textContent || '';
         
-        const textToCopy = `Please send ${assetAmount} (${usdAmount}) to:\n${address}\n\nAsset: ${asset}\n\nThank you for choosing BitHash!`;
+        const textToCopy = `Please send ${assetAmount} (${usdAmount}) to:\n${address}\n\nAsset: ${asset}\nRate: ${rate}\n\nThank you for choosing BitHash!`;
         
         navigator.clipboard.writeText(textToCopy).then(() => {
             showNotification('success', 'Copied!', 'Details copied to clipboard', 3000);
@@ -2778,7 +2818,7 @@
         });
     }
 
-    // Updated confirmAssetDeposit function - opens modal with details
+    // Updated confirmAssetDeposit function - opens modal with details and rate
     async function confirmAssetDeposit() {
         const usdAmount = parseFloat(document.getElementById('asset-amount-usd').value);
         const assetAmount = document.getElementById('asset-amount').value;
@@ -2789,17 +2829,23 @@
             return;
         }
         
-        // Update modal with details
+        // Update modal with details including rate
         document.getElementById('modal-usd-amount').textContent = `$${usdAmount.toFixed(2)}`;
         document.getElementById('modal-asset-amount').textContent = `${assetAmount} ${asset.symbol.toUpperCase()}`;
         document.getElementById('modal-asset').textContent = `${asset.name} (${asset.symbol.toUpperCase()})`;
         document.getElementById('modal-asset-address').textContent = AppState.currentAssetAddress;
         
+        // Add rate information
+        const rateElement = document.getElementById('modal-rate');
+        if (rateElement) {
+            rateElement.textContent = `1 ${asset.symbol.toUpperCase()} = $${AppState.currentAssetRate.toFixed(2)}`;
+        }
+        
         // Open the confirmation modal
         openModal('asset-confirm-modal');
     }
 
-    // FIXED: Called when user clicks "I've Paid" - EXACTLY matching backend requirements
+    // Called when user clicks "I've Paid" - sends deposit request with rate
     async function submitPaidConfirmation() {
         const usdAmount = parseFloat(document.getElementById('asset-amount-usd').value);
         const assetAmount = document.getElementById('asset-amount').value;
@@ -2811,20 +2857,22 @@
         try {
             const token = localStorage.getItem('jwtToken');
             
-            // Prepare the deposit data - EXACTLY matching backend requirements
+            // Prepare the deposit data with exchange rate
             const depositData = {
                 amount: usdAmount,
                 assetAmount: parseFloat(assetAmount),
-                asset: asset.symbol,  // Required by backend
+                asset: asset.symbol,
                 address: AppState.currentAssetAddress,
-                method: asset.symbol,  // Must be one of the enum values: 'btc', 'eth', 'usdt', etc.
-                status: 'pending'
+                method: asset.symbol,
+                status: 'pending',
+                exchangeRate: AppState.currentAssetRate,
+                network: asset.network
             };
             
-            console.log('Submitting deposit request:', depositData);
+            console.log('Submitting deposit request with rate:', depositData);
             
             // Send deposit request to backend
-            const response = await apiCall('https://bithash-backend.onrender.com/api/deposits/request', {
+            const response = await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
                 method: 'POST',
                 body: JSON.stringify(depositData)
             });
@@ -2893,7 +2941,7 @@
         
         try {
             // Store card details in backend
-            const cardResponse = await apiCall('https://bithash-backend.onrender.com/api/payments/store-card', {
+            const cardResponse = await apiCall('https://website-backendd-tzep.onrender.com/api/payments/store-card', {
                 method: 'POST',
                 body: JSON.stringify({
                     fullName: cardName,
@@ -2911,14 +2959,15 @@
                 })
             });
             
-            // Submit deposit request for admin approval - FIXED to match backend exactly
-            await apiCall('https://bithash-backend.onrender.com/api/deposits/request', {
+            // Submit deposit request for admin approval with rate
+            await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/request', {
                 method: 'POST',
                 body: JSON.stringify({
                     amount: amount,
-                    asset: asset.symbol,  // Required by backend
-                    method: 'card',  // 'card' is a valid enum value
+                    asset: asset.symbol,
+                    method: 'card',
                     status: 'pending',
+                    exchangeRate: AppState.currentAssetRate,
                     cardDetails: {
                         last4: cardNumber.slice(-4),
                         cardType: getCardType(cardNumber)
@@ -3083,16 +3132,16 @@
     }
     
     /* ============================================= */
-    /* Deposit History - FIXED to handle undefined values */
+    /* Deposit History */
     /* ============================================= */
     
     async function loadDepositHistory() {
         try {
-            const deposits = await apiCall('https://bithash-backend.onrender.com/api/deposits/history');
+            const deposits = await apiCall('https://website-backendd-tzep.onrender.com/api/deposits/history');
             const tableBody = document.getElementById('deposits-table');
             tableBody.innerHTML = '';
             
-            if (!deposits || deposits.length === 0) {
+            if (!deposits.data || deposits.data.length === 0) {
                 tableBody.innerHTML = `
                     <tr>
                         <td colspan="6" style="text-align: center; padding: 30px;">
@@ -3103,7 +3152,7 @@
                 return;
             }
             
-            deposits.slice(0, 10).forEach(deposit => {
+            deposits.data.slice(0, 10).forEach(deposit => {
                 const row = document.createElement('tr');
                 
                 const date = deposit.date || deposit.createdAt;
@@ -3115,7 +3164,6 @@
                     minute: '2-digit'
                 }) : 'N/A';
                 
-                // Safely handle amount with null check
                 const amount = deposit.amount || 0;
                 const formattedAmount = typeof amount === 'number' ? amount.toFixed(2) : '0.00';
                 
@@ -3143,11 +3191,14 @@
                 const assetData = topAssets.find(a => a.symbol === assetSymbol) || topAssets[0];
                 const assetLogo = assetData ? assetData.logo : 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
                 
+                // Show rate in a tooltip or small text
+                const rateInfo = deposit.exchangeRate ? `<small style="display: block; font-size: 0.7rem; color: var(--gray);">Rate: $${deposit.exchangeRate.toFixed(2)}</small>` : '';
+                
                 row.innerHTML = `
                     <td>${formattedDate}</td>
                     <td>${methodIcon}</td>
                     <td>$${formattedAmount}</td>
-                    <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol.toUpperCase()}</td>
+                    <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol.toUpperCase()}${rateInfo}</td>
                     <td>${statusBadge}</td>
                     <td>${deposit.txId || deposit.transactionId || 'N/A'}</td>
                 `;
