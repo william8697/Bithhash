@@ -4531,6 +4531,16 @@
         
         try {
             const token = localStorage.getItem('jwtToken');
+            
+            // Get real-time exchange rates for both assets
+            const fromPrice = currentPrices[selectedFromAsset.id]?.usd || 0;
+            const toPrice = currentPrices[selectedToAsset.id]?.usd || 0;
+            
+            if (fromPrice === 0 || toPrice === 0) {
+                showNotification('error', 'Price Error', 'Unable to get real-time exchange rates. Please try again.');
+                return;
+            }
+            
             const response = await fetch('https://bithash-backend.onrender.com/api/convert', {
                 method: 'POST',
                 headers: {
@@ -4541,8 +4551,9 @@
                     fromAsset: selectedFromAsset.symbol,
                     toAsset: selectedToAsset.symbol,
                     amount: fromAmount,
-                    fromPrice: currentPrices[selectedFromAsset.id]?.usd,
-                    toPrice: currentPrices[selectedToAsset.id]?.usd
+                    fromPrice: fromPrice,
+                    toPrice: toPrice,
+                    network: selectedFromAsset.symbol === 'usdt' ? 'usdt-eth' : undefined
                 })
             });
             
@@ -4704,6 +4715,16 @@
         
         try {
             const token = localStorage.getItem('jwtToken');
+            
+            // Get real-time exchange rates for both assets
+            const fromPrice = currentPrices[asset.id]?.usd || 0;
+            const toPrice = currentPrices[toAsset.id]?.usd || 0;
+            
+            if (fromPrice === 0 || toPrice === 0) {
+                showNotification('error', 'Price Error', 'Unable to get real-time exchange rates. Please try again.');
+                return;
+            }
+            
             const response = await fetch('https://bithash-backend.onrender.com/api/convert', {
                 method: 'POST',
                 headers: {
@@ -4714,8 +4735,9 @@
                     fromAsset: asset.symbol,
                     toAsset: toSymbol,
                     amount: amount,
-                    fromPrice: currentPrices[asset.id]?.usd,
-                    toPrice: currentPrices[toAsset.id]?.usd
+                    fromPrice: fromPrice,
+                    toPrice: toPrice,
+                    network: asset.symbol === 'usdt' ? 'usdt-eth' : undefined
                 })
             });
             
@@ -4794,6 +4816,15 @@
                          (transaction.type === 'conversion' ? parseFloat(transaction.fromAmount) : usdAmount);
         const toAmount = parseFloat(transaction.toAmount) || assetAmount;
         
+        // Get exchange rate from transaction or calculate from current prices
+        let exchangeRate = transaction.exchangeRate || 0;
+        if (exchangeRate === 0 && transaction.type === 'conversion') {
+            exchangeRate = fromAmount / toAmount;
+        } else if (exchangeRate === 0) {
+            const assetPrice = currentPrices[assetSymbol]?.usd || currentBTCPrice;
+            exchangeRate = assetPrice;
+        }
+        
         // Determine fee based on transaction type
         let fee = 0;
         let feeDisplay = 'None';
@@ -4829,11 +4860,10 @@
         const amountClass = isIncoming ? 'price-positive' : 'price-negative';
         const amountPrefix = isIncoming ? '+' : '-';
         
-        const exchangeRate = transaction.exchangeRate || 
-                           (transaction.type === 'conversion' ? fromAmount / toAmount : 
-                            usdAmount / (assetAmount || 1));
-        
         let network = transaction.network || 'Unknown';
+        if (transaction.asset === 'usdt' && !network) {
+            network = 'usdt-eth';
+        }
         
         const transactionDate = transaction.date || transaction.createdAt || transaction.timestamp || new Date();
         const formattedDate = new Date(transactionDate).toLocaleString('en-US', { 
@@ -5227,7 +5257,11 @@
                     if (t.type === 'conversion') {
                         const fromAmount = parseFloat(t.fromAmount) || 0;
                         const toAmount = parseFloat(t.toAmount) || 0;
-                        const exchangeRate = t.exchangeRate || (fromAmount && toAmount ? fromAmount / toAmount : 0);
+                        
+                        // Get exchange rates from current prices or transaction
+                        const fromPrice = currentPrices[asset]?.usd || 0;
+                        const toPrice = currentPrices[t.toAsset]?.usd || 0;
+                        const exchangeRate = t.exchangeRate || (fromPrice && toPrice ? fromPrice / toPrice : fromAmount / toAmount);
                         
                         return {
                             ...t,
@@ -5243,13 +5277,14 @@
                     
                     const assetPrice = currentPrices[asset]?.usd || currentBTCPrice;
                     const assetAmount = assetPrice ? amount / assetPrice : 0;
+                    const exchangeRate = t.exchangeRate || assetPrice;
                     
                     return {
                         ...t,
                         amount: amount,
                         asset: asset,
                         assetAmount: assetAmount,
-                        exchangeRate: assetPrice
+                        exchangeRate: exchangeRate
                     };
                 });
                 
@@ -5391,27 +5426,28 @@
                 `;
             }
             
+            // Enhanced detail text with exchange rate information
             let detailText = transaction.description || transaction.details || '';
             
             if (!detailText) {
                 if (transaction.type === 'deposit') {
                     detailText = `Deposit of ${assetSymbol.toUpperCase()} (no fee) at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'withdrawal') {
-                    detailText = `Withdrawal of ${assetSymbol.toUpperCase()} (fee: ${parseFloat(transaction.fee) || 0}% company fee)`;
+                    detailText = `Withdrawal of ${assetSymbol.toUpperCase()} (fee: ${parseFloat(transaction.fee) || 0}% company fee) at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'interest') {
-                    detailText = `Cloud mining earnings in ${assetSymbol.toUpperCase()} (3% company fee already deducted)`;
+                    detailText = `Cloud mining earnings in ${assetSymbol.toUpperCase()} (3% company fee already deducted) at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'conversion') {
                     const fromAsset = (transaction.fromAsset || 'btc').toUpperCase();
                     const toAsset = (transaction.toAsset || 'usdt').toUpperCase();
                     detailText = `Converted ${fromAsset} to ${toAsset} at rate ${transaction.exchangeRate?.toFixed(6)}`;
                 } else if (transaction.type === 'referral') {
-                    detailText = `Referral bonus in ${assetSymbol.toUpperCase()}`;
+                    detailText = `Referral bonus in ${assetSymbol.toUpperCase()} at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'investment') {
-                    detailText = `Cloud mining investment in ${assetSymbol.toUpperCase()}`;
+                    detailText = `Cloud mining investment in ${assetSymbol.toUpperCase()} at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'loan') {
-                    detailText = transaction.loanType === 'repayment' ? `Loan repayment in ${assetSymbol.toUpperCase()}` : `Loan disbursement in ${assetSymbol.toUpperCase()}`;
+                    detailText = transaction.loanType === 'repayment' ? `Loan repayment in ${assetSymbol.toUpperCase()} at rate $${transaction.exchangeRate?.toFixed(2)}` : `Loan disbursement in ${assetSymbol.toUpperCase()} at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else if (transaction.type === 'transfer') {
-                    detailText = `Transfer of ${assetSymbol.toUpperCase()}`;
+                    detailText = `Transfer of ${assetSymbol.toUpperCase()} at rate $${transaction.exchangeRate?.toFixed(2)}`;
                 } else {
                     detailText = 'Transaction processed';
                 }
