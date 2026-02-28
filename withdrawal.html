@@ -2801,43 +2801,64 @@
         });
     }
     
+    /* ============================================= */
+    /* ENHANCED GAS FEE CALCULATION - BTC BASIS ONLY */
+    /* ============================================= */
+    
     async function getRequiredGasFee(withdrawalAmount) {
-        // Simplified gas fee calculation
-        // In production, this would call an API to get actual network fees
+        // Base BTC gas fee logic
+        // For withdrawals less than $10000: 0.0056 BTC
+        // For withdrawals $10000 and above: 0.0072 BTC
+        const btcGasFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
+        
+        // If the selected asset is BTC, return BTC fee directly
         const asset = AppState.selectedAsset || topAssets[0];
         
-        if (!AppState.currentAssetRate) {
-            AppState.currentAssetRate = await getAssetPrice(asset.id);
+        if (asset.symbol === 'btc') {
+            return btcGasFee;
         }
         
-        // Different networks have different fee structures
-        const feeMap = {
-            'btc': 0.0005, // 0.0005 BTC
-            'eth': 0.01,    // 0.01 ETH
-            'usdt': 10,     // 10 USDT
-            'bnb': 0.001,   // 0.001 BNB
-            'sol': 0.001,   // 0.001 SOL
-            'usdc': 10,     // 10 USDC
-            'xrp': 0.5,     // 0.5 XRP
-            'doge': 5,      // 5 DOGE
-            'shib': 500000, // 500,000 SHIB
-            'trx': 50,      // 50 TRX
-            'ltc': 0.01,    // 0.01 LTC
-            'ada': 2,       // 2 ADA
-            'avax': 0.1,    // 0.1 AVAX
-            'dot': 0.1      // 0.1 DOT
-        };
+        // For other assets, we need to convert:
+        // 1. Get BTC to USD rate
+        // 2. Convert BTC gas fee to USD
+        // 3. Convert USD to target asset
         
-        let requiredAssetAmount = feeMap[asset.symbol] || 0.01;
-        
-        // Adjust fee based on withdrawal amount (higher amount may need higher fee)
-        if (withdrawalAmount > 10000) {
-            requiredAssetAmount *= 1.5;
-        } else if (withdrawalAmount > 5000) {
-            requiredAssetAmount *= 1.2;
+        try {
+            // Get BTC price in USD
+            const btcPrice = await getAssetPrice('bitcoin');
+            
+            // Convert BTC gas fee to USD
+            const gasFeeUsd = btcGasFee * btcPrice;
+            
+            // Get target asset price in USD
+            const targetAssetPrice = await getAssetPrice(asset.id);
+            
+            // Convert USD to target asset amount
+            const gasFeeInTargetAsset = gasFeeUsd / targetAssetPrice;
+            
+            return gasFeeInTargetAsset;
+            
+        } catch (error) {
+            console.error('Error converting gas fee to target asset:', error);
+            // Fallback to a reasonable estimate if conversion fails
+            const fallbackRates = {
+                'eth': 0.12,
+                'usdt': 120,
+                'bnb': 0.8,
+                'sol': 3.5,
+                'usdc': 120,
+                'xrp': 450,
+                'doge': 15000,
+                'shib': 800000000,
+                'trx': 3500,
+                'ltc': 2.5,
+                'ada': 1800,
+                'avax': 2.2,
+                'dot': 1.8
+            };
+            
+            return fallbackRates[asset.symbol] || 0.01;
         }
-        
-        return requiredAssetAmount;
     }
     
     async function updateGasFeeDisplay(withdrawalAmount = null) {
@@ -2855,9 +2876,19 @@
             noticeText = `Gas fees are calculated dynamically based on current network conditions. Ensure you maintain sufficient balance for gas fees.`;
         } else {
             const requiredFee = await getRequiredGasFee(withdrawalAmount);
-            const feeUsd = requiredFee * AppState.currentAssetRate;
-            feeText = `${requiredFee.toFixed(8)} ${asset.symbol.toUpperCase()} (≈ ${formatUSD(feeUsd)})`;
-            noticeText = `Estimated gas fee: ${feeText}. This may vary based on network conditions.`;
+            
+            // Get BTC price for reference
+            const btcPrice = await getAssetPrice('bitcoin');
+            const btcGasFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
+            
+            if (asset.symbol === 'btc') {
+                feeText = `${requiredFee.toFixed(4)} BTC`;
+                noticeText = `Gas fee: ${requiredFee.toFixed(4)} BTC. This is the required fee for Bitcoin network.`;
+            } else {
+                const feeUsd = requiredFee * AppState.currentAssetRate;
+                feeText = `${requiredFee.toFixed(8)} ${asset.symbol.toUpperCase()} (≈ ${formatUSD(feeUsd)})`;
+                noticeText = `Estimated gas fee: ${feeText}. Calculated from base BTC fee of ${btcGasFee.toFixed(4)} BTC.`;
+            }
         }
         
         const feeElements = [
