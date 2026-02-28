@@ -3478,17 +3478,7 @@
             if (response.ok) {
                 const data = await response.json();
                 currentPrices = data;
-                // Ensure we have BTC price
                 currentBTCPrice = currentPrices.bitcoin?.usd || 43000;
-                
-                // Add 1h change data (CoinGecko doesn't provide it directly, so we'll approximate)
-                Object.keys(currentPrices).forEach(assetId => {
-                    if (currentPrices[assetId] && !currentPrices[assetId].usd_1h_change) {
-                        // Approximate 1h change as 1/24th of 24h change for realistic values
-                        currentPrices[assetId].usd_1h_change = (currentPrices[assetId].usd_24h_change || 0) / 24;
-                    }
-                });
-                
                 return true;
             }
         } catch (error) {
@@ -3507,8 +3497,6 @@
                     prices[asset.id] = {
                         usd: parseFloat(asset.priceUsd),
                         usd_24h_change: parseFloat(asset.changePercent24Hr),
-                        usd_1h_change: parseFloat(asset.changePercent24Hr) / 24, // Approximate
-                        usd_7d_change: 0, // Not provided by CoinCap
                         usd_24h_vol: parseFloat(asset.volumeUsd24Hr),
                         usd_market_cap: parseFloat(asset.marketCapUsd)
                     };
@@ -3536,8 +3524,6 @@
                         prices[asset.id] = {
                             usd: parseFloat(ticker.lastPrice),
                             usd_24h_change: parseFloat(ticker.priceChangePercent),
-                            usd_1h_change: 0, // Binance 24hr endpoint doesn't provide 1h change
-                            usd_7d_change: 0,
                             usd_24h_vol: parseFloat(ticker.volume) * parseFloat(ticker.lastPrice),
                             usd_market_cap: 0
                         };
@@ -3567,8 +3553,6 @@
                         prices[asset.id] = {
                             usd: parseFloat(price),
                             usd_24h_change: 0,
-                            usd_1h_change: 0,
-                            usd_7d_change: 0,
                             usd_24h_vol: 0,
                             usd_market_cap: 0
                         };
@@ -3600,8 +3584,6 @@
                             prices[asset.id] = {
                                 usd: data.RAW[symbol].USD.PRICE,
                                 usd_24h_change: data.RAW[symbol].USD.CHANGEPCT24HOUR,
-                                usd_1h_change: 0, // CryptoCompare doesn't provide 1h in this endpoint
-                                usd_7d_change: 0,
                                 usd_24h_vol: data.RAW[symbol].USD.VOLUME24HOURTO * data.RAW[symbol].USD.PRICE,
                                 usd_market_cap: data.RAW[symbol].USD.MKTCAP
                             };
@@ -3634,8 +3616,6 @@
                             prices[asset.id] = {
                                 usd: parseFloat(ticker.lastPrice),
                                 usd_24h_change: parseFloat(ticker.price24hPcnt) * 100,
-                                usd_1h_change: 0, // Bybit ticker doesn't provide 1h change
-                                usd_7d_change: 0,
                                 usd_24h_vol: parseFloat(ticker.volume24h) * parseFloat(ticker.lastPrice),
                                 usd_market_cap: 0
                             };
@@ -3828,6 +3808,11 @@
             const row = document.createElement('tr');
             row.onclick = () => openAssetDetails(asset);
             
+            // Add arrow up/down with appropriate coloring (green for gain, red for loss)
+            const arrow1h = change1h >= 0 ? '<i class="fas fa-arrow-up" style="color: var(--success); margin-right: 2px;"></i>' : '<i class="fas fa-arrow-down" style="color: var(--error); margin-right: 2px;"></i>';
+            const arrow24h = change24h >= 0 ? '<i class="fas fa-arrow-up" style="color: var(--success); margin-right: 2px;"></i>' : '<i class="fas fa-arrow-down" style="color: var(--error); margin-right: 2px;"></i>';
+            const arrow7d = change7d >= 0 ? '<i class="fas fa-arrow-up" style="color: var(--success); margin-right: 2px;"></i>' : '<i class="fas fa-arrow-down" style="color: var(--error); margin-right: 2px;"></i>';
+            
             row.innerHTML = `
                 <td>${globalIndex}</td>
                 <td>
@@ -3838,9 +3823,9 @@
                     </div>
                 </td>
                 <td>${formatUSD(price)}</td>
-                <td class="${change1h >= 0 ? 'price-positive' : 'price-negative'}">${change1h >= 0 ? '+' : ''}${change1h.toFixed(2)}%</td>
-                <td class="${change24h >= 0 ? 'price-positive' : 'price-negative'}">${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%</td>
-                <td class="${change7d >= 0 ? 'price-positive' : 'price-negative'}">${change7d >= 0 ? '+' : ''}${change7d.toFixed(2)}%</td>
+                <td class="${change1h >= 0 ? 'price-positive' : 'price-negative'}">${arrow1h} ${change1h >= 0 ? '+' : ''}${change1h.toFixed(2)}%</td>
+                <td class="${change24h >= 0 ? 'price-positive' : 'price-negative'}">${arrow24h} ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%</td>
+                <td class="${change7d >= 0 ? 'price-positive' : 'price-negative'}">${arrow7d} ${change7d >= 0 ? '+' : ''}${change7d.toFixed(2)}%</td>
                 <td>${formatUSD(volume)}</td>
                 <td>${formatUSD(marketCap)}</td>
                 <td><div class="trend-chart" id="chart-${asset.id}"></div></td>
@@ -3872,7 +3857,7 @@
         
         const ctx = canvas.getContext('2d');
         
-        // Generate random walk data (for visual effect only) - 7 days of data
+        // Generate random walk data (for visual effect only)
         const points = [];
         let value = 20;
         for (let i = 0; i < 7; i++) {
@@ -4288,9 +4273,13 @@
         const amountPrefix = isIncoming ? '+' : '-';
         
         // Use the correct exchange rate for this transaction's asset
-        const exchangeRate = transaction.exchangeRate || 
-                           (transaction.type === 'conversion' ? fromAmount / toAmount : 
-                            usdAmount / (assetAmount || 1));
+        let exchangeRate = transaction.exchangeRate;
+        const assetObj = topAssets.find(a => a.symbol === (transaction.asset || fromAssetSymbol).toLowerCase());
+        if (assetObj && currentPrices[assetObj.id]?.usd) {
+            exchangeRate = currentPrices[assetObj.id].usd;
+        } else if (transaction.type === 'conversion' && fromAmount && toAmount) {
+            exchangeRate = fromAmount / toAmount;
+        }
         
         // Ensure network is never "Unknown" - use the correct network for the asset
         let network = transaction.network;
@@ -4865,12 +4854,19 @@
                     </div>
                 `;
             } else {
-                assetAmount = parseFloat(transaction.assetAmount) || (usdAmount / (transaction.exchangeRate || currentBTCPrice));
+                // Use the correct exchange rate for this specific asset
+                const assetObj = topAssets.find(a => a.symbol === assetSymbol.toLowerCase()) || topAssets[0];
+                const assetPrice = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                assetAmount = parseFloat(transaction.assetAmount) || (usdAmount / assetPrice);
                 assetSymbolForAmount = formattedAssetSymbol;
+                
+                // Add arrow based on transaction type (incoming/outgoing)
+                const arrowIcon = isIncoming ? '<i class="fas fa-arrow-down" style="color: var(--success); margin-right: 2px;"></i>' : 
+                                 (isOutgoing ? '<i class="fas fa-arrow-up" style="color: var(--error); margin-right: 2px;"></i>' : '');
                 
                 amountDisplay = `
                     <div class="${amountClass}">
-                        ${amountPrefix}${formatUSD(Math.abs(usdAmount))}
+                        ${arrowIcon} ${amountPrefix}${formatUSD(Math.abs(usdAmount))}
                     </div>
                     <div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;">
                         <img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
