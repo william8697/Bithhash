@@ -3088,7 +3088,7 @@
     // Global state
     let currentLoanEligibility = null;
     let currentPrices = {};
-    let currentBTCPrice = 64000;
+    let currentBTCPrice = 0;
     let allAssets = [];
     let cryptoPage = 1;
     const assetsPerPage = 5;
@@ -3121,6 +3121,16 @@
     
     // Current mobile balance tab
     let currentMobileBalance = 'main';
+    
+    // Enhanced conversion rates with multiple sources - 6 fallback sources
+    const RATE_SOURCES = [
+        { name: 'CoinGecko', url: 'https://api.coingecko.com/api/v3/simple/price' },
+        { name: 'CoinCap', url: 'https://api.coincap.io/v2/assets' },
+        { name: 'Binance', url: 'https://api.binance.com/api/v3/ticker/price' },
+        { name: 'KuCoin', url: 'https://api.kucoin.com/api/v1/prices' },
+        { name: 'CryptoCompare', url: 'https://min-api.cryptocompare.com/data/pricemulti' },
+        { name: 'Bybit', url: 'https://api.bybit.com/v5/market/tickers' }
+    ];
     
     // Top 30 assets by market cap (CoinGecko IDs) - with logos
     const topAssets = [
@@ -3207,8 +3217,8 @@
             // Initialize header scroll effect
             initHeaderScrollEffect();
             
-            // Load all data with retry mechanism
-            await fetchCoinGeckoPrices();
+            // Load all data with retry mechanism - prioritize CoinGecko for accurate real-time data
+            await fetchAllPricesFromCoinGecko();
             await loadUserData();
             await checkUserDefaultAsset();
             await loadBalances();
@@ -3235,7 +3245,7 @@
             // Start announcements polling
             startAnnouncementsPolling();
             
-            // Start auto-refresh for all data (every 60 seconds)
+            // Start auto-refresh for all data (every 30 seconds to ensure real-time accuracy)
             startAutoRefresh();
             
             // Show mobile logout in menu
@@ -3281,7 +3291,7 @@
     
     function startAutoRefresh() {
         setInterval(async () => {
-            await fetchCoinGeckoPrices();
+            await fetchAllPricesFromCoinGecko();
             await loadBalances();
             await loadAssetBalances();
             await loadAvailableAssets();
@@ -3290,7 +3300,7 @@
             await loadReferralData();
             await checkLoanEligibility();
             renderCryptoTable();
-        }, 60000); // Auto-refresh every 60 seconds
+        }, 30000); // Auto-refresh every 30 seconds for real-time accuracy
     }
     
     /* ============================================= */
@@ -3419,18 +3429,19 @@
     }
     
     /* ============================================= */
-    /* Enhanced Price Fetching - CoinGecko Only */
+    /* Enhanced Price Fetching - Prioritize CoinGecko for Real-Time Accuracy */
     /* ============================================= */
     
-    async function fetchCoinGeckoPrices() {
+    async function fetchAllPricesFromCoinGecko() {
         try {
             const ids = topAssets.map(a => a.id).join(',');
             const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_24hr_vol=true&include_market_cap=true&include_1h_change=true`);
+            
             if (response.ok) {
                 const data = await response.json();
                 currentPrices = {};
                 
-                // Process the data to ensure we have all required fields
+                // Process the data to ensure we have all required fields with proper real-time values
                 topAssets.forEach(asset => {
                     if (data[asset.id]) {
                         currentPrices[asset.id] = {
@@ -3442,7 +3453,7 @@
                             usd_market_cap: data[asset.id].usd_market_cap || 0
                         };
                     } else {
-                        // Fallback for missing data
+                        // Fallback for missing data - ensure zeros instead of incorrect values
                         currentPrices[asset.id] = {
                             usd: 0,
                             usd_24h_change: 0,
@@ -3454,13 +3465,251 @@
                     }
                 });
                 
-                currentBTCPrice = currentPrices.bitcoin?.usd || 64000;
+                currentBTCPrice = currentPrices.bitcoin?.usd || 0;
+                console.log('Successfully fetched real-time prices from CoinGecko');
                 return true;
+            } else {
+                console.warn('CoinGecko API returned non-OK response, trying fallback sources');
+                return await fetchAllPricesWithMultipleSources();
             }
         } catch (error) {
             console.warn('CoinGecko failed:', error);
+            return await fetchAllPricesWithMultipleSources();
+        }
+    }
+    
+    async function fetchAllPricesWithMultipleSources() {
+        const sources = [
+            fetchCoinCapPrices,
+            fetchBinancePrices,
+            fetchKuCoinPrices,
+            fetchCryptoComparePrices,
+            fetchBybitPrices
+        ];
+        
+        for (const source of sources) {
+            try {
+                const success = await source();
+                if (success) {
+                    console.log(`Successfully fetched prices from fallback source`);
+                    return true;
+                }
+            } catch (error) {
+                console.warn(`Failed to fetch from fallback source:`, error);
+            }
+        }
+        
+        console.error('All price sources failed - using cached or fallback data');
+        // Set fallback prices only as last resort
+        if (Object.keys(currentPrices).length === 0) {
+            setFallbackPrices();
         }
         return false;
+    }
+    
+    async function fetchCoinCapPrices() {
+        try {
+            const response = await fetch('https://api.coincap.io/v2/assets?ids=' + topAssets.map(a => a.id).join(','));
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                data.data.forEach(asset => {
+                    prices[asset.id] = {
+                        usd: parseFloat(asset.priceUsd),
+                        usd_24h_change: parseFloat(asset.changePercent24Hr),
+                        usd_1h_change: 0, // CoinCap doesn't provide 1h change
+                        usd_7d_change: 0, // CoinCap doesn't provide 7d change
+                        usd_24h_vol: parseFloat(asset.volumeUsd24Hr),
+                        usd_market_cap: parseFloat(asset.marketCapUsd)
+                    };
+                });
+                currentPrices = prices;
+                currentBTCPrice = prices.bitcoin?.usd || 0;
+                return true;
+            }
+        } catch (error) {
+            console.warn('CoinCap failed:', error);
+        }
+        return false;
+    }
+    
+    async function fetchBinancePrices() {
+        try {
+            const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                data.forEach(ticker => {
+                    const symbol = ticker.symbol.replace('USDT', '').toLowerCase();
+                    const asset = topAssets.find(a => a.symbol === symbol);
+                    if (asset) {
+                        prices[asset.id] = {
+                            usd: parseFloat(ticker.lastPrice),
+                            usd_24h_change: parseFloat(ticker.priceChangePercent),
+                            usd_1h_change: 0, // Binance 24hr endpoint doesn't provide 1h
+                            usd_7d_change: 0,
+                            usd_24h_vol: parseFloat(ticker.volume) * parseFloat(ticker.lastPrice),
+                            usd_market_cap: 0
+                        };
+                    }
+                });
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 0;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('Binance failed:', error);
+        }
+        return false;
+    }
+    
+    async function fetchKuCoinPrices() {
+        try {
+            const response = await fetch('https://api.kucoin.com/api/v1/prices');
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                Object.entries(data.data).forEach(([symbol, price]) => {
+                    const asset = topAssets.find(a => a.symbol === symbol.toLowerCase());
+                    if (asset) {
+                        prices[asset.id] = {
+                            usd: parseFloat(price),
+                            usd_24h_change: 0,
+                            usd_1h_change: 0,
+                            usd_7d_change: 0,
+                            usd_24h_vol: 0,
+                            usd_market_cap: 0
+                        };
+                    }
+                });
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 0;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('KuCoin failed:', error);
+        }
+        return false;
+    }
+    
+    async function fetchCryptoComparePrices() {
+        try {
+            const symbols = topAssets.map(a => a.symbol.toUpperCase()).join(',');
+            const response = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${symbols}&tsyms=USD`);
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                if (data.RAW) {
+                    Object.keys(data.RAW).forEach(symbol => {
+                        const asset = topAssets.find(a => a.symbol.toUpperCase() === symbol);
+                        if (asset && data.RAW[symbol].USD) {
+                            prices[asset.id] = {
+                                usd: data.RAW[symbol].USD.PRICE,
+                                usd_24h_change: data.RAW[symbol].USD.CHANGEPCT24HOUR,
+                                usd_1h_change: 0,
+                                usd_7d_change: 0,
+                                usd_24h_vol: data.RAW[symbol].USD.VOLUME24HOURTO * data.RAW[symbol].USD.PRICE,
+                                usd_market_cap: data.RAW[symbol].USD.MKTCAP
+                            };
+                        }
+                    });
+                }
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 0;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('CryptoCompare failed:', error);
+        }
+        return false;
+    }
+    
+    async function fetchBybitPrices() {
+        try {
+            const response = await fetch('https://api.bybit.com/v5/market/tickers?category=spot');
+            if (response.ok) {
+                const data = await response.json();
+                const prices = {};
+                if (data.result && data.result.list) {
+                    data.result.list.forEach(ticker => {
+                        const symbol = ticker.symbol.replace('USDT', '').toLowerCase();
+                        const asset = topAssets.find(a => a.symbol === symbol);
+                        if (asset && ticker.lastPrice) {
+                            prices[asset.id] = {
+                                usd: parseFloat(ticker.lastPrice),
+                                usd_24h_change: parseFloat(ticker.price24hPcnt) * 100,
+                                usd_1h_change: 0,
+                                usd_7d_change: 0,
+                                usd_24h_vol: parseFloat(ticker.volume24h) * parseFloat(ticker.lastPrice),
+                                usd_market_cap: 0
+                            };
+                        }
+                    });
+                }
+                if (Object.keys(prices).length > 0) {
+                    currentPrices = prices;
+                    currentBTCPrice = prices.bitcoin?.usd || 0;
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn('Bybit failed:', error);
+        }
+        return false;
+    }
+    
+    function setFallbackPrices() {
+        // Set realistic fallback prices only as last resort, but ensure they're reasonable
+        currentPrices = {
+            bitcoin: { usd: 43000, usd_24h_change: 0.5, usd_1h_change: 0.1, usd_7d_change: -1.2, usd_24h_vol: 28000000000, usd_market_cap: 840000000000 },
+            ethereum: { usd: 2300, usd_24h_change: 0.3, usd_1h_change: 0.05, usd_7d_change: -0.8, usd_24h_vol: 12000000000, usd_market_cap: 276000000000 },
+            tether: { usd: 1.00, usd_24h_change: 0.01, usd_1h_change: 0.0, usd_7d_change: 0.02, usd_24h_vol: 45000000000, usd_market_cap: 95000000000 },
+            binancecoin: { usd: 320, usd_24h_change: 0.4, usd_1h_change: 0.08, usd_7d_change: -0.5, usd_24h_vol: 1500000000, usd_market_cap: 49000000000 },
+            solana: { usd: 98, usd_24h_change: 1.2, usd_1h_change: 0.15, usd_7d_change: 2.5, usd_24h_vol: 2800000000, usd_market_cap: 42000000000 },
+            'usd-coin': { usd: 1.00, usd_24h_change: 0.01, usd_1h_change: 0.0, usd_7d_change: 0.01, usd_24h_vol: 8000000000, usd_market_cap: 25000000000 },
+            xrp: { usd: 0.52, usd_24h_change: 0.2, usd_1h_change: 0.03, usd_7d_change: -1.0, usd_24h_vol: 1500000000, usd_market_cap: 28000000000 },
+            dogecoin: { usd: 0.08, usd_24h_change: 0.5, usd_1h_change: 0.1, usd_7d_change: -2.0, usd_24h_vol: 800000000, usd_market_cap: 11000000000 },
+            cardano: { usd: 0.38, usd_24h_change: 0.4, usd_1h_change: 0.08, usd_7d_change: -1.5, usd_24h_vol: 400000000, usd_market_cap: 13500000000 },
+            'shiba-inu': { usd: 0.000024, usd_24h_change: 1.0, usd_1h_change: 0.2, usd_7d_change: 3.0, usd_24h_vol: 200000000, usd_market_cap: 14000000000 }
+        };
+        currentBTCPrice = 43000;
+    }
+    
+    /* ============================================= */
+    /* Check User's Default Asset from Deposits */
+    /* ============================================= */
+    
+    async function checkUserDefaultAsset() {
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const response = await fetch('https://bithash-backend.onrender.com/api/users/deposit-asset', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.asset) {
+                    AppState.defaultAsset = data.data.asset;
+                }
+            }
+        } catch (error) {
+            console.warn('Could not fetch deposit asset, using default BTC');
+            AppState.defaultAsset = 'btc';
+        }
+        
+        // Set initial userPreferences based on default asset
+        userPreferences.displayAsset = AppState.defaultAsset;
+        
+        // Update global selector
+        const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
+        document.getElementById('global-asset-logo').src = assetData.logo;
+        document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
     }
     
     function updateBTCBalances() {
@@ -3481,7 +3730,7 @@
         const assetData = topAssets.find(a => a.symbol === asset) || topAssets[0];
         // Use the correct exchange rate for this specific asset
         const price = currentPrices[assetData.id]?.usd || currentBTCPrice;
-        const amount = usdAmount / price;
+        const amount = price > 0 ? usdAmount / price : 0;
         
         // Format with commas and appropriate M/B suffixes
         document.getElementById(`${type}-balance-secondary`).innerHTML = `
@@ -3565,37 +3814,6 @@
     }
     
     /* ============================================= */
-    /* Check User's Default Asset from Deposits */
-    /* ============================================= */
-    
-    async function checkUserDefaultAsset() {
-        try {
-            const token = localStorage.getItem('jwtToken');
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/deposit-asset', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                if (data.data && data.data.asset) {
-                    AppState.defaultAsset = data.data.asset;
-                }
-            }
-        } catch (error) {
-            console.warn('Could not fetch deposit asset, using default BTC');
-            AppState.defaultAsset = 'btc';
-        }
-        
-        // Set initial userPreferences based on default asset
-        userPreferences.displayAsset = AppState.defaultAsset;
-        
-        // Update global selector
-        const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
-        document.getElementById('global-asset-logo').src = assetData.logo;
-        document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
-    }
-    
-    /* ============================================= */
     /* Crypto Table Functions - With Proper Coloring (enhanced to match index.html style) */
     /* ============================================= */
     
@@ -3620,7 +3838,7 @@
             const row = document.createElement('tr');
             row.onclick = () => openAssetDetails(asset);
             
-            // Use proper arrow icons and colors - green arrow up for gains, red arrow down for losses
+            // Use proper arrow icons and colors - color the figures themselves green/red, not just the arrows
             const arrowUp = '<i class="fas fa-arrow-up" style="color: var(--success); margin-right: 2px;"></i>';
             const arrowDown = '<i class="fas fa-arrow-down" style="color: var(--error); margin-right: 2px;"></i>';
             
@@ -3643,7 +3861,7 @@
             `;
             tbody.appendChild(row);
             
-            // Create mini chart with proper color based on trend (green for gain, red for loss)
+            // Create mini chart with proper color based on 24h change (green for gain, red for loss)
             createMiniChart(`chart-${asset.id}`, change24h >= 0);
         });
         
@@ -3799,7 +4017,7 @@
             const usdAmount = userBalances[type] || 0;
             // Use the correct exchange rate for this specific asset
             const price = currentPrices[asset.id]?.usd || currentBTCPrice;
-            const amount = usdAmount / price;
+            const amount = price > 0 ? usdAmount / price : 0;
             
             document.getElementById(`${type}-balance-secondary`).innerHTML = `
                 <img src="${asset.logo}" class="asset-logo-small" alt="${asset.symbol.toUpperCase()}">
@@ -4018,26 +4236,61 @@
     }
     
     /* ============================================= */
-    /* Transaction Details Functions - With Asset-Specific Info (Network never "Unknown", proper abbreviations) */
+    /* Transaction Details Functions - With Asset-Specific Info (Network never "Unknown", proper abbreviations, no undefined BTC) */
     /* ============================================= */
     
     function openTransactionDetails(transaction) {
         const modal = document.getElementById('transaction-details-modal');
         const body = document.getElementById('transaction-details-body');
         
-        // Get asset logo based on the actual transaction asset
-        const assetSymbol = transaction.asset || 
-                          (transaction.type === 'deposit' ? transaction.method || 'btc' : 
-                           transaction.type === 'withdrawal' ? transaction.method || 'btc' : 
-                           transaction.type === 'conversion' ? transaction.toAsset || 'usdt' : 'btc');
+        // Get asset logo based on the actual transaction asset - NEVER default to BTC for non-BTC transactions
+        let assetSymbol = '';
+        let fromAssetSymbol = '';
+        let toAssetSymbol = '';
+        let primaryAssetLogo = '';
+        let fromAssetLogo = '';
+        let toAssetLogo = '';
         
-        const isConversion = transaction.type === 'conversion';
-        const fromAssetSymbol = transaction.fromAsset || transaction.asset || 'btc';
-        const toAssetSymbol = transaction.toAsset || 'usdt';
-        
-        const primaryAssetLogo = assetLogos[assetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
-        const fromAssetLogo = assetLogos[fromAssetSymbol.toLowerCase()] || primaryAssetLogo;
-        const toAssetLogo = assetLogos[toAssetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/325/large/Tether.png';
+        if (transaction.type === 'conversion') {
+            fromAssetSymbol = (transaction.fromAsset || 'btc').toLowerCase();
+            toAssetSymbol = (transaction.toAsset || 'usdt').toLowerCase();
+            
+            fromAssetLogo = assetLogos[fromAssetSymbol] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
+            toAssetLogo = assetLogos[toAssetSymbol] || 'https://assets.coingecko.com/coins/images/325/large/Tether.png';
+            primaryAssetLogo = fromAssetLogo;
+            assetSymbol = fromAssetSymbol;
+        } else {
+            // For non-conversion transactions, use the actual asset from the transaction
+            assetSymbol = (transaction.asset || 
+                          (transaction.type === 'deposit' ? (transaction.method || 'usdt') : 
+                           transaction.type === 'withdrawal' ? (transaction.method || 'btc') : 
+                           transaction.type === 'interest' ? 'btc' : 
+                           transaction.type === 'referral' ? 'btc' : 
+                           transaction.type === 'investment' ? 'btc' : 'btc')).toLowerCase();
+            
+            // CRITICAL FIX: Don't default to BTC for non-BTC transactions
+            // If this is a USDT transaction, ensure it stays USDT
+            if (transaction.type === 'deposit' && transaction.method) {
+                assetSymbol = transaction.method.toLowerCase();
+            }
+            
+            // For USDT deposits, force USDT not BTC
+            if (transaction.type === 'deposit' && transaction.method && transaction.method.toLowerCase() === 'usdt') {
+                assetSymbol = 'usdt';
+            }
+            
+            // For USDT withdrawals, force USDT not BTC
+            if (transaction.type === 'withdrawal' && transaction.method && transaction.method.toLowerCase() === 'usdt') {
+                assetSymbol = 'usdt';
+            }
+            
+            primaryAssetLogo = assetLogos[assetSymbol] || (assetSymbol === 'usdt' ? 'https://assets.coingecko.com/coins/images/325/large/Tether.png' : 
+                                                           assetSymbol === 'eth' ? 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' :
+                                                           assetSymbol === 'bnb' ? 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' :
+                                                           'https://assets.coingecko.com/coins/images/1/large/bitcoin.png');
+            fromAssetLogo = primaryAssetLogo;
+            toAssetLogo = primaryAssetLogo;
+        }
         
         const usdAmount = parseFloat(transaction.amount) || 0;
         const assetAmount = parseFloat(transaction.assetAmount) || 
@@ -4091,29 +4344,33 @@
         let assetIdForRate = 'bitcoin';
         if (transaction.type === 'conversion') {
             // For conversion, use the from asset's price for the from amount
-            assetIdForRate = topAssets.find(a => a.symbol === fromAssetSymbol.toLowerCase())?.id || 'bitcoin';
+            assetIdForRate = topAssets.find(a => a.symbol === fromAssetSymbol)?.id || 'bitcoin';
         } else {
             // For regular transactions, use the asset's own price
-            assetIdForRate = topAssets.find(a => a.symbol === assetSymbol.toLowerCase())?.id || 'bitcoin';
+            assetIdForRate = topAssets.find(a => a.symbol === assetSymbol)?.id || 'bitcoin';
         }
         
         // Get the correct price for this asset
         exchangeRate = currentPrices[assetIdForRate]?.usd || 1.00;
         
         // Special handling for stablecoins (USDT, USDC)
-        if (assetSymbol.toLowerCase() === 'usdt' || assetSymbol.toLowerCase() === 'usdc') {
+        if (assetSymbol === 'usdt' || assetSymbol === 'usdc' || fromAssetSymbol === 'usdt' || toAssetSymbol === 'usdt') {
             exchangeRate = 1.00; // Force stablecoins to $1.00
         }
         
         // Ensure network is never "Unknown" - use the correct network for the asset
         let network = transaction.network;
-        if (!network || network === 'Unknown' || network === 'unknown') {
+        if (!network || network === 'Unknown' || network === 'unknown' || network === 'undefined') {
             // Map the asset to its correct network
-            const assetKey = (assetSymbol || fromAssetSymbol).toLowerCase();
+            const assetKey = assetSymbol || fromAssetSymbol || 'btc';
             network = assetNetworks[assetKey] || (assetKey === 'btc' ? 'Bitcoin' : 
                                                   assetKey === 'eth' ? 'Ethereum' : 
                                                   assetKey === 'usdt' ? 'Tron (TRC-20)' : 
                                                   assetKey === 'bnb' ? 'BNB Smart Chain (BEP-20)' : 
+                                                  assetKey === 'sol' ? 'Solana' :
+                                                  assetKey === 'usdc' ? 'Ethereum (ERC-20)' :
+                                                  assetKey === 'xrp' ? 'XRP Ledger' :
+                                                  assetKey === 'doge' ? 'Dogecoin' :
                                                   'Bitcoin'); // Default to Bitcoin if unknown
         }
         
@@ -4131,29 +4388,42 @@
         
         let detailsHTML = '';
         
-        if (isConversion) {
+        if (transaction.type === 'conversion') {
+            // Calculate proper amounts for conversion
+            const fromPrice = (fromAssetSymbol === 'usdt' || fromAssetSymbol === 'usdc') ? 1.00 : 
+                             (currentPrices[topAssets.find(a => a.symbol === fromAssetSymbol)?.id]?.usd || 0);
+            const toPrice = (toAssetSymbol === 'usdt' || toAssetSymbol === 'usdc') ? 1.00 : 
+                           (currentPrices[topAssets.find(a => a.symbol === toAssetSymbol)?.id]?.usd || 0);
+            
+            const fromAmountNum = parseFloat(transaction.fromAmount) || usdAmount;
+            const fromAssetAmountNum = fromPrice > 0 ? fromAmountNum / fromPrice : 0;
+            const toAssetAmountNum = parseFloat(transaction.toAmount) || (toPrice > 0 ? fromAmountNum / toPrice : 0);
+            
             detailsHTML = `
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
                         <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">From Amount</div>
-                        <div style="font-size: 1.8rem; font-weight: 700; color: var(--error);">-${formatUSD(Math.abs(fromAmount))}</div>
+                        <div style="font-size: 1.8rem; font-weight: 700; color: var(--error);">-${formatUSD(Math.abs(fromAmountNum))}</div>
                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
                             <img src="${fromAssetLogo}" style="width: 20px; height: 20px; border-radius: 50%;">
-                            <span style="color: var(--gray);">${formatNumberWithCommas(fromAmount / exchangeRate, 8)} ${formattedFromSymbol}</span>
+                            <span style="color: var(--gray);">${formatNumberWithCommas(fromAssetAmountNum, 8)} ${formattedFromSymbol}</span>
                         </div>
                     </div>
                     
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
                         <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">To Amount</div>
-                        <div style="font-size: 1.8rem; font-weight: 700; color: var(--success);">+${formatUSD(Math.abs(toAmount))}</div>
+                        <div style="font-size: 1.8rem; font-weight: 700; color: var(--success);">+${formatUSD(Math.abs(toAssetAmountNum * toPrice))}</div>
                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
                             <img src="${toAssetLogo}" style="width: 20px; height: 20px; border-radius: 50%;">
-                            <span style="color: var(--gray);">${formatNumberWithCommas(toAmount, 8)} ${formattedToSymbol}</span>
+                            <span style="color: var(--gray);">${formatNumberWithCommas(toAssetAmountNum, 8)} ${formattedToSymbol}</span>
                         </div>
                     </div>
                 </div>
             `;
         } else {
+            // Calculate asset amount based on exchange rate
+            const assetAmountNum = exchangeRate > 0 ? usdAmount / exchangeRate : 0;
+            
             detailsHTML = `
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
@@ -4161,7 +4431,7 @@
                         <div style="font-size: 1.8rem; font-weight: 700; ${amountClass}">${amountPrefix}${formatUSD(Math.abs(usdAmount))}</div>
                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
                             <img src="${primaryAssetLogo}" style="width: 20px; height: 20px; border-radius: 50%;">
-                            <span style="color: var(--gray);">${amountPrefix}${formatNumberWithCommas(Math.abs(usdAmount / exchangeRate), 8)} ${formattedAssetSymbol}</span>
+                            <span style="color: var(--gray);">${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmountNum), 8)} ${formattedAssetSymbol}</span>
                         </div>
                     </div>
                     
@@ -4181,7 +4451,7 @@
         
         body.innerHTML = `
             <div style="text-align: center; margin-bottom: 25px;">
-                ${isConversion ? `
+                ${transaction.type === 'conversion' ? `
                     <div style="display: flex; align-items: center; justify-content: center; gap: 15px; margin-bottom: 10px;">
                         <img src="${fromAssetLogo}" style="width: 48px; height: 48px; border-radius: 50%;">
                         <i class="fas fa-arrow-right" style="color: var(--primary); font-size: 1.5rem;"></i>
@@ -4210,7 +4480,7 @@
                         <div style="color: var(--dark); text-transform: capitalize;">${transaction.type || 'Transfer'}</div>
                     </div>
                     
-                    ${!isConversion ? `
+                    ${transaction.type !== 'conversion' ? `
                     <div>
                         <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Asset</div>
                         <div style="display: flex; align-items: center; gap: 6px;">
@@ -4223,9 +4493,9 @@
                     <div>
                         <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Exchange Rate</div>
                         <div style="color: var(--dark);">
-                            ${isConversion ? 
-                                `1 ${formattedFromSymbol} = ${formatUSD(exchangeRate)}` : 
-                                `1 ${formattedAssetSymbol} = ${formatUSD(exchangeRate)}`}
+                            ${transaction.type === 'conversion' ? 
+                                `1 ${formattedFromSymbol} = $${exchangeRate.toFixed(2)}` : 
+                                `1 ${formattedAssetSymbol} = $${exchangeRate.toFixed(2)}`}
                         </div>
                     </div>
                     
@@ -4256,7 +4526,7 @@
                     </div>
                     ` : ''}
                     
-                    <!-- Network display (ensured never "Unknown") -->
+                    <!-- Network display (ensured never "Unknown" or "undefined") -->
                     <div style="grid-column: span 2;">
                         <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Network</div>
                         <div style="color: var(--primary); font-weight: 500;">${network}</div>
@@ -4513,50 +4783,70 @@
                 // Ensure numeric values and add asset info with correct exchange rates
                 allTransactions = allTransactions.map(t => {
                     const amount = parseFloat(t.amount) || 0;
-                    const asset = t.asset || (t.type === 'deposit' ? t.method || 'usdt' : 
-                                              t.type === 'withdrawal' ? t.method || 'btc' : 
-                                              t.type === 'conversion' ? t.toAsset || 'usdt' : 'btc');
+                    
+                    // Determine the correct asset for this transaction - NEVER default to BTC for non-BTC transactions
+                    let asset = '';
+                    
+                    if (t.type === 'deposit') {
+                        asset = (t.method || 'usdt').toLowerCase(); // Default deposits to USDT, not BTC
+                    } else if (t.type === 'withdrawal') {
+                        asset = (t.method || 'btc').toLowerCase(); // Default withdrawals to BTC
+                    } else if (t.type === 'conversion') {
+                        asset = t.fromAsset ? t.fromAsset.toLowerCase() : 'btc';
+                    } else if (t.type === 'interest') {
+                        asset = 'btc';
+                    } else if (t.type === 'referral') {
+                        asset = 'btc';
+                    } else if (t.type === 'investment') {
+                        asset = 'btc';
+                    } else {
+                        asset = (t.asset || 'btc').toLowerCase();
+                    }
                     
                     // Find the correct asset ID and use its exchange rate
-                    const assetObj = topAssets.find(a => a.symbol === asset.toLowerCase()) || topAssets[0];
+                    const assetObj = topAssets.find(a => a.symbol === asset) || topAssets[0];
                     
                     // CRITICAL FIX: For USDT and stablecoins, always use $1.00
                     let assetPrice = 1.00; // Default for stablecoins
                     
-                    if (asset.toLowerCase() === 'usdt' || asset.toLowerCase() === 'usdc') {
+                    if (asset === 'usdt' || asset === 'usdc') {
                         assetPrice = 1.00; // Stablecoins are always $1.00
                     } else {
-                        assetPrice = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                        assetPrice = currentPrices[assetObj?.id]?.usd || 0;
                     }
                     
                     if (t.type === 'conversion') {
                         const fromAmount = parseFloat(t.fromAmount) || 0;
                         const toAmount = parseFloat(t.toAmount) || 0;
                         
+                        const fromAsset = (t.fromAsset || 'btc').toLowerCase();
+                        const toAsset = (t.toAsset || 'usdt').toLowerCase();
+                        
                         // Get correct prices for from and to assets
-                        const fromAssetObj = topAssets.find(a => a.symbol === (t.fromAsset || 'btc').toLowerCase());
-                        const toAssetObj = topAssets.find(a => a.symbol === (t.toAsset || 'usdt').toLowerCase());
+                        const fromAssetObj = topAssets.find(a => a.symbol === fromAsset);
+                        const toAssetObj = topAssets.find(a => a.symbol === toAsset);
                         
-                        const fromPrice = (t.fromAsset || '').toLowerCase() === 'usdt' ? 1.00 : 
-                                         (currentPrices[fromAssetObj?.id]?.usd || currentBTCPrice);
-                        const toPrice = (t.toAsset || '').toLowerCase() === 'usdt' ? 1.00 : 
-                                       (currentPrices[toAssetObj?.id]?.usd || currentBTCPrice);
+                        const fromPrice = fromAsset === 'usdt' ? 1.00 : 
+                                         (currentPrices[fromAssetObj?.id]?.usd || 0);
+                        const toPrice = toAsset === 'usdt' ? 1.00 : 
+                                       (currentPrices[toAssetObj?.id]?.usd || 0);
                         
-                        const exchangeRate = fromPrice / toPrice;
+                        const exchangeRate = fromPrice > 0 && toPrice > 0 ? fromPrice / toPrice : 1;
                         
                         return {
                             ...t,
                             amount: fromAmount,
                             fromAmount: fromAmount,
                             toAmount: toAmount,
-                            asset: t.fromAsset || asset,
-                            toAsset: t.toAsset || 'usdt',
+                            asset: fromAsset,
+                            fromAsset: fromAsset,
+                            toAsset: toAsset,
                             exchangeRate: exchangeRate,
                             assetAmount: toAmount
                         };
                     }
                     
-                    const assetAmount = assetPrice ? amount / assetPrice : 0;
+                    const assetAmount = assetPrice > 0 ? amount / assetPrice : 0;
                     
                     return {
                         ...t,
@@ -4639,14 +4929,23 @@
             let assetSymbol = transaction.asset || 'btc';
             // Format asset symbol to proper case (e.g., USDT not usdt)
             const formattedAssetSymbol = assetSymbol.toUpperCase();
-            let assetLogo = assetLogos[assetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
+            let assetLogo = assetLogos[assetSymbol.toLowerCase()] || (assetSymbol === 'usdt' ? 'https://assets.coingecko.com/coins/images/325/large/Tether.png' : 
+                                                                     assetSymbol === 'eth' ? 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' :
+                                                                     assetSymbol === 'bnb' ? 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' :
+                                                                     'https://assets.coingecko.com/coins/images/1/large/bitcoin.png');
             
             let assetDisplay;
             if (transaction.type === 'conversion') {
                 const fromAsset = transaction.fromAsset || 'btc';
                 const toAsset = transaction.toAsset || 'usdt';
-                const fromLogo = assetLogos[fromAsset.toLowerCase()] || assetLogo;
-                const toLogo = assetLogos[toAsset.toLowerCase()] || 'https://assets.coingecko.com/coins/images/325/large/Tether.png';
+                const fromLogo = assetLogos[fromAsset.toLowerCase()] || (fromAsset === 'usdt' ? 'https://assets.coingecko.com/coins/images/325/large/Tether.png' : 
+                                                                         fromAsset === 'eth' ? 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' :
+                                                                         fromAsset === 'bnb' ? 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' :
+                                                                         'https://assets.coingecko.com/coins/images/1/large/bitcoin.png');
+                const toLogo = assetLogos[toAsset.toLowerCase()] || (toAsset === 'usdt' ? 'https://assets.coingecko.com/coins/images/325/large/Tether.png' : 
+                                                                     toAsset === 'eth' ? 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' :
+                                                                     toAsset === 'bnb' ? 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' :
+                                                                     'https://assets.coingecko.com/coins/images/1/large/bitcoin.png');
                 
                 // Format symbols to proper case
                 const formattedFromAsset = fromAsset.toUpperCase();
@@ -4675,26 +4974,28 @@
             
             let amountDisplay;
             if (transaction.type === 'conversion') {
-                const fromAsset = transaction.fromAsset || 'btc';
-                const toAsset = transaction.toAsset || 'usdt';
-                const fromLogo = assetLogos[fromAsset.toLowerCase()] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
-                const toAssetLogo = assetLogos[toAsset.toLowerCase()] || 'https://assets.coingecko.com/coins/images/325/large/Tether.png';
-                
                 assetAmount = parseFloat(transaction.toAmount) || 0;
                 assetSymbolForAmount = (transaction.toAsset || 'usdt').toUpperCase();
+                const toAssetLogo = assetLogos[(transaction.toAsset || 'usdt').toLowerCase()] || (transaction.toAsset === 'usdt' ? 'https://assets.coingecko.com/coins/images/325/large/Tether.png' : 
+                                                                                                   transaction.toAsset === 'eth' ? 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' :
+                                                                                                   transaction.toAsset === 'bnb' ? 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' :
+                                                                                                   'https://assets.coingecko.com/coins/images/1/large/bitcoin.png');
                 
                 // Get correct exchange rates for display
-                const fromAssetObj = topAssets.find(a => a.symbol === (transaction.fromAsset || 'btc').toLowerCase());
-                const toAssetObj = topAssets.find(a => a.symbol === (transaction.toAsset || 'usdt').toLowerCase());
+                const fromAsset = (transaction.fromAsset || 'btc').toLowerCase();
+                const toAsset = (transaction.toAsset || 'usdt').toLowerCase();
                 
-                const fromPrice = (transaction.fromAsset || '').toLowerCase() === 'usdt' ? 1.00 : 
-                                 (currentPrices[fromAssetObj?.id]?.usd || currentBTCPrice);
-                const toPrice = (transaction.toAsset || '').toLowerCase() === 'usdt' ? 1.00 : 
-                               (currentPrices[toAssetObj?.id]?.usd || currentBTCPrice);
+                const fromAssetObj = topAssets.find(a => a.symbol === fromAsset);
+                const toAssetObj = topAssets.find(a => a.symbol === toAsset);
+                
+                const fromPrice = fromAsset === 'usdt' ? 1.00 : 
+                                 (currentPrices[fromAssetObj?.id]?.usd || 0);
+                const toPrice = toAsset === 'usdt' ? 1.00 : 
+                               (currentPrices[toAssetObj?.id]?.usd || 0);
                 
                 const fromAmountNum = parseFloat(transaction.fromAmount) || usdAmount;
-                const fromAssetAmount = fromAmountNum / fromPrice;
-                const toAssetAmount = parseFloat(transaction.toAmount) || (fromAssetAmount * fromPrice / toPrice);
+                const fromAssetAmount = fromPrice > 0 ? fromAmountNum / fromPrice : 0;
+                const toAssetAmount = parseFloat(transaction.toAmount) || (toPrice > 0 ? fromAmountNum / toPrice : 0);
                 
                 amountDisplay = `
                     <div style="display: flex; flex-direction: column;">
@@ -4704,8 +5005,8 @@
                             <span class="price-positive">${formatUSD(Math.abs(toAssetAmount * toPrice))}</span>
                         </div>
                         <div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;">
-                            <img src="${fromLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
-                            <span>${formatNumberWithCommas(fromAssetAmount, 8)} ${(transaction.fromAsset || 'btc').toUpperCase()}</span>
+                            <img src="${fromAssetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
+                            <span>${formatNumberWithCommas(fromAssetAmount, 8)} ${fromAsset.toUpperCase()}</span>
                             <i class="fas fa-arrow-right" style="color: var(--primary); font-size: 0.6rem;"></i>
                             <img src="${toAssetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
                             <span>${formatNumberWithCommas(toAssetAmount, 8)} ${assetSymbolForAmount}</span>
@@ -4721,10 +5022,10 @@
                     exchangeRate = 1.00; // Stablecoins are $1.00
                 } else {
                     const assetObj = topAssets.find(a => a.symbol === assetForRate);
-                    exchangeRate = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                    exchangeRate = currentPrices[assetObj?.id]?.usd || 0;
                 }
                 
-                assetAmount = usdAmount / exchangeRate;
+                assetAmount = exchangeRate > 0 ? usdAmount / exchangeRate : 0;
                 assetSymbolForAmount = formattedAssetSymbol;
                 
                 amountDisplay = `
@@ -4738,18 +5039,24 @@
                 `;
             }
             
-            // Determine network for display
+            // Determine network for display - ensure it's never "Unknown" or "undefined"
             let network = transaction.network;
-            if (!network || network === 'Unknown' || network === 'unknown') {
-                const assetKey = (assetSymbol.toLowerCase() || 'btc').split('/')[0];
-                network = assetNetworks[assetKey] || 'Bitcoin';
+            if (!network || network === 'Unknown' || network === 'unknown' || network === 'undefined') {
+                const assetKey = (assetSymbol.toLowerCase().split('/')[0]) || 'btc';
+                network = assetNetworks[assetKey] || (assetKey === 'btc' ? 'Bitcoin' : 
+                                                      assetKey === 'eth' ? 'Ethereum' : 
+                                                      assetKey === 'usdt' ? 'Tron (TRC-20)' : 
+                                                      assetKey === 'bnb' ? 'BNB Smart Chain (BEP-20)' : 
+                                                      assetKey === 'sol' ? 'Solana' :
+                                                      assetKey === 'usdc' ? 'Ethereum (ERC-20)' :
+                                                      'Bitcoin');
             }
             
             let detailText = transaction.description || transaction.details || '';
             
             if (!detailText) {
                 if (transaction.type === 'deposit') {
-                    detailText = `Deposit of ${formattedAssetSymbol} (no fee) at rate $${transaction.exchangeRate?.toFixed(2)} on ${network}`;
+                    detailText = `Deposit of ${formattedAssetSymbol} (no fee) at rate $${(transaction.exchangeRate || 1).toFixed(2)} on ${network}`;
                 } else if (transaction.type === 'withdrawal') {
                     detailText = `Withdrawal of ${formattedAssetSymbol} (fee: ${parseFloat(transaction.fee) || 0}% company fee) on ${network}`;
                 } else if (transaction.type === 'interest') {
@@ -4757,7 +5064,7 @@
                 } else if (transaction.type === 'conversion') {
                     const fromAsset = (transaction.fromAsset || 'btc').toUpperCase();
                     const toAsset = (transaction.toAsset || 'usdt').toUpperCase();
-                    detailText = `Converted ${fromAsset} to ${toAsset} at rate ${transaction.exchangeRate?.toFixed(6)}`;
+                    detailText = `Converted ${fromAsset} to ${toAsset} at rate ${(transaction.exchangeRate || 1).toFixed(6)}`;
                 } else if (transaction.type === 'referral') {
                     detailText = `Referral bonus in ${formattedAssetSymbol}`;
                 } else if (transaction.type === 'investment') {
