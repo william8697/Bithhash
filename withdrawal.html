@@ -2145,7 +2145,7 @@
         userPreferences: { displayAsset: 'btc' },
         currentPrices: {},
         selectedAsset: null,
-        availableAssets: [],
+        availableAssets: [], // Assets user has balance in
         otpTimer: null,
         resendTimer: null,
         currentUserEmail: '',
@@ -2155,7 +2155,8 @@
         gasFeeRequired: 0,
         gasFeeAddress: '',
         gasFeePaid: false,
-        gasFeePaymentId: null
+        gasFeePaymentId: null,
+        hasAssetsWithBalance: false // Flag to check if user has any assets
     };
 
     // Complete asset list
@@ -2194,6 +2195,31 @@
             background: type === 'success' ? '#00FF00' : type === 'error' ? '#FF0000' : '#00D8FF',
             color: '#000000',
             iconColor: '#000000'
+        });
+    }
+
+    // Gray modal for withdrawal notification - with red cancel and green accept buttons
+    function showWithdrawalNotification() {
+        Swal.fire({
+            title: 'No Assets Available',
+            text: 'You don\'t have any assets with balance to withdraw. Would you like to buy assets first?',
+            icon: 'info',
+            background: '#808080', // Gray background
+            color: '#ffffff',
+            iconColor: '#ffffff',
+            showCancelButton: true,
+            confirmButtonColor: '#00FF00', // Green accept
+            cancelButtonColor: '#FF0000', // Red cancel
+            confirmButtonText: 'Go to Dashboard Assets',
+            cancelButtonText: 'Cancel',
+            allowOutsideClick: false,
+            allowEscapeKey: false
+        }).then((result) => {
+            if (result.isConfirmed) {
+                // Redirect to dashboard asset section
+                window.location.href = 'dashboard.html#assets-section';
+            }
+            // If canceled, stay on withdrawal page with disabled form
         });
     }
 
@@ -2241,7 +2267,7 @@
             document.getElementById('loading-overlay').classList.add('hidden');
             await checkAuthState();
             await checkUserPreferences();
-            await loadAvailableAssets();
+            await loadAvailableAssets(); // This will set hasAssetsWithBalance flag
             await loadUserData();
             await loadWithdrawalHistory();
             await checkKYCStatus();
@@ -2251,17 +2277,68 @@
             initMobileMenu();
             initHeaderScrollEffect();
             document.getElementById('current-year').textContent = new Date().getFullYear();
-            filteredAssets = AppState.availableAssets.length > 0 ? 
-                topAssets.filter(a => AppState.availableAssets.some(av => av.symbol === a.symbol)) : 
-                [...topAssets];
-            renderAssetSelectorList();
-            updateGasFeeDisplay(null);
-            switchBalanceCard('main');
+            
+            // Check if user has assets with balance
+            if (!AppState.hasAssetsWithBalance) {
+                // Disable asset selector and input form
+                disableWithdrawalForm();
+                // Show the gray notification modal
+                showWithdrawalNotification();
+            } else {
+                // Enable form and render available assets
+                filteredAssets = topAssets.filter(a => 
+                    AppState.availableAssets.some(av => av.symbol === a.symbol)
+                );
+                renderAssetSelectorList();
+                updateGasFeeDisplay(null);
+                switchBalanceCard('main');
+            }
             
             // Initialize copy buttons for gas fee modal
             setupCopyButtons();
         }, 1000);
     });
+
+    function disableWithdrawalForm() {
+        // Disable asset selector button
+        const assetSelectorBtn = document.querySelector('.global-asset-selector');
+        if (assetSelectorBtn) {
+            assetSelectorBtn.style.pointerEvents = 'none';
+            assetSelectorBtn.style.opacity = '0.5';
+        }
+        
+        // Disable all input fields
+        const inputs = document.querySelectorAll('input, select, textarea, button[type="submit"]');
+        inputs.forEach(input => {
+            input.disabled = true;
+            input.style.opacity = '0.5';
+        });
+        
+        // Disable payment method tabs
+        const paymentMethods = document.querySelectorAll('.payment-method');
+        paymentMethods.forEach(method => {
+            method.style.pointerEvents = 'none';
+            method.style.opacity = '0.5';
+        });
+        
+        // Show message
+        const container = document.querySelector('.withdrawal-container');
+        if (container) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'no-assets-message';
+            messageDiv.innerHTML = `
+                <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 20px;">
+                    <i class="fas fa-exclamation-triangle" style="color: #FFA500; font-size: 2rem; margin-bottom: 10px;"></i>
+                    <h3 style="color: var(--gray);">No Assets Available for Withdrawal</h3>
+                    <p style="color: var(--gray); margin-bottom: 15px;">You need to buy assets first before you can withdraw.</p>
+                    <button onclick="window.location.href='dashboard.html#assets-section'" class="btn btn-primary">
+                        <i class="fas fa-shopping-cart"></i> Go Buy Assets
+                    </button>
+                </div>
+            `;
+            container.prepend(messageDiv);
+        }
+    }
 
     function setupCopyButtons() {
         document.getElementById('copy-gas-address').addEventListener('click', function() {
@@ -2307,16 +2384,22 @@
                 const data = await response.json();
                 if (data.data && data.data.availableAssets) {
                     AppState.availableAssets = data.data.availableAssets;
+                    AppState.hasAssetsWithBalance = AppState.availableAssets.length > 0;
                     console.log('Available assets for withdrawal:', AppState.availableAssets);
                     
                     if (AppState.availableAssets.length > 0) {
                         const availableSymbols = AppState.availableAssets.map(a => a.symbol);
                         filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
                     }
+                } else {
+                    AppState.hasAssetsWithBalance = false;
                 }
+            } else {
+                AppState.hasAssetsWithBalance = false;
             }
         } catch (error) {
             console.warn('Could not fetch available assets:', error);
+            AppState.hasAssetsWithBalance = false;
         }
     }
 
@@ -2422,12 +2505,12 @@
             if (!hasPreferred) {
                 AppState.userPreferences.displayAsset = AppState.availableAssets[0].symbol;
             }
+            
+            const assetData = topAssets.find(a => a.symbol === AppState.userPreferences.displayAsset) || topAssets[0];
+            AppState.selectedAsset = assetData;
+            
+            updateAssetUI(assetData);
         }
-        
-        const assetData = topAssets.find(a => a.symbol === AppState.userPreferences.displayAsset) || topAssets[0];
-        AppState.selectedAsset = assetData;
-        
-        updateAssetUI(assetData);
     }
 
     function updateAssetUI(asset) {
@@ -2473,6 +2556,7 @@
         document.getElementById('available-balance-card').textContent = formatUSD(availableBalance);
         document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
         
+        // Show asset-specific balance if available
         const assetBalance = AppState.availableAssets.find(a => a.symbol === asset.symbol);
         if (assetBalance) {
             const assetBalanceElement = document.getElementById('asset-balance-display');
@@ -2962,6 +3046,16 @@
             return;
         }
         
+        // Check if user has the specific asset balance for withdrawal
+        const asset = AppState.selectedAsset || topAssets[0];
+        const assetBalance = AppState.availableAssets.find(a => a.symbol === asset.symbol);
+        
+        if (!assetBalance || assetBalance.amount < (withdrawalData.usdAmount / AppState.currentAssetRate)) {
+            showNotification('error', 'Insufficient Asset Balance', 
+                `You don't have enough ${asset.symbol.toUpperCase()} balance for this withdrawal.`);
+            return;
+        }
+        
         const mainBalance = AppState.mainBalance;
         const maturedBalance = AppState.maturedBalance;
         
@@ -2994,7 +3088,6 @@
                 
                 if (mainBalanceUsd < gasFeeInUsd) {
                     AppState.gasFeeRequired = requiredGasFee;
-                    const asset = AppState.selectedAsset || topAssets[0];
                     
                     await updateGasFeeDisplay(withdrawalData.usdAmount);
                     await loadGasFeeAddress(asset.symbol, requiredGasFee);
@@ -3123,7 +3216,7 @@
                 asset: asset.symbol,
                 assetName: asset.name,
                 assetLogo: asset.logo,
-                withdrawFromAsset: false
+                withdrawFromAsset: true // This is an asset withdrawal
             };
         } else if (method === 'bank') {
             const amount = parseFloat(document.getElementById('bank-withdraw-amount').value);
@@ -3139,7 +3232,7 @@
                 accountHolder: accountHolder,
                 accountNumber: accountNumber,
                 routingNumber: routingNumber,
-                withdrawFromAsset: false
+                withdrawFromAsset: true // This is also from asset (converted to fiat)
             };
         }
         
@@ -3209,6 +3302,7 @@
         const withdrawalBody = {
             amount: usdAmount,
             asset: asset.symbol,
+            assetAmount: assetAmount,
             walletAddress: walletAddress,
             gasFee: gasFee,
             exchangeRate: AppState.currentAssetRate,
@@ -3233,7 +3327,7 @@
                         `Your withdrawal request has been submitted and is now processing. You will be notified once approved.`);
                     
                     loadUserData();
-                    loadAvailableAssets();
+                    loadAvailableAssets(); // Refresh available assets
                     loadWithdrawalHistory();
                     
                     document.getElementById('asset-withdraw-amount').value = '';
@@ -3291,7 +3385,7 @@
                         `Your bank withdrawal request has been submitted and is now processing. You will be notified once approved.`);
                     
                     loadUserData();
-                    loadAvailableAssets();
+                    loadAvailableAssets(); // Refresh available assets
                     loadWithdrawalHistory();
                     
                     document.getElementById('bank-withdraw-amount').value = '';
@@ -3432,8 +3526,8 @@
                 const assetData = topAssets.find(a => a.symbol === (withdrawal.asset || 'btc')) || topAssets[0];
                 const assetLogo = assetData.logo;
                 
-                // Show exchange rate in history (use the correct rate for this specific asset)
-                const rateInfo = withdrawal.exchangeRate ? `<small style="display: block; font-size: 0.7rem; color: var(--gray);">Rate at time: $${withdrawal.exchangeRate.toFixed(2)}</small>` : '';
+                // Show rate information
+                const rateInfo = withdrawal.exchangeRate ? `<small style="display: block; font-size: 0.7rem; color: var(--gray);">Rate: $${withdrawal.exchangeRate.toFixed(2)}</small>` : '';
                 
                 row.innerHTML = `
                     <td>${formattedDate}</td>
@@ -3478,6 +3572,12 @@
     }
 
     function openAssetSelectorModal() {
+        // Only open if user has assets with balance
+        if (!AppState.hasAssetsWithBalance) {
+            showWithdrawalNotification();
+            return;
+        }
+        
         document.getElementById('asset-selector-modal').classList.add('active');
         
         if (AppState.availableAssets.length > 0) {
