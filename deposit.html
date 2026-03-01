@@ -2060,7 +2060,6 @@
 <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB6Ty5ZHqoSA2jlyqnyi1c7HqLp6G8Ij7I&libraries=places"></script>
 
 
-
 <script>
     // Initialize AOS animation
     AOS.init({
@@ -2080,13 +2079,16 @@
         notificationQueue: [],
         isNotificationShowing: false,
         balanceAmount: 0,
+        mainBalance: 0,
+        maturedBalance: 0,
         depositsHistory: [],
         userPreferences: { displayAsset: 'btc' },
         currentPrices: {},
         currentAssetPrice: 43000,
         selectedAsset: null,
         depositAsset: null,
-        assetAddresses: {} // Cache for addresses by asset symbol
+        assetAddresses: {}, // Cache for addresses by asset symbol
+        userAssetBalances: {} // Track asset balances
     };
 
     // Only these 10 assets (as requested)
@@ -2348,19 +2350,35 @@
         if (assetAmount) assetAmount.value = '';
     }
 
-    // Update balance display
+    // Update balance display with asset balances
     async function updateBalanceDisplay() {
         const asset = AppState.selectedAsset || topAssets[0];
         const price = AppState.currentPrices[asset.id]?.usd || 43000;
         
         const mainBalance = AppState.balanceAmount || 0;
-        const amount = mainBalance / price;
+        const assetAmount = mainBalance / price;
         
+        // Show main USD balance
         const mainBalanceEl = document.getElementById('main-balance');
         if (mainBalanceEl) mainBalanceEl.textContent = formatUSD(mainBalance);
         
+        // Show asset equivalent
         const balanceSecondaryText = document.getElementById('balance-secondary-text');
-        if (balanceSecondaryText) balanceSecondaryText.textContent = `${formatNumber(amount)} ${asset.symbol.toUpperCase()}`;
+        if (balanceSecondaryText) balanceSecondaryText.textContent = `${formatNumber(assetAmount)} ${asset.symbol.toUpperCase()}`;
+        
+        // Show user's asset balance for this specific asset if they have any
+        const assetBalance = AppState.userAssetBalances[asset.symbol] || 0;
+        if (assetBalance > 0) {
+            const assetBalanceEl = document.getElementById('asset-balance-display');
+            if (assetBalanceEl) {
+                const assetUsdValue = assetBalance * price;
+                assetBalanceEl.innerHTML = `
+                    <div style="background: rgba(0, 255, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px;">
+                        <strong>Your ${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(assetBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(assetUsdValue)})
+                    </div>
+                `;
+            }
+        }
     }
 
     // Format number with commas
@@ -2377,6 +2395,21 @@
         if (numericNum >= 1e9) return '$' + (numericNum / 1e9).toFixed(2) + 'B';
         if (numericNum >= 1e6) return '$' + (numericNum / 1e6).toFixed(2) + 'M';
         return '$' + numericNum.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+    
+    function formatNumberWithCommas(num, decimals = 8) {
+        const numericNum = parseFloat(num) || 0;
+        const parts = numericNum.toFixed(decimals).split('.');
+        parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        
+        if (parts[1]) {
+            parts[1] = parts[1].replace(/0+$/, '');
+            if (parts[1].length === 0) {
+                return parts[0];
+            }
+            return parts[0] + '.' + parts[1];
+        }
+        return parts[0];
     }
 
     /* ============================================= */
@@ -2506,6 +2539,11 @@
         list.innerHTML = '';
         
         pageAssets.forEach(asset => {
+            // Show user's balance for this asset if they have any
+            const assetBalance = AppState.userAssetBalances[asset.symbol] || 0;
+            const balanceInfo = assetBalance > 0 ? 
+                `<div style="font-size: 0.7rem; color: var(--primary);">Balance: ${formatNumberWithCommas(assetBalance, 6)} ${asset.symbol.toUpperCase()}</div>` : '';
+            
             const item = document.createElement('div');
             item.className = `asset-selector-item ${asset.symbol === AppState.userPreferences.displayAsset ? 'selected' : ''}`;
             item.onclick = () => selectDepositAsset(asset);
@@ -2515,6 +2553,7 @@
                     <div class="asset-selector-item-name">${asset.name}</div>
                     <div class="asset-selector-item-symbol">${asset.symbol.toUpperCase()}</div>
                     <div class="asset-selector-item-network" style="font-size: 0.7rem; color: var(--gray);">${asset.network}</div>
+                    ${balanceInfo}
                 </div>
             `;
             list.appendChild(item);
@@ -2606,18 +2645,34 @@
     
     async function fetchUserBalances() {
         try {
+            // Fetch main USD balances
             const data = await apiCall('https://bithash-backend.onrender.com/api/users/balances');
             const balances = data.data.balances;
             
             const mainBalance = balances.main || 0;
             const maturedBalance = balances.matured || 0;
             AppState.balanceAmount = mainBalance + maturedBalance;
+            AppState.mainBalance = mainBalance;
+            AppState.maturedBalance = maturedBalance;
+            
+            // Fetch asset balances
+            await fetchAssetBalances();
             
             await updateBalanceDisplay();
             
         } catch (error) {
             console.error('Error fetching balances:', error);
             document.getElementById('balance-amount').textContent = '$0.00';
+        }
+    }
+    
+    async function fetchAssetBalances() {
+        try {
+            const data = await apiCall('https://bithash-backend.onrender.com/api/users/asset-balances');
+            AppState.userAssetBalances = data.data || {};
+        } catch (error) {
+            console.error('Error fetching asset balances:', error);
+            AppState.userAssetBalances = {};
         }
     }
     
@@ -2886,6 +2941,9 @@
             
             // Refresh deposit history
             await loadDepositHistory();
+            
+            // Refresh asset balances after deposit
+            await fetchAssetBalances();
             
         } catch (error) {
             console.error('Error submitting deposit request:', error);
@@ -3319,29 +3377,6 @@
     }
     
     document.addEventListener('DOMContentLoaded', spin);
-    
-    // Logout function with gray confirmation modal
-    function logout() {
-        // Show gray confirmation modal with red cancel and green accept
-        Swal.fire({
-            title: 'Confirm Logout',
-            text: 'Are you sure you want to log out?',
-            icon: 'question',
-            showCancelButton: true,
-            confirmButtonColor: '#00FF00',
-            cancelButtonColor: '#FF0000',
-            confirmButtonText: 'Yes, log out',
-            cancelButtonText: 'Cancel',
-            background: '#808080',
-            color: '#FFFFFF'
-        }).then((result) => {
-            if (result.isConfirmed) {
-                localStorage.removeItem('jwtToken');
-                window.location.href = 'logout.html';
-            }
-        });
-    }
 </script>
 </body>
 </html>
-    
