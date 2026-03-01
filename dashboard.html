@@ -3571,8 +3571,7 @@
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
 
 
-
-    <script>
+<script>
     // Initialize AOS animation
     AOS.init({
         duration: 800,
@@ -3601,7 +3600,8 @@
         availableAssets: [], // Assets user has balance in
         assetTransactions: {}, // Transactions grouped by asset
         portfolioDetails: null,
-        selectedPortfolioAsset: null
+        selectedPortfolioAsset: null,
+        fiatTotal: 0 // Total fiat value of all assets
     };
     let apiRetryCount = 0;
     const MAX_RETRIES = 5;
@@ -3699,6 +3699,42 @@
         'xtz': 'Tezos'
     };
     
+    // Helper function for safe API calls
+    async function apiCall(url, options = {}) {
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const defaultOptions = {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                },
+                mode: 'cors',
+                credentials: 'omit'
+            };
+
+            const mergedOptions = { ...defaultOptions, ...options };
+            
+            const response = await fetch(url, mergedOptions);
+            
+            if (!response.ok) {
+                let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.message || errorMessage;
+                } catch {
+                    // Ignore JSON parsing error
+                }
+                throw new Error(errorMessage);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('API call failed:', error);
+            throw error;
+        }
+    }
+    
     // Hide loading overlay when page is loaded
     window.addEventListener('load', function() {
         setTimeout(async function() {
@@ -3715,9 +3751,9 @@
             await loadUserData();
             await checkUserDefaultAsset();
             await loadBalances();
-            await loadAssetBalances(); // Load asset balances
+            await loadAssetBalances(); // Load asset balances from backend
             await loadAvailableAssets(); // Load assets user has balance in
-            await loadPortfolioDetails(); // Load full portfolio details
+            await loadPortfolioDetails(); // Load full portfolio details from backend
             await loadInvestments();
             await loadTransactions();
             await loadReferralData();
@@ -3918,11 +3954,39 @@
                 if (data.data && data.data.availableAssets) {
                     AppState.availableAssets = data.data.availableAssets;
                     console.log('Available assets for withdrawal:', AppState.availableAssets);
-                    renderAssetsWithBalance();
                 }
             }
         } catch (error) {
             console.warn('Could not fetch available assets:', error);
+        }
+    }
+    
+    /* ============================================= */
+    /* Load Asset Balances from Backend */
+    /* ============================================= */
+    
+    async function loadAssetBalances() {
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const response = await fetch('https://bithash-backend.onrender.com/api/users/asset-balances', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.balances) {
+                    userAssetBalances = data.data.balances;
+                    AppState.fiatTotal = data.data.totalFiatValue || 0;
+                    console.log('Asset balances loaded:', userAssetBalances);
+                    console.log('Total fiat value:', AppState.fiatTotal);
+                }
+            } else {
+                console.warn('Failed to load asset balances, using empty object');
+                userAssetBalances = {};
+            }
+        } catch (error) {
+            console.error('Error loading asset balances:', error);
+            userAssetBalances = {};
         }
     }
     
@@ -3941,10 +4005,17 @@
                 const data = await response.json();
                 AppState.portfolioDetails = data.data;
                 updateTotalFiatValue();
+                renderAssetsWithBalance(); // Render assets with the fetched data
                 console.log('Portfolio details loaded:', AppState.portfolioDetails);
+            } else {
+                console.warn('Portfolio details endpoint not available, using asset balances');
+                // Fallback to asset balances if portfolio endpoint not available
+                renderAssetsWithBalanceFallback();
             }
         } catch (error) {
-            console.warn('Could not fetch portfolio details:', error);
+            console.warn('Could not fetch portfolio details, using fallback:', error);
+            // Fallback to asset balances
+            renderAssetsWithBalanceFallback();
         }
     }
     
@@ -3969,88 +4040,45 @@
                     </span>
                 `;
             }
+        } else if (AppState.fiatTotal > 0) {
+            const totalFiatElement = document.getElementById('total-fiat-value');
+            if (totalFiatElement) {
+                totalFiatElement.textContent = formatUSD(AppState.fiatTotal);
+            }
         }
     }
     
     /* ============================================= */
-    /* Render My Assets Section with Clickable Portfolio */
+    /* Render My Assets Section - Fallback using asset balances */
     /* ============================================= */
     
-    function renderAssetsWithBalance() {
+    function renderAssetsWithBalanceFallback() {
         const grid = document.getElementById('assets-with-balance-grid');
         if (!grid) return;
         
         grid.innerHTML = '';
         
-        // Use portfolio details if available for more accurate data
-        if (AppState.portfolioDetails && AppState.portfolioDetails.assets && AppState.portfolioDetails.assets.length > 0) {
-            const assetsWithBalance = AppState.portfolioDetails.assets;
-            
-            assetsWithBalance.sort((a, b) => b.currentValue - a.currentValue);
-            
-            assetsWithBalance.forEach(asset => {
-                const profitLossClass = asset.profitLoss >= 0 ? 'price-positive' : 'price-negative';
-                const profitLossArrow = asset.profitLoss >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>';
-                
-                const card = document.createElement('div');
-                card.className = 'asset-balance-card clickable';
-                card.onclick = () => openPortfolioAssetModal(asset);
-                
-                card.innerHTML = `
-                    <div class="asset-balance-header">
-                        <img src="${asset.logo}" class="asset-balance-logo" alt="${asset.symbol}">
-                        <div class="asset-balance-info">
-                            <div class="asset-balance-name">${asset.name}</div>
-                            <div class="asset-balance-symbol">${asset.symbol.toUpperCase()}</div>
-                        </div>
-                        <div>
-                            <div class="asset-balance-amount">${formatNumberWithCommas(asset.amount, 6)}</div>
-                            <div class="asset-balance-usd">${formatUSD(asset.currentValue)}</div>
-                        </div>
-                    </div>
-                    <div class="asset-profit-loss ${profitLossClass}">
-                        ${profitLossArrow} ${formatUSD(Math.abs(asset.profitLoss))} (${asset.profitLossPercentage >= 0 ? '+' : ''}${asset.profitLossPercentage.toFixed(2)}%)
-                    </div>
-                `;
-                
-                grid.appendChild(card);
-            });
-            
-            return;
-        }
-        
-        // Fallback to old method if portfolio details not available
         // Find assets that user has balance in
         const assetsWithBalance = [];
         
-        for (const [symbol, balance] of Object.entries(userAssetBalances)) {
-            const assetBalance = parseFloat(balance);
-            if (assetBalance > 0) {
-                const assetData = topAssets.find(a => a.symbol === symbol.toLowerCase());
-                if (assetData) {
-                    assetsWithBalance.push({
-                        ...assetData,
-                        amount: assetBalance
-                    });
-                }
-            }
-        }
-        
-        // Also check main balances (USD values converted to asset amounts)
-        const mainBalanceUSD = userBalances.main || 0;
-        if (mainBalanceUSD > 0) {
-            // Show main balance as USD (stablecoin)
-            const usdAsset = topAssets.find(a => a.symbol === 'usdt');
-            if (usdAsset) {
-                // Check if we already have USDT
-                const existingUsdt = assetsWithBalance.find(a => a.symbol === 'usdt');
-                if (existingUsdt) {
-                    existingUsdt.amount = (existingUsdt.amount || 0) + (mainBalanceUSD / 1.0);
-                } else {
-                    assetsWithBalance.push({
-                        ...usdAsset,
-                        amount: mainBalanceUSD / 1.0
-                    });
+        if (userAssetBalances && typeof userAssetBalances === 'object') {
+            for (const [symbol, balance] of Object.entries(userAssetBalances)) {
+                const assetBalance = parseFloat(balance) || 0;
+                if (assetBalance > 0) {
+                    const assetData = topAssets.find(a => a.symbol === symbol.toLowerCase());
+                    if (assetData) {
+                        const price = currentPrices[assetData.id]?.usd || 0;
+                        const usdValue = assetBalance * price;
+                        
+                        assetsWithBalance.push({
+                            ...assetData,
+                            amount: assetBalance,
+                            currentValue: usdValue,
+                            currentPrice: price,
+                            profitLoss: 0,
+                            profitLossPercentage: 0
+                        });
+                    }
                 }
             }
         }
@@ -4068,12 +4096,9 @@
             return;
         }
         
-        assetsWithBalance.sort((a, b) => (b.amount * (currentPrices[b.id]?.usd || 0)) - (a.amount * (currentPrices[a.id]?.usd || 0)));
+        assetsWithBalance.sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0));
         
         assetsWithBalance.forEach(asset => {
-            const price = currentPrices[asset.id]?.usd || 0;
-            const usdValue = asset.amount * price;
-            
             const card = document.createElement('div');
             card.className = 'asset-balance-card clickable';
             card.onclick = () => openAssetTransactionsModal(asset);
@@ -4086,8 +4111,8 @@
                         <div class="asset-balance-symbol">${asset.symbol.toUpperCase()}</div>
                     </div>
                     <div>
-                        <div class="asset-balance-amount">${formatNumberWithCommas(asset.amount, 6)}</div>
-                        <div class="asset-balance-usd">${formatUSD(usdValue)}</div>
+                        <div class="asset-balance-amount">${formatNumberWithCommas(asset.amount || 0, 6)}</div>
+                        <div class="asset-balance-usd">${formatUSD(asset.currentValue || 0)}</div>
                     </div>
                 </div>
             `;
@@ -4097,11 +4122,69 @@
     }
     
     /* ============================================= */
+    /* Render My Assets Section with Clickable Portfolio */
+    /* ============================================= */
+    
+    function renderAssetsWithBalance() {
+        const grid = document.getElementById('assets-with-balance-grid');
+        if (!grid) return;
+        
+        grid.innerHTML = '';
+        
+        // Use portfolio details if available for more accurate data
+        if (AppState.portfolioDetails && AppState.portfolioDetails.assets && AppState.portfolioDetails.assets.length > 0) {
+            const assetsWithBalance = AppState.portfolioDetails.assets;
+            
+            assetsWithBalance.sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0));
+            
+            assetsWithBalance.forEach(asset => {
+                // Add null checks for all properties
+                if (!asset) return;
+                
+                const profitLoss = asset.profitLoss || 0;
+                const profitLossPercentage = asset.profitLossPercentage || 0;
+                const profitLossClass = profitLoss >= 0 ? 'price-positive' : 'price-negative';
+                const profitLossArrow = profitLoss >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>';
+                
+                const card = document.createElement('div');
+                card.className = 'asset-balance-card clickable';
+                card.onclick = () => openPortfolioAssetModal(asset);
+                
+                card.innerHTML = `
+                    <div class="asset-balance-header">
+                        <img src="${asset.logo || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png'}" class="asset-balance-logo" alt="${asset.symbol || 'BTC'}">
+                        <div class="asset-balance-info">
+                            <div class="asset-balance-name">${asset.name || 'Unknown'}</div>
+                            <div class="asset-balance-symbol">${(asset.symbol || 'BTC').toUpperCase()}</div>
+                        </div>
+                        <div>
+                            <div class="asset-balance-amount">${formatNumberWithCommas(asset.amount || 0, 6)}</div>
+                            <div class="asset-balance-usd">${formatUSD(asset.currentValue || 0)}</div>
+                        </div>
+                    </div>
+                    <div class="asset-profit-loss ${profitLossClass}">
+                        ${profitLossArrow} ${formatUSD(Math.abs(profitLoss))} (${profitLossPercentage >= 0 ? '+' : ''}${profitLossPercentage.toFixed(2)}%)
+                    </div>
+                `;
+                
+                grid.appendChild(card);
+            });
+            
+            return;
+        }
+        
+        // Fallback to asset balances
+        renderAssetsWithBalanceFallback();
+    }
+    
+    /* ============================================= */
     /* Portfolio Asset Modal - Full Details When Clicked */
     /* ============================================= */
     
     function openPortfolioAssetModal(asset) {
         const modal = document.getElementById('portfolio-asset-modal');
+        if (!modal) return;
+        
         const title = document.getElementById('portfolio-asset-title');
         const summary = document.getElementById('portfolio-asset-summary');
         const details = document.getElementById('portfolio-asset-details');
@@ -4109,109 +4192,115 @@
         
         AppState.selectedPortfolioAsset = asset;
         
-        title.innerHTML = `
-            <img src="${asset.logo}" style="width: 32px; height: 32px; border-radius: 50%; margin-right: 10px;">
-            ${asset.name} (${asset.symbol.toUpperCase()}) - Portfolio Details
-        `;
+        if (title) {
+            title.innerHTML = `
+                <img src="${asset.logo || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png'}" style="width: 32px; height: 32px; border-radius: 50%; margin-right: 10px;">
+                ${asset.name || 'Unknown'} (${(asset.symbol || 'BTC').toUpperCase()}) - Portfolio Details
+            `;
+        }
         
-        const profitLossClass = asset.profitLoss >= 0 ? 'price-positive' : 'price-negative';
-        const profitLossArrow = asset.profitLoss >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>';
+        const profitLoss = asset.profitLoss || 0;
+        const profitLossPercentage = asset.profitLossPercentage || 0;
+        const profitLossClass = profitLoss >= 0 ? 'price-positive' : 'price-negative';
+        const profitLossArrow = profitLoss >= 0 ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>';
         
-        summary.innerHTML = `
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Current Balance</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatNumberWithCommas(asset.amount, 6)} ${asset.symbol.toUpperCase()}</div>
-                    <div style="color: var(--gray);">${formatUSD(asset.currentValue)}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Current Price</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.currentPrice)}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Avg Buy Price</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.avgBuyPrice)}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Total Cost</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.totalCost)}</div>
-                </div>
-            </div>
-            <div style="background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; margin-bottom: 20px;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div style="color: var(--gray);">Profit/Loss</div>
-                    <div class="${profitLossClass}" style="font-size: 1.5rem; font-weight: 700;">
-                        ${profitLossArrow} ${formatUSD(Math.abs(asset.profitLoss))} (${asset.profitLossPercentage >= 0 ? '+' : ''}${asset.profitLossPercentage.toFixed(2)}%)
+        if (summary) {
+            summary.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Current Balance</div>
+                        <div style="font-size: 1.2rem; font-weight: 600;">${formatNumberWithCommas(asset.amount || 0, 6)} ${(asset.symbol || 'BTC').toUpperCase()}</div>
+                        <div style="color: var(--gray);">${formatUSD(asset.currentValue || 0)}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Current Price</div>
+                        <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.currentPrice || 0)}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Avg Buy Price</div>
+                        <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.avgBuyPrice || 0)}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Total Cost</div>
+                        <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(asset.totalCost || 0)}</div>
                     </div>
                 </div>
-            </div>
-        `;
+                <div style="background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="color: var(--gray);">Profit/Loss</div>
+                        <div class="${profitLossClass}" style="font-size: 1.5rem; font-weight: 700;">
+                            ${profitLossArrow} ${formatUSD(Math.abs(profitLoss))} (${profitLossPercentage >= 0 ? '+' : ''}${profitLossPercentage.toFixed(2)}%)
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
         
-        details.innerHTML = `
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Network</div>
-                    <div style="font-weight: 500;">${asset.network || 'Unknown'}</div>
+        if (details) {
+            details.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Network</div>
+                        <div style="font-weight: 500;">${asset.network || assetNetworks[asset.symbol] || 'Unknown'}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Asset Type</div>
+                        <div style="font-weight: 500;">Cryptocurrency</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">First Acquired</div>
+                        <div style="font-weight: 500;">${asset.transactions && asset.transactions.length > 0 ? new Date(asset.transactions[asset.transactions.length - 1].date).toLocaleDateString() : 'N/A'}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.8rem;">Last Transaction</div>
+                        <div style="font-weight: 500;">${asset.transactions && asset.transactions.length > 0 ? new Date(asset.transactions[0].date).toLocaleDateString() : 'N/A'}</div>
+                    </div>
                 </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Asset Type</div>
-                    <div style="font-weight: 500;">Cryptocurrency</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">First Acquired</div>
-                    <div style="font-weight: 500;">${asset.transactions && asset.transactions.length > 0 ? new Date(asset.transactions[asset.transactions.length - 1].date).toLocaleDateString() : 'N/A'}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Last Transaction</div>
-                    <div style="font-weight: 500;">${asset.transactions && asset.transactions.length > 0 ? new Date(asset.transactions[0].date).toLocaleDateString() : 'N/A'}</div>
-                </div>
-            </div>
-        `;
+            `;
+        }
         
         // Render transactions
-        if (asset.transactions && asset.transactions.length > 0) {
-            let transactionsHtml = '<div style="margin-top: 20px;"><h4 style="margin-bottom: 15px;">Transaction History</h4>';
-            
-            asset.transactions.slice(0, 10).forEach(tx => {
-                const date = new Date(tx.date).toLocaleDateString('en-US', {
-                    month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
+        if (transactions) {
+            if (asset.transactions && asset.transactions.length > 0) {
+                let transactionsHtml = '<div style="margin-top: 20px;"><h4 style="margin-bottom: 15px;">Transaction History</h4>';
+                
+                asset.transactions.slice(0, 10).forEach(tx => {
+                    if (!tx) return;
+                    
+                    const date = tx.date ? new Date(tx.date).toLocaleDateString('en-US', {
+                        month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                    }) : 'N/A';
+                    
+                    const txTypeClass = tx.type === 'buy' ? 'price-positive' : (tx.type === 'sell' ? 'price-negative' : '');
+                    const txAmount = tx.type === 'buy' ? `+${formatNumberWithCommas(tx.amount || 0, 6)}` : `-${formatNumberWithCommas(tx.amount || 0, 6)}`;
+                    
+                    transactionsHtml += `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <div>
+                                <div style="font-size: 0.8rem; color: var(--gray);">${date}</div>
+                                <div><span style="text-transform: capitalize;">${tx.type || 'transaction'}</span> at $${(tx.price || 0).toFixed(2)}</div>
+                            </div>
+                            <div>
+                                <div class="${txTypeClass}" style="text-align: right;">${txAmount} ${(asset.symbol || 'BTC').toUpperCase()}</div>
+                                <div style="font-size: 0.8rem; color: var(--gray); text-align: right;">${formatUSD(tx.usdValue || 0)}</div>
+                            </div>
+                        </div>
+                    `;
                 });
                 
-                const txTypeClass = tx.type === 'buy' ? 'price-positive' : (tx.type === 'sell' ? 'price-negative' : '');
-                const txAmount = tx.type === 'buy' ? `+${formatNumberWithCommas(tx.amount, 6)}` : `-${formatNumberWithCommas(tx.amount, 6)}`;
-                const txUsd = tx.type === 'buy' ? formatUSD(tx.usdValue) : formatUSD(tx.usdValue);
-                
-                let profitLossHtml = '';
-                if (tx.type === 'sell' && tx.profitLoss) {
-                    const plClass = tx.profitLoss >= 0 ? 'price-positive' : 'price-negative';
-                    profitLossHtml = `<span class="${plClass}" style="margin-left: 10px; font-size: 0.8rem;">P/L: ${tx.profitLoss >= 0 ? '+' : ''}${formatUSD(tx.profitLoss)} (${tx.profitLossPercentage >= 0 ? '+' : ''}${tx.profitLossPercentage.toFixed(2)}%)</span>`;
-                }
-                
-                transactionsHtml += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                        <div>
-                            <div style="font-size: 0.8rem; color: var(--gray);">${date}</div>
-                            <div><span style="text-transform: capitalize;">${tx.type}</span> at $${tx.price.toFixed(2)}</div>
-                        </div>
-                        <div>
-                            <div class="${txTypeClass}" style="text-align: right;">${txAmount} ${asset.symbol.toUpperCase()}</div>
-                            <div style="font-size: 0.8rem; color: var(--gray); text-align: right;">${txUsd}${profitLossHtml}</div>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            transactionsHtml += '</div>';
-            transactions.innerHTML = transactionsHtml;
-        } else {
-            transactions.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--gray);">No transaction history for this asset</div>';
+                transactionsHtml += '</div>';
+                transactions.innerHTML = transactionsHtml;
+            } else {
+                transactions.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--gray);">No transaction history for this asset</div>';
+            }
         }
         
         modal.classList.add('active');
     }
     
     function closePortfolioAssetModal() {
-        document.getElementById('portfolio-asset-modal').classList.remove('active');
+        const modal = document.getElementById('portfolio-asset-modal');
+        if (modal) modal.classList.remove('active');
     }
     
     /* ============================================= */
@@ -4332,8 +4421,11 @@
         
         // Update global selector
         const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
-        document.getElementById('global-asset-logo').src = assetData.logo;
-        document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
+        const globalAssetLogo = document.getElementById('global-asset-logo');
+        const globalAssetSymbol = document.getElementById('global-asset-symbol');
+        
+        if (globalAssetLogo) globalAssetLogo.src = assetData.logo;
+        if (globalAssetSymbol) globalAssetSymbol.textContent = assetData.symbol.toUpperCase();
     }
     
     function updateBTCBalances() {
@@ -4357,10 +4449,13 @@
         const amount = usdAmount / price;
         
         // Format with commas and appropriate M/B suffixes
-        document.getElementById(`${type}-balance-secondary`).innerHTML = `
-            <img src="${assetData.logo}" class="asset-logo-small" alt="${assetData.symbol.toUpperCase()}">
-            <span id="${type}-balance-${asset}">${formatNumber(amount)} ${assetData.symbol.toUpperCase()}</span>
-        `;
+        const balanceSecondary = document.getElementById(`${type}-balance-secondary`);
+        if (balanceSecondary) {
+            balanceSecondary.innerHTML = `
+                <img src="${assetData.logo}" class="asset-logo-small" alt="${assetData.symbol.toUpperCase()}">
+                <span id="${type}-balance-${asset}">${formatNumber(amount)} ${assetData.symbol.toUpperCase()}</span>
+            `;
+        }
         
         // Update mobile balances
         updateMobileBalances();
@@ -4446,6 +4541,7 @@
         const end = start + assetsPerPage;
         const pageAssets = topAssets.slice(start, end);
         const tbody = document.getElementById('crypto-table-body');
+        if (!tbody) return;
         
         tbody.innerHTML = '';
         pageAssets.forEach((asset, index) => {
@@ -4503,9 +4599,13 @@
         
         // Update pagination
         const totalPages = Math.ceil(topAssets.length / assetsPerPage);
-        document.getElementById('crypto-page-info').textContent = `${cryptoPage}/${totalPages}`;
-        document.getElementById('crypto-prev').disabled = cryptoPage === 1;
-        document.getElementById('crypto-next').disabled = cryptoPage === totalPages;
+        const pageInfo = document.getElementById('crypto-page-info');
+        const prevBtn = document.getElementById('crypto-prev');
+        const nextBtn = document.getElementById('crypto-next');
+        
+        if (pageInfo) pageInfo.textContent = `${cryptoPage}/${totalPages}`;
+        if (prevBtn) prevBtn.disabled = cryptoPage === 1;
+        if (nextBtn) nextBtn.disabled = cryptoPage === totalPages;
     }
     
     function createMiniChart(containerId, isPositive) {
@@ -4581,7 +4681,8 @@
             openAssetDetails(asset);
             // Pre-focus the buy action
             setTimeout(() => {
-                document.getElementById('modal-trade-amount').focus();
+                const amountInput = document.getElementById('modal-trade-amount');
+                if (amountInput) amountInput.focus();
             }, 500);
         }
     }
@@ -4592,7 +4693,8 @@
             openAssetDetails(asset);
             // Pre-focus the sell action
             setTimeout(() => {
-                document.getElementById('modal-trade-amount').focus();
+                const amountInput = document.getElementById('modal-trade-amount');
+                if (amountInput) amountInput.focus();
             }, 500);
         }
     }
@@ -4602,24 +4704,31 @@
     /* ============================================= */
     
     function openAssetSelectorModal() {
-        document.getElementById('asset-selector-modal').classList.add('active');
-        filteredAssets = [...topAssets];
-        assetPage = 1;
-        renderAssetSelectorList();
+        const modal = document.getElementById('asset-selector-modal');
+        if (modal) {
+            modal.classList.add('active');
+            filteredAssets = [...topAssets];
+            assetPage = 1;
+            renderAssetSelectorList();
+        }
     }
     
     function closeAssetSelectorModal() {
-        document.getElementById('asset-selector-modal').classList.remove('active');
+        const modal = document.getElementById('asset-selector-modal');
+        if (modal) modal.classList.remove('active');
     }
     
     function searchAssets() {
-        const searchTerm = document.getElementById('asset-selector-search').value.toLowerCase();
-        filteredAssets = topAssets.filter(a => 
-            a.name.toLowerCase().includes(searchTerm) || 
-            a.symbol.toLowerCase().includes(searchTerm)
-        );
-        assetPage = 1;
-        renderAssetSelectorList();
+        const searchInput = document.getElementById('asset-selector-search');
+        if (searchInput) {
+            const searchTerm = searchInput.value.toLowerCase();
+            filteredAssets = topAssets.filter(a => 
+                a.name.toLowerCase().includes(searchTerm) || 
+                a.symbol.toLowerCase().includes(searchTerm)
+            );
+            assetPage = 1;
+            renderAssetSelectorList();
+        }
     }
     
     function prevAssetPage() {
@@ -4643,6 +4752,8 @@
         const pageAssets = filteredAssets.slice(start, end);
         
         const list = document.getElementById('asset-selector-list');
+        if (!list) return;
+        
         list.innerHTML = '';
         
         pageAssets.forEach(asset => {
@@ -4661,9 +4772,13 @@
         
         // Update pagination
         const totalPages = Math.ceil(filteredAssets.length / assetsPerPage);
-        document.getElementById('asset-selector-page-info').textContent = `${assetPage}/${totalPages || 1}`;
-        document.getElementById('asset-selector-prev').disabled = assetPage === 1;
-        document.getElementById('asset-selector-next').disabled = assetPage === totalPages || totalPages === 0;
+        const pageInfo = document.getElementById('asset-selector-page-info');
+        const prevBtn = document.getElementById('asset-selector-prev');
+        const nextBtn = document.getElementById('asset-selector-next');
+        
+        if (pageInfo) pageInfo.textContent = `${assetPage}/${totalPages || 1}`;
+        if (prevBtn) prevBtn.disabled = assetPage === 1;
+        if (nextBtn) nextBtn.disabled = assetPage === totalPages || totalPages === 0;
     }
     
     async function selectDisplayAsset(asset) {
@@ -4671,8 +4786,11 @@
         userPreferences.displayAsset = asset.symbol;
         
         // Update global selector
-        document.getElementById('global-asset-logo').src = asset.logo;
-        document.getElementById('global-asset-symbol').textContent = asset.symbol.toUpperCase();
+        const globalAssetLogo = document.getElementById('global-asset-logo');
+        const globalAssetSymbol = document.getElementById('global-asset-symbol');
+        
+        if (globalAssetLogo) globalAssetLogo.src = asset.logo;
+        if (globalAssetSymbol) globalAssetSymbol.textContent = asset.symbol.toUpperCase();
         
         // Update all displays
         ['main', 'active', 'matured'].forEach(type => {
@@ -4681,10 +4799,13 @@
             const price = currentPrices[asset.id]?.usd || currentBTCPrice;
             const amount = usdAmount / price;
             
-            document.getElementById(`${type}-balance-secondary`).innerHTML = `
-                <img src="${asset.logo}" class="asset-logo-small" alt="${asset.symbol.toUpperCase()}">
-                <span>${formatNumber(amount)} ${asset.symbol.toUpperCase()}</span>
-            `;
+            const balanceSecondary = document.getElementById(`${type}-balance-secondary`);
+            if (balanceSecondary) {
+                balanceSecondary.innerHTML = `
+                    <img src="${asset.logo}" class="asset-logo-small" alt="${asset.symbol.toUpperCase()}">
+                    <span>${formatNumber(amount)} ${asset.symbol.toUpperCase()}</span>
+                `;
+            }
         });
         
         // Update mobile balances
@@ -4716,10 +4837,15 @@
     
     async function openAssetDetails(asset) {
         const modal = document.getElementById('asset-details-modal');
-        document.getElementById('modal-asset-name').innerHTML = `
-            <img src="${asset.logo}" style="width: 32px; height: 32px; border-radius: 50%; margin-right: 10px;">
-            ${asset.name} (${asset.symbol.toUpperCase()})
-        `;
+        if (!modal) return;
+        
+        const assetNameEl = document.getElementById('modal-asset-name');
+        if (assetNameEl) {
+            assetNameEl.innerHTML = `
+                <img src="${asset.logo}" style="width: 32px; height: 32px; border-radius: 50%; margin-right: 10px;">
+                ${asset.name} (${asset.symbol.toUpperCase()})
+            `;
+        }
         
         // Populate details with correct exchange rate for this asset
         const price = currentPrices[asset.id]?.usd || 0;
@@ -4732,40 +4858,47 @@
         // Show matured balance specifically for buying
         const maturedBalance = userBalances.matured || 0;
         
-        document.getElementById('asset-details-grid').innerHTML = `
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">Price</div>
-                <div class="asset-detail-value">${formatUSD(price)}</div>
-            </div>
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">24h Change</div>
-                <div class="asset-detail-value ${change24h >= 0 ? 'price-positive' : 'price-negative'}">
-                    ${change24h >= 0 ? '<i class="fas fa-arrow-up"></i>+' : '<i class="fas fa-arrow-down"></i>'}${change24h.toFixed(2)}%
+        const detailsGrid = document.getElementById('asset-details-grid');
+        if (detailsGrid) {
+            detailsGrid.innerHTML = `
+                <div class="asset-detail-item">
+                    <div class="asset-detail-label">Price</div>
+                    <div class="asset-detail-value">${formatUSD(price)}</div>
                 </div>
-            </div>
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">24h Volume</div>
-                <div class="asset-detail-value small">${formatUSD(volume)}</div>
-            </div>
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">Market Cap</div>
-                <div class="asset-detail-value small">${formatUSD(marketCap)}</div>
-            </div>
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">Your Balance</div>
-                <div class="asset-detail-value">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div>
-                <div style="font-size: 0.85rem; color: var(--gray);">${formatUSD(balanceUsd)}</div>
-            </div>
-        `;
+                <div class="asset-detail-item">
+                    <div class="asset-detail-label">24h Change</div>
+                    <div class="asset-detail-value ${change24h >= 0 ? 'price-positive' : 'price-negative'}">
+                        ${change24h >= 0 ? '<i class="fas fa-arrow-up"></i>+' : '<i class="fas fa-arrow-down"></i>'}${change24h.toFixed(2)}%
+                    </div>
+                </div>
+                <div class="asset-detail-item">
+                    <div class="asset-detail-label">24h Volume</div>
+                    <div class="asset-detail-value small">${formatUSD(volume)}</div>
+                </div>
+                <div class="asset-detail-item">
+                    <div class="asset-detail-label">Market Cap</div>
+                    <div class="asset-detail-value small">${formatUSD(marketCap)}</div>
+                </div>
+                <div class="asset-detail-item">
+                    <div class="asset-detail-label">Your Balance</div>
+                    <div class="asset-detail-value">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div>
+                    <div style="font-size: 0.85rem; color: var(--gray);">${formatUSD(balanceUsd)}</div>
+                </div>
+            `;
+        }
         
         // Update balance info in modal - show matured balance for buying
-        document.getElementById('modal-balance-info').innerHTML = `
-            <div>Your balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(balanceUsd)})</div>
-            <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(maturedBalance)}</strong> (matured balance only)</div>
-        `;
+        const modalBalanceInfo = document.getElementById('modal-balance-info');
+        if (modalBalanceInfo) {
+            modalBalanceInfo.innerHTML = `
+                <div>Your balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(balanceUsd)})</div>
+                <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(maturedBalance)}</strong> (matured balance only)</div>
+            `;
+        }
         
         // Clear trade amount
-        document.getElementById('modal-trade-amount').value = '';
+        const tradeAmount = document.getElementById('modal-trade-amount');
+        if (tradeAmount) tradeAmount.value = '';
         
         // Create TradingView chart
         createTradingViewChart(asset.symbol.toUpperCase());
@@ -4778,6 +4911,8 @@
     
     function createTradingViewChart(symbol) {
         const container = document.getElementById('tradingview-chart');
+        if (!container) return;
+        
         container.innerHTML = '';
         
         if (typeof TradingView !== 'undefined') {
@@ -4808,7 +4943,7 @@
         const asset = window.currentModalAsset;
         if (!asset) return;
         
-        const amountUSD = parseFloat(document.getElementById('modal-trade-amount').value) || 0;
+        const amountUSD = parseFloat(document.getElementById('modal-trade-amount')?.value) || 0;
         if (amountUSD <= 0) {
             showNotification('error', 'Invalid Amount', 'Please enter a valid amount in USD');
             return;
@@ -4863,10 +4998,13 @@
                 // Update modal
                 const newBalance = parseFloat(userAssetBalances[asset.symbol] || 0);
                 const newBalanceUsd = newBalance * price;
-                document.getElementById('modal-balance-info').innerHTML = `
-                    <div>Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})</div>
-                    <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(userBalances.matured)}</strong> (matured balance only)</div>
-                `;
+                const modalBalanceInfo = document.getElementById('modal-balance-info');
+                if (modalBalanceInfo) {
+                    modalBalanceInfo.innerHTML = `
+                        <div>Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})</div>
+                        <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(userBalances.matured)}</strong> (matured balance only)</div>
+                    `;
+                }
                 
                 // Close modal after success
                 setTimeout(() => {
@@ -4886,7 +5024,7 @@
         const asset = window.currentModalAsset;
         if (!asset) return;
         
-        const amountUSD = parseFloat(document.getElementById('modal-trade-amount').value) || 0;
+        const amountUSD = parseFloat(document.getElementById('modal-trade-amount')?.value) || 0;
         if (amountUSD <= 0) {
             showNotification('error', 'Invalid Amount', 'Please enter a valid amount in USD');
             return;
@@ -4942,10 +5080,13 @@
                 // Update modal
                 const newBalance = parseFloat(userAssetBalances[asset.symbol] || 0);
                 const newBalanceUsd = newBalance * price;
-                document.getElementById('modal-balance-info').innerHTML = `
-                    <div>Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})</div>
-                    <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(userBalances.matured)}</strong> (matured balance only)</div>
-                `;
+                const modalBalanceInfo = document.getElementById('modal-balance-info');
+                if (modalBalanceInfo) {
+                    modalBalanceInfo.innerHTML = `
+                        <div>Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})</div>
+                        <div style="color: var(--primary); margin-top: 5px;">Available for buying: <strong>${formatUSD(userBalances.matured)}</strong> (matured balance only)</div>
+                    `;
+                }
                 
                 setTimeout(() => {
                     closeAssetDetails();
@@ -4961,16 +5102,19 @@
     }
     
     function closeAssetDetails() {
-        document.getElementById('asset-details-modal').classList.remove('active');
+        const modal = document.getElementById('asset-details-modal');
+        if (modal) modal.classList.remove('active');
     }
     
     /* ============================================= */
-    /* Transaction Details Functions - With Asset-Specific Info */
+    /* Transaction Details Functions */
     /* ============================================= */
     
     function openTransactionDetails(transaction) {
         const modal = document.getElementById('transaction-details-modal');
         const body = document.getElementById('transaction-details-body');
+        
+        if (!modal || !body || !transaction) return;
         
         // Get asset logo based on the actual transaction asset
         const assetSymbol = transaction.asset || 
@@ -5171,7 +5315,8 @@
     }
     
     function closeTransactionDetails() {
-        document.getElementById('transaction-details-modal').classList.remove('active');
+        const modal = document.getElementById('transaction-details-modal');
+        if (modal) modal.classList.remove('active');
     }
     
     /* ============================================= */
@@ -5182,8 +5327,11 @@
         try {
             const token = localStorage.getItem('jwtToken');
             if (!token) {
-                document.getElementById('auth-buttons').style.display = 'flex';
-                document.getElementById('user-balance').style.display = 'none';
+                const authButtons = document.getElementById('auth-buttons');
+                const userBalance = document.getElementById('user-balance');
+                
+                if (authButtons) authButtons.style.display = 'flex';
+                if (userBalance) userBalance.style.display = 'none';
                 window.location.href = 'login.html';
                 return;
             }
@@ -5193,8 +5341,11 @@
             });
             
             if (response.ok) {
-                document.getElementById('auth-buttons').style.display = 'none';
-                document.getElementById('user-balance').style.display = 'flex';
+                const authButtons = document.getElementById('auth-buttons');
+                const userBalance = document.getElementById('user-balance');
+                
+                if (authButtons) authButtons.style.display = 'none';
+                if (userBalance) userBalance.style.display = 'flex';
             } else {
                 localStorage.removeItem('jwtToken');
                 window.location.href = 'login.html';
@@ -5215,8 +5366,9 @@
             if (response.ok) {
                 const data = await response.json();
                 const user = data.data?.user || data.user;
-                if (user) {
-                    document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
+                const usernameEl = document.getElementById('username');
+                if (usernameEl && user) {
+                    usernameEl.textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
                 }
             }
         } catch (error) {
@@ -5242,39 +5394,19 @@
                 };
                 
                 // Format with commas
-                document.getElementById('main-balance').textContent = formatUSD(userBalances.main);
-                document.getElementById('active-balance').textContent = formatUSD(userBalances.active);
-                document.getElementById('matured-balance').textContent = formatUSD(userBalances.matured);
+                const mainBalanceEl = document.getElementById('main-balance');
+                const activeBalanceEl = document.getElementById('active-balance');
+                const maturedBalanceEl = document.getElementById('matured-balance');
+                
+                if (mainBalanceEl) mainBalanceEl.textContent = formatUSD(userBalances.main);
+                if (activeBalanceEl) activeBalanceEl.textContent = formatUSD(userBalances.active);
+                if (maturedBalanceEl) maturedBalanceEl.textContent = formatUSD(userBalances.matured);
                 
                 // Update displays
                 updateBTCBalances();
             }
         } catch (error) {
             console.error('Error loading balances:', error);
-        }
-    }
-    
-    async function loadAssetBalances() {
-        try {
-            const token = localStorage.getItem('jwtToken');
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/asset-balances', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                const assetBalances = data.data || data || {};
-                
-                // Parse all values to numbers
-                userAssetBalances = {};
-                if (assetBalances.balances) {
-                    for (const [key, value] of Object.entries(assetBalances.balances)) {
-                        userAssetBalances[key] = parseFloat(value) || 0;
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Error loading asset balances:', error);
         }
     }
     
@@ -5293,8 +5425,11 @@
                 
                 // Update global selector
                 const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
-                document.getElementById('global-asset-logo').src = assetData.logo;
-                document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
+                const globalAssetLogo = document.getElementById('global-asset-logo');
+                const globalAssetSymbol = document.getElementById('global-asset-symbol');
+                
+                if (globalAssetLogo) globalAssetLogo.src = assetData.logo;
+                if (globalAssetSymbol) globalAssetSymbol.textContent = assetData.symbol.toUpperCase();
                 
                 // Update UI with saved preferences
                 updateBalanceSecondary('main', userBalances.main);
@@ -5314,6 +5449,8 @@
             });
             
             const tableBody = document.getElementById('investments-table');
+            if (!tableBody) return;
+            
             tableBody.innerHTML = '';
             
             if (response.ok) {
@@ -5385,6 +5522,10 @@
                 transactionsPage = 1;
                 renderTransactionsTable();
                 renderAssetsWithBalance(); // Re-render assets with balance when transactions update
+            } else {
+                console.warn('Failed to load transactions, using empty array');
+                allTransactions = [];
+                renderTransactionsTable();
             }
         } catch (error) {
             console.error('Error loading transactions:', error);
@@ -5395,6 +5536,8 @@
     
     function renderTransactionsTable() {
         const tableBody = document.getElementById('transactions-table');
+        if (!tableBody) return;
+        
         tableBody.innerHTML = '';
         
         if (allTransactions.length === 0) {
@@ -5405,9 +5548,13 @@
                     </td>
                 </tr>
             `;
-            document.getElementById('transactions-page-info').textContent = '0/0';
-            document.getElementById('transactions-prev').disabled = true;
-            document.getElementById('transactions-next').disabled = true;
+            const pageInfo = document.getElementById('transactions-page-info');
+            const prevBtn = document.getElementById('transactions-prev');
+            const nextBtn = document.getElementById('transactions-next');
+            
+            if (pageInfo) pageInfo.textContent = '0/0';
+            if (prevBtn) prevBtn.disabled = true;
+            if (nextBtn) nextBtn.disabled = true;
             return;
         }
         
@@ -5416,6 +5563,8 @@
         const pageTransactions = allTransactions.slice(start, end);
         
         pageTransactions.forEach(transaction => {
+            if (!transaction) return;
+            
             const row = document.createElement('tr');
             row.onclick = () => openTransactionDetails(transaction);
             
@@ -5484,9 +5633,13 @@
         });
         
         const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
-        document.getElementById('transactions-page-info').textContent = `${transactionsPage}/${totalPages || 1}`;
-        document.getElementById('transactions-prev').disabled = transactionsPage === 1;
-        document.getElementById('transactions-next').disabled = transactionsPage === totalPages || totalPages === 0;
+        const pageInfo = document.getElementById('transactions-page-info');
+        const prevBtn = document.getElementById('transactions-prev');
+        const nextBtn = document.getElementById('transactions-next');
+        
+        if (pageInfo) pageInfo.textContent = `${transactionsPage}/${totalPages || 1}`;
+        if (prevBtn) prevBtn.disabled = transactionsPage === 1;
+        if (nextBtn) nextBtn.disabled = transactionsPage === totalPages || totalPages === 0;
     }
     
     async function loadReferralData() {
@@ -5500,10 +5653,15 @@
                 const data = await response.json();
                 const referralData = data.data || data;
                 
-                document.getElementById('referral-link-text').textContent = referralData.referralLink || 'Not available';
-                document.getElementById('referral-count').textContent = referralData.totalReferrals || 0;
-                document.getElementById('referral-earnings').textContent = formatUSD(parseFloat(referralData.totalEarnings) || 0);
-                document.getElementById('referral-pending').textContent = formatUSD(parseFloat(referralData.pendingEarnings) || 0);
+                const linkText = document.getElementById('referral-link-text');
+                const countEl = document.getElementById('referral-count');
+                const earningsEl = document.getElementById('referral-earnings');
+                const pendingEl = document.getElementById('referral-pending');
+                
+                if (linkText) linkText.textContent = referralData.referralLink || 'Not available';
+                if (countEl) countEl.textContent = referralData.totalReferrals || 0;
+                if (earningsEl) earningsEl.textContent = formatUSD(parseFloat(referralData.totalEarnings) || 0);
+                if (pendingEl) pendingEl.textContent = formatUSD(parseFloat(referralData.pendingEarnings) || 0);
             }
         } catch (error) {
             console.error('Error loading referral data:', error);
@@ -5511,13 +5669,17 @@
     }
     
     function copyReferralLink() {
-        const referralLink = document.getElementById('referral-link-text').textContent;
+        const referralLink = document.getElementById('referral-link-text')?.textContent;
+        if (!referralLink) return;
+        
         navigator.clipboard.writeText(referralLink).then(() => {
             const copyBtn = document.getElementById('copy-btn');
-            copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
-            setTimeout(() => {
-                copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy';
-            }, 2000);
+            if (copyBtn) {
+                copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                setTimeout(() => {
+                    copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy';
+                }, 2000);
+            }
             
             showNotification('success', 'Copied!', 'Referral link copied to clipboard');
         });
@@ -5551,59 +5713,67 @@
         const applyButton = document.getElementById('loan-application-btn');
         
         if (!eligibilityData) {
-            termsDisplay.innerHTML = '<p>Loading loan information...</p>';
+            if (termsDisplay) termsDisplay.innerHTML = '<p>Loading loan information...</p>';
             return;
         }
         
-        termsDisplay.innerHTML = `
-            <div class="loan-term-item">
-                <div class="loan-term-label">Maximum Loan Amount</div>
-                <div class="loan-term-value">${formatUSD(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div>
-            </div>
-            <div class="loan-term-item">
-                <div class="loan-term-label">Monthly Interest Rate</div>
-                <div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div>
-            </div>
-            <div class="loan-term-item">
-                <div class="loan-term-label">Credit Score</div>
-                <div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div>
-            </div>
-            <div class="loan-term-item">
-                <div class="loan-term-label">Disbursement Fee</div>
-                <div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div>
-            </div>
-        `;
+        if (termsDisplay) {
+            termsDisplay.innerHTML = `
+                <div class="loan-term-item">
+                    <div class="loan-term-label">Maximum Loan Amount</div>
+                    <div class="loan-term-value">${formatUSD(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div>
+                </div>
+                <div class="loan-term-item">
+                    <div class="loan-term-label">Monthly Interest Rate</div>
+                    <div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div>
+                </div>
+                <div class="loan-term-item">
+                    <div class="loan-term-label">Credit Score</div>
+                    <div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div>
+                </div>
+                <div class="loan-term-item">
+                    <div class="loan-term-label">Disbursement Fee</div>
+                    <div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div>
+                </div>
+            `;
+        }
         
-        if (eligibilityData.eligible) {
-            eligibilityStatus.innerHTML = `
-                <div class="eligibility-item">
-                    <div class="eligibility-icon verified">
-                        <i class="fas fa-check"></i>
+        if (eligibilityStatus) {
+            if (eligibilityData.eligible) {
+                eligibilityStatus.innerHTML = `
+                    <div class="eligibility-item">
+                        <div class="eligibility-icon verified">
+                            <i class="fas fa-check"></i>
+                        </div>
+                        <div class="eligibility-text">
+                            <strong>Congratulations! You qualify for a loan.</strong>
+                        </div>
                     </div>
-                    <div class="eligibility-text">
-                        <strong>Congratulations! You qualify for a loan.</strong>
+                `;
+                if (applyButton) {
+                    applyButton.disabled = false;
+                    applyButton.innerHTML = '<i class="fas fa-file-contract"></i> Apply for Loan';
+                }
+            } else {
+                eligibilityStatus.innerHTML = `
+                    <div class="eligibility-item">
+                        <div class="eligibility-icon pending">
+                            <i class="fas fa-times"></i>
+                        </div>
+                        <div class="eligibility-text">
+                            <strong>Not Currently Eligible:</strong> ${eligibilityData.reason || 'Requirements not met'}
+                        </div>
                     </div>
-                </div>
-            `;
-            applyButton.disabled = false;
-            applyButton.innerHTML = '<i class="fas fa-file-contract"></i> Apply for Loan';
-        } else {
-            eligibilityStatus.innerHTML = `
-                <div class="eligibility-item">
-                    <div class="eligibility-icon pending">
-                        <i class="fas fa-times"></i>
-                    </div>
-                    <div class="eligibility-text">
-                        <strong>Not Currently Eligible:</strong> ${eligibilityData.reason || 'Requirements not met'}
-                    </div>
-                </div>
-            `;
-            applyButton.disabled = true;
-            applyButton.innerHTML = '<i class="fas fa-lock"></i> Not Eligible';
+                `;
+                if (applyButton) {
+                    applyButton.disabled = true;
+                    applyButton.innerHTML = '<i class="fas fa-lock"></i> Not Eligible';
+                }
+            }
         }
         
         const modalTerms = document.getElementById('modal-loan-terms');
-        if (modalTerms) {
+        if (modalTerms && termsDisplay) {
             modalTerms.innerHTML = termsDisplay.innerHTML;
         }
     }
@@ -5613,15 +5783,17 @@
         const closeBtn = document.getElementById('loan-application-close');
         const submitBtn = document.getElementById('submit-loan-application');
         
-        closeBtn.addEventListener('click', closeLoanApplicationModal);
+        if (closeBtn) closeBtn.addEventListener('click', closeLoanApplicationModal);
         
-        modal.addEventListener('click', function(event) {
-            if (event.target === modal) {
-                closeLoanApplicationModal();
-            }
-        });
+        if (modal) {
+            modal.addEventListener('click', function(event) {
+                if (event.target === modal) {
+                    closeLoanApplicationModal();
+                }
+            });
+        }
         
-        submitBtn.addEventListener('click', submitLoanApplication);
+        if (submitBtn) submitBtn.addEventListener('click', submitLoanApplication);
     }
     
     function openLoanApplication() {
@@ -5633,27 +5805,34 @@
         const modal = document.getElementById('loan-application-modal');
         const amountInput = document.getElementById('loan-request-amount');
         const modalTerms = document.getElementById('modal-loan-terms');
+        const form = document.getElementById('loan-application-form');
+        const successMsg = document.getElementById('loan-success-message');
+        const statusEl = document.getElementById('loan-application-status');
         
-        amountInput.value = parseFloat(currentLoanEligibility.maxLoanAmount) || 0;
-        modalTerms.innerHTML = document.getElementById('loan-terms-display').innerHTML;
+        if (amountInput) amountInput.value = parseFloat(currentLoanEligibility.maxLoanAmount) || 0;
+        if (modalTerms) {
+            const termsDisplay = document.getElementById('loan-terms-display');
+            if (termsDisplay) modalTerms.innerHTML = termsDisplay.innerHTML;
+        }
         
-        document.getElementById('loan-application-form').style.display = 'block';
-        document.getElementById('loan-success-message').style.display = 'none';
-        document.getElementById('loan-application-status').textContent = '';
+        if (form) form.style.display = 'block';
+        if (successMsg) successMsg.style.display = 'none';
+        if (statusEl) statusEl.textContent = '';
         
-        modal.classList.add('active');
+        if (modal) modal.classList.add('active');
     }
     
     function closeLoanApplicationModal() {
-        document.getElementById('loan-application-modal').classList.remove('active');
+        const modal = document.getElementById('loan-application-modal');
+        if (modal) modal.classList.remove('active');
     }
     
     async function submitLoanApplication() {
         try {
             const token = localStorage.getItem('jwtToken');
-            const amount = parseFloat(document.getElementById('loan-request-amount').value);
-            const purpose = document.getElementById('loan-purpose').value;
-            const term = parseInt(document.getElementById('loan-term-selection').value);
+            const amount = parseFloat(document.getElementById('loan-request-amount')?.value);
+            const purpose = document.getElementById('loan-purpose')?.value;
+            const term = parseInt(document.getElementById('loan-term-selection')?.value);
             
             if (!amount || amount < 1000) {
                 showNotification('error', 'Invalid Amount', 'Minimum loan amount is $1,000');
@@ -5665,10 +5844,17 @@
                 return;
             }
             
-            document.getElementById('submit-loan-application').disabled = true;
-            document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-            document.getElementById('loan-application-status').textContent = 'Submitting your loan application...';
-            document.getElementById('loan-application-status').style.color = 'var(--primary)';
+            const submitBtn = document.getElementById('submit-loan-application');
+            const statusEl = document.getElementById('loan-application-status');
+            
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+            }
+            if (statusEl) {
+                statusEl.textContent = 'Submitting your loan application...';
+                statusEl.style.color = 'var(--primary)';
+            }
             
             const response = await fetch('https://bithash-backend.onrender.com/api/loans/apply', {
                 method: 'POST',
@@ -5688,8 +5874,11 @@
             });
             
             if (response.ok) {
-                document.getElementById('loan-application-form').style.display = 'none';
-                document.getElementById('loan-success-message').style.display = 'block';
+                const form = document.getElementById('loan-application-form');
+                const successMsg = document.getElementById('loan-success-message');
+                
+                if (form) form.style.display = 'none';
+                if (successMsg) successMsg.style.display = 'block';
                 
                 showNotification('success', 'Application Submitted', 
                     `Your loan application for ${formatUSD(amount)} has been submitted successfully.`);
@@ -5705,10 +5894,17 @@
         } catch (error) {
             console.error('Error submitting loan application:', error);
             
-            document.getElementById('submit-loan-application').disabled = false;
-            document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-paper-plane"></i> Submit Loan Application';
-            document.getElementById('loan-application-status').textContent = error.message || 'Failed to submit application';
-            document.getElementById('loan-application-status').style.color = 'var(--error)';
+            const submitBtn = document.getElementById('submit-loan-application');
+            const statusEl = document.getElementById('loan-application-status');
+            
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Loan Application';
+            }
+            if (statusEl) {
+                statusEl.textContent = error.message || 'Failed to submit application';
+                statusEl.style.color = 'var(--error)';
+            }
             
             showNotification('error', 'Application Failed', error.message || 'There was an issue submitting your loan application');
         }
@@ -5919,7 +6115,10 @@
             <div class="notification-close">&times;</div>
         `;
         
-        document.getElementById('notification-center').appendChild(notification);
+        const center = document.getElementById('notification-center');
+        if (!center) return;
+        
+        center.appendChild(notification);
         
         void notification.offsetWidth;
         notification.classList.add('show');
@@ -5970,26 +6169,39 @@
     }
     
     // Pagination controls
-    document.getElementById('crypto-prev').addEventListener('click', () => {
-        if (cryptoPage > 1) {
-            cryptoPage--;
-            renderCryptoTable();
-        }
-    });
+    const cryptoPrev = document.getElementById('crypto-prev');
+    const cryptoNext = document.getElementById('crypto-next');
     
-    document.getElementById('crypto-next').addEventListener('click', () => {
-        const totalPages = Math.ceil(topAssets.length / assetsPerPage);
-        if (cryptoPage < totalPages) {
-            cryptoPage++;
-            renderCryptoTable();
-        }
-    });
+    if (cryptoPrev) {
+        cryptoPrev.addEventListener('click', () => {
+            if (cryptoPage > 1) {
+                cryptoPage--;
+                renderCryptoTable();
+            }
+        });
+    }
+    
+    if (cryptoNext) {
+        cryptoNext.addEventListener('click', () => {
+            const totalPages = Math.ceil(topAssets.length / assetsPerPage);
+            if (cryptoPage < totalPages) {
+                cryptoPage++;
+                renderCryptoTable();
+            }
+        });
+    }
 
     // Copy button functionality
-    document.getElementById('copy-btn').addEventListener('click', copyReferralLink);
+    const copyBtn = document.getElementById('copy-btn');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', copyReferralLink);
+    }
     
     // Portfolio modal close button
-    document.getElementById('close-portfolio-modal')?.addEventListener('click', closePortfolioAssetModal);
+    const closePortfolioModal = document.getElementById('close-portfolio-modal');
+    if (closePortfolioModal) {
+        closePortfolioModal.addEventListener('click', closePortfolioAssetModal);
+    }
 </script>
 </body>
 </html>
