@@ -3595,15 +3595,22 @@
     let userBalances = { main: 0, active: 0, matured: 0 };
     let userAssetBalances = {};
     let userPreferences = { displayAsset: 'btc' };
-    let userTrades = []; // Store all buy/sell trades for profit/loss tracking
-    let userPortfolio = {}; // Store portfolio with buying prices
+    let userPortfolio = {
+        assets: [],
+        totalValue: 0,
+        totalProfit: 0,
+        totalLoss: 0
+    };
+    let userTrades = [];
     let AppState = {
         announcements: [],
         activeAnnouncements: new Map(),
         lastDepositCheck: null,
         defaultAsset: 'btc',
         availableAssets: [], // Assets user has balance in
-        assetTransactions: {} // Transactions grouped by asset
+        assetTransactions: {}, // Transactions grouped by asset
+        currentModalAsset: null,
+        currentAssetDetails: null
     };
     let apiRetryCount = 0;
     const MAX_RETRIES = 5;
@@ -3670,24 +3677,24 @@
     // Network mapping for each asset (to ensure Network is never "Unknown")
     const assetNetworks = {
         'btc': 'Bitcoin',
-        'eth': 'Ethereum',
+        'eth': 'Ethereum (ERC20)',
         'usdt': 'Tron (TRC-20)',
         'bnb': 'BNB Smart Chain (BEP-20)',
         'sol': 'Solana',
-        'usdc': 'Ethereum (ERC-20)',
+        'usdc': 'Ethereum (ERC20)',
         'xrp': 'XRP Ledger',
         'doge': 'Dogecoin',
         'ada': 'Cardano',
-        'shib': 'Ethereum (ERC-20)',
+        'shib': 'Ethereum (ERC20)',
         'avax': 'Avalanche C-Chain',
         'dot': 'Polkadot',
         'trx': 'TRON',
-        'link': 'Ethereum (ERC-20)',
+        'link': 'Ethereum (ERC20)',
         'matic': 'Polygon',
-        'wbtc': 'Ethereum (ERC-20)',
+        'wbtc': 'Ethereum (ERC20)',
         'ltc': 'Litecoin',
         'near': 'NEAR',
-        'uni': 'Ethereum (ERC-20)',
+        'uni': 'Ethereum (ERC20)',
         'bch': 'Bitcoin Cash',
         'xlm': 'Stellar',
         'atom': 'Cosmos',
@@ -3718,8 +3725,9 @@
             await checkUserDefaultAsset();
             await loadBalances();
             await loadAssetBalances(); // Load asset balances
+            await loadPortfolio(); // Load portfolio with profit/loss data
+            await loadTrades(); // Load trade history
             await loadAvailableAssets(); // Load assets user has balance in
-            await loadUserTrades(); // Load user's buy/sell trades for profit tracking
             await loadInvestments();
             await loadTransactions();
             await loadReferralData();
@@ -3741,7 +3749,7 @@
             // Start announcements polling
             startAnnouncementsPolling();
             
-            // Start auto-refresh for all data (every 30 seconds for real-time fluctuations)
+            // Start auto-refresh for all data (every 60 seconds)
             startAutoRefresh();
             
             // Show mobile logout in menu
@@ -3782,44 +3790,25 @@
     });
     
     /* ============================================= */
-    /* Auto-Refresh Function - 30 seconds for real-time fluctuations */
+    /* Auto-Refresh Function */
     /* ============================================= */
     
     function startAutoRefresh() {
         setInterval(async () => {
-            await fetchCoinGeckoPrices(); // Update prices first
-            await loadBalances(); // Balances fluctuate with new prices
-            await loadAssetBalances(); // Asset balances fluctuate
-            await loadAvailableAssets(); // Available assets update
-            await loadUserTrades(); // Update profit/loss on trades
+            await fetchCoinGeckoPrices(); // Use CoinGecko directly for auto-refresh
+            await loadBalances();
+            await loadAssetBalances();
+            await loadPortfolio();
+            await loadTrades();
+            await loadAvailableAssets();
             await loadInvestments();
-            await loadTransactions(); // Transactions show current rates
+            await loadTransactions();
             await loadReferralData();
             await checkLoanEligibility();
-            renderCryptoTable(); // Update table with new prices and colors
-            renderAssetsWithBalance(); // Re-render assets with updated profit/loss
-            updatePortfolioValues(); // Update portfolio with current prices
-        }, 30000); // Auto-refresh every 30 seconds for real-time fluctuations
-    }
-    
-    /* ============================================= */
-    /* Update Portfolio Values with Current Prices */
-    /* ============================================= */
-    
-    function updatePortfolioValues() {
-        // Update profit/loss for each asset based on current prices vs buy prices
-        if (!userPortfolio || Object.keys(userPortfolio).length === 0) return;
-        
-        for (const [asset, data] of Object.entries(userPortfolio)) {
-            const currentPrice = currentPrices[data.id]?.usd || 0;
-            if (currentPrice > 0 && data.buyPrice > 0) {
-                const priceChange = currentPrice - data.buyPrice;
-                const percentageChange = (priceChange / data.buyPrice) * 100;
-                data.currentPrice = currentPrice;
-                data.profitLoss = priceChange * data.amount;
-                data.profitLossPercentage = percentageChange;
-            }
-        }
+            renderCryptoTable();
+            renderAssetsWithBalance(); // Re-render assets with balance
+            updatePortfolioDisplay(); // Update portfolio values with new prices
+        }, 60000); // Auto-refresh every 60 seconds
     }
     
     /* ============================================= */
@@ -3925,59 +3914,6 @@
     }
     
     /* ============================================= */
-    /* Load User Trades for Profit/Loss Tracking */
-    /* ============================================= */
-    
-    async function loadUserTrades() {
-        try {
-            const token = localStorage.getItem('jwtToken');
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/trades', {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                if (data.data && data.data.trades) {
-                    userTrades = data.data.trades;
-                    
-                    // Build portfolio from trades
-                    userPortfolio = {};
-                    userTrades.forEach(trade => {
-                        if (trade.type === 'buy') {
-                            if (!userPortfolio[trade.asset]) {
-                                userPortfolio[trade.asset] = {
-                                    id: trade.assetId || 'bitcoin',
-                                    amount: 0,
-                                    totalCost: 0,
-                                    buyPrice: 0,
-                                    trades: []
-                                };
-                            }
-                            userPortfolio[trade.asset].amount += trade.assetAmount;
-                            userPortfolio[trade.asset].totalCost += trade.totalCost;
-                            userPortfolio[trade.asset].buyPrice = userPortfolio[trade.asset].totalCost / userPortfolio[trade.asset].amount;
-                            userPortfolio[trade.asset].trades.push(trade);
-                        } else if (trade.type === 'sell') {
-                            if (userPortfolio[trade.asset]) {
-                                userPortfolio[trade.asset].amount -= trade.assetAmount;
-                                // Update average buy price after sell (FIFO would be better but simplified)
-                                if (userPortfolio[trade.asset].amount <= 0) {
-                                    delete userPortfolio[trade.asset];
-                                }
-                            }
-                        }
-                    });
-                    
-                    // Update with current prices
-                    updatePortfolioValues();
-                }
-            }
-        } catch (error) {
-            console.warn('Could not fetch user trades:', error);
-        }
-    }
-    
-    /* ============================================= */
     /* Load Available Assets (for withdrawals) */
     /* ============================================= */
     
@@ -4002,6 +3938,94 @@
     }
     
     /* ============================================= */
+    /* Load Portfolio with Profit/Loss Data */
+    /* ============================================= */
+    
+    async function loadPortfolio() {
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const response = await fetch('https://bithash-backend.onrender.com/api/assets/portfolio', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data) {
+                    userPortfolio = data.data;
+                    
+                    // Calculate real-time values with current prices
+                    let totalValue = 0;
+                    let totalProfit = 0;
+                    let totalLoss = 0;
+                    
+                    userPortfolio.assets.forEach(asset => {
+                        const assetData = topAssets.find(a => a.symbol === asset.asset);
+                        const currentPrice = assetData ? (currentPrices[assetData.id]?.usd || 0) : 0;
+                        const currentValue = asset.balance * currentPrice;
+                        const costBasis = asset.totalCost || 0;
+                        
+                        if (currentValue > costBasis) {
+                            totalProfit += currentValue - costBasis;
+                        } else if (currentValue < costBasis) {
+                            totalLoss += costBasis - currentValue;
+                        }
+                        
+                        totalValue += currentValue;
+                    });
+                    
+                    userPortfolio.totalValue = totalValue;
+                    userPortfolio.totalProfit = totalProfit;
+                    userPortfolio.totalLoss = totalLoss;
+                    
+                    updatePortfolioDisplay();
+                }
+            }
+        } catch (error) {
+            console.error('Error loading portfolio:', error);
+        }
+    }
+    
+    function updatePortfolioDisplay() {
+        const portfolioElement = document.getElementById('portfolio-value');
+        const profitElement = document.getElementById('portfolio-profit');
+        const lossElement = document.getElementById('portfolio-loss');
+        
+        if (portfolioElement) {
+            portfolioElement.textContent = formatUSD(userPortfolio.totalValue || 0);
+        }
+        
+        if (profitElement) {
+            profitElement.innerHTML = `<span class="price-positive">+${formatUSD(userPortfolio.totalProfit || 0)}</span>`;
+        }
+        
+        if (lossElement) {
+            lossElement.innerHTML = `<span class="price-negative">-${formatUSD(userPortfolio.totalLoss || 0)}</span>`;
+        }
+    }
+    
+    /* ============================================= */
+    /* Load Trades (Buy/Sell History) */
+    /* ============================================= */
+    
+    async function loadTrades() {
+        try {
+            const token = localStorage.getItem('jwtToken');
+            const response = await fetch('https://bithash-backend.onrender.com/api/trades', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.trades) {
+                    userTrades = data.data.trades;
+                }
+            }
+        } catch (error) {
+            console.error('Error loading trades:', error);
+        }
+    }
+    
+    /* ============================================= */
     /* Render My Assets Section with Profit/Loss */
     /* ============================================= */
     
@@ -4019,26 +4043,14 @@
             if (assetBalance > 0) {
                 const assetData = topAssets.find(a => a.symbol === symbol.toLowerCase());
                 if (assetData) {
-                    // Get portfolio data for this asset
-                    const portfolioData = userPortfolio[symbol] || null;
-                    const currentPrice = currentPrices[assetData.id]?.usd || 0;
-                    const currentValue = assetBalance * currentPrice;
-                    
-                    let profitLoss = 0;
-                    let profitLossPercentage = 0;
-                    
-                    if (portfolioData && portfolioData.buyPrice > 0) {
-                        profitLoss = (currentPrice - portfolioData.buyPrice) * assetBalance;
-                        profitLossPercentage = ((currentPrice - portfolioData.buyPrice) / portfolioData.buyPrice) * 100;
-                    }
+                    // Find portfolio data for this asset
+                    const portfolioAsset = userPortfolio.assets?.find(a => a.asset === symbol);
                     
                     assetsWithBalance.push({
                         ...assetData,
                         balance: assetBalance,
-                        currentValue: currentValue,
-                        buyPrice: portfolioData?.buyPrice || 0,
-                        profitLoss: profitLoss,
-                        profitLossPercentage: profitLossPercentage
+                        averageBuyPrice: portfolioAsset?.averageBuyPrice || 0,
+                        totalCost: portfolioAsset?.totalCost || 0
                     });
                 }
             }
@@ -4054,15 +4066,12 @@
                 const existingUsdt = assetsWithBalance.find(a => a.symbol === 'usdt');
                 if (existingUsdt) {
                     existingUsdt.balance = (existingUsdt.balance || 0) + (mainBalanceUSD / 1.0);
-                    existingUsdt.currentValue = existingUsdt.balance * 1.0;
                 } else {
                     assetsWithBalance.push({
                         ...usdAsset,
                         balance: mainBalanceUSD / 1.0,
-                        currentValue: mainBalanceUSD,
-                        buyPrice: 1.0,
-                        profitLoss: 0,
-                        profitLossPercentage: 0
+                        averageBuyPrice: 1.0,
+                        totalCost: mainBalanceUSD
                     });
                 }
             }
@@ -4081,63 +4090,43 @@
             return;
         }
         
-        assetsWithBalance.sort((a, b) => b.currentValue - a.currentValue);
+        assetsWithBalance.sort((a, b) => (b.balance * (currentPrices[b.id]?.usd || 0)) - (a.balance * (currentPrices[a.id]?.usd || 0)));
         
         assetsWithBalance.forEach(asset => {
             const price = currentPrices[asset.id]?.usd || 0;
             const usdValue = asset.balance * price;
+            const profitLoss = usdValue - (asset.totalCost || 0);
+            const profitLossPercent = asset.totalCost > 0 ? (profitLoss / asset.totalCost) * 100 : 0;
             
-            // Determine profit/loss class and arrow
-            const profitLossClass = asset.profitLoss >= 0 ? 'price-positive' : 'price-negative';
-            const profitLossArrow = asset.profitLoss >= 0 ? 
-                '<i class="fas fa-arrow-up" style="color: var(--success);"></i>' : 
-                '<i class="fas fa-arrow-down" style="color: var(--error);"></i>';
-            
-            // Get recent transactions for this asset (preview)
-            const assetTransactions = (allTransactions || []).filter(t => {
-                const tAsset = (t.asset || t.method || '').toLowerCase();
-                const fromAsset = (t.fromAsset || '').toLowerCase();
-                const toAsset = (t.toAsset || '').toLowerCase();
-                return tAsset === asset.symbol || fromAsset === asset.symbol || toAsset === asset.symbol;
-            }).slice(0, 2); // Show last 2 transactions
+            // Get recent trades for this asset (preview)
+            const assetTrades = (userTrades || []).filter(t => t.asset === asset.symbol).slice(0, 2);
             
             const card = document.createElement('div');
             card.className = 'asset-balance-card';
-            card.onclick = () => openPortfolioAssetModal(asset);
+            card.onclick = () => openAssetTransactionsModal(asset);
             
-            let transactionsHTML = '';
-            if (assetTransactions.length > 0) {
-                transactionsHTML = '<div class="transaction-preview">';
-                assetTransactions.forEach(t => {
-                    const date = new Date(t.date || t.createdAt || new Date());
+            let tradesHTML = '';
+            if (assetTrades.length > 0) {
+                tradesHTML = '<div class="transaction-preview">';
+                assetTrades.forEach(t => {
+                    const date = new Date(t.executedAt || t.createdAt || new Date());
                     const formattedDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
                     
-                    let amount = 0;
-                    let isPositive = false;
+                    const isBuy = t.orderType === 'buy';
+                    const amountDisplay = `${isBuy ? '+' : '-'}${formatNumberWithCommas(t.assetAmount, 4)} ${asset.symbol.toUpperCase()}`;
+                    const priceDisplay = `@ $${t.price.toFixed(2)}`;
                     
-                    if ((t.asset || '').toLowerCase() === asset.symbol) {
-                        amount = parseFloat(t.amount) || 0;
-                        isPositive = t.type === 'deposit' || t.type === 'interest' || t.type === 'referral';
-                    } else if ((t.toAsset || '').toLowerCase() === asset.symbol) {
-                        amount = parseFloat(t.toAmount) || 0;
-                        isPositive = true;
-                    } else if ((t.fromAsset || '').toLowerCase() === asset.symbol) {
-                        amount = parseFloat(t.fromAmount) || 0;
-                        isPositive = false;
-                    }
-                    
-                    transactionsHTML += `
+                    tradesHTML += `
                         <div class="transaction-preview-item">
                             <span class="transaction-preview-date">${formattedDate}</span>
-                            <span class="transaction-preview-amount ${isPositive ? 'positive' : 'negative'}">
-                                ${isPositive ? '+' : '-'}${formatNumberWithCommas(Math.abs(amount), 4)} ${asset.symbol.toUpperCase()}
-                            </span>
+                            <span class="transaction-preview-amount ${isBuy ? 'positive' : 'negative'}">${amountDisplay}</span>
+                            <span class="transaction-preview-price" style="font-size: 0.7rem; color: var(--gray);">${priceDisplay}</span>
                         </div>
                     `;
                 });
-                transactionsHTML += '</div>';
+                tradesHTML += '</div>';
             } else {
-                transactionsHTML = '<div class="transaction-preview" style="color: var(--gray); text-align: center;">No recent transactions</div>';
+                tradesHTML = '<div class="transaction-preview" style="color: var(--gray); text-align: center;">No recent trades</div>';
             }
             
             card.innerHTML = `
@@ -4150,12 +4139,12 @@
                     <div>
                         <div class="asset-balance-amount">${formatNumberWithCommas(asset.balance, 6)}</div>
                         <div class="asset-balance-usd">${formatUSD(usdValue)}</div>
-                        <div class="${profitLossClass}" style="font-size: 0.75rem; margin-top: 2px;">
-                            ${profitLossArrow} ${asset.profitLossPercentage >= 0 ? '+' : ''}${asset.profitLossPercentage.toFixed(2)}%
+                        <div class="asset-balance-profitloss ${profitLoss >= 0 ? 'price-positive' : 'price-negative'}">
+                            ${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)} (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
                         </div>
                     </div>
                 </div>
-                ${transactionsHTML}
+                ${tradesHTML}
             `;
             
             grid.appendChild(card);
@@ -4163,10 +4152,10 @@
     }
     
     /* ============================================= */
-    /* Portfolio Asset Modal - Shows Full Details with Profit/Loss */
+    /* Asset Transactions Modal Functions - With Profit/Loss Details */
     /* ============================================= */
     
-    function openPortfolioAssetModal(asset) {
+    function openAssetTransactionsModal(asset) {
         const modal = document.getElementById('asset-transactions-modal');
         const title = document.getElementById('asset-transactions-title');
         const summary = document.getElementById('asset-summary');
@@ -4175,102 +4164,60 @@
         
         title.innerHTML = `
             <img src="${asset.logo}" style="width: 32px; height: 32px; border-radius: 50%; margin-right: 10px;">
-            ${asset.name} (${asset.symbol.toUpperCase()}) - Portfolio Details
+            ${asset.name} (${asset.symbol.toUpperCase()}) - Trade History
         `;
         
         const balance = parseFloat(userAssetBalances[asset.symbol] || 0);
         const price = currentPrices[asset.id]?.usd || 0;
         const usdValue = balance * price;
         
-        // Calculate total profit/loss from trades
-        const assetTrades = userTrades.filter(t => t.asset === asset.symbol);
-        const buyTrades = assetTrades.filter(t => t.type === 'buy');
-        const sellTrades = assetTrades.filter(t => t.type === 'sell');
+        // Find portfolio data for this asset
+        const portfolioAsset = userPortfolio.assets?.find(a => a.asset === asset.symbol);
+        const totalCost = portfolioAsset?.totalCost || 0;
+        const profitLoss = usdValue - totalCost;
+        const profitLossPercent = totalCost > 0 ? (profitLoss / totalCost) * 100 : 0;
         
-        const totalBought = buyTrades.reduce((sum, t) => sum + t.assetAmount, 0);
-        const totalSold = sellTrades.reduce((sum, t) => sum + t.assetAmount, 0);
-        const totalCost = buyTrades.reduce((sum, t) => sum + t.totalCost, 0);
-        const totalProceeds = sellTrades.reduce((sum, t) => sum + t.amount, 0);
+        // Get all trades for this asset
+        currentAssetTransactions = (userTrades || []).filter(t => t.asset === asset.symbol)
+            .sort((a, b) => new Date(b.executedAt || b.createdAt || 0) - new Date(a.executedAt || a.createdAt || 0));
         
-        const avgBuyPrice = totalBought > 0 ? totalCost / totalBought : 0;
-        const realizedProfitLoss = totalProceeds - (sellTrades.reduce((sum, t) => sum + (t.assetAmount * avgBuyPrice), 0));
-        const unrealizedProfitLoss = (price - avgBuyPrice) * balance;
-        const totalProfitLoss = realizedProfitLoss + unrealizedProfitLoss;
-        const totalProfitLossPercentage = avgBuyPrice > 0 ? (totalProfitLoss / totalCost) * 100 : 0;
-        
-        // Determine profit/loss class and arrow
-        const profitLossClass = totalProfitLoss >= 0 ? 'price-positive' : 'price-negative';
-        const profitLossArrow = totalProfitLoss >= 0 ? 
-            '<i class="fas fa-arrow-up" style="color: var(--success);"></i>' : 
-            '<i class="fas fa-arrow-down" style="color: var(--error);"></i>';
+        // Calculate first trade date
+        const firstTrade = currentAssetTransactions[currentAssetTransactions.length - 1];
+        const firstTradeDate = firstTrade ? new Date(firstTrade.executedAt || firstTrade.createdAt || new Date()).toLocaleDateString() : 'N/A';
         
         summary.innerHTML = `
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;">
                 <div>
                     <div style="color: var(--gray); font-size: 0.8rem;">Current Balance</div>
                     <div style="font-size: 1.2rem; font-weight: 600;">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div>
                     <div style="color: var(--gray);">${formatUSD(usdValue)}</div>
                 </div>
                 <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Avg Buy Price</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(avgBuyPrice)}</div>
+                    <div style="color: var(--gray); font-size: 0.8rem;">Total Cost Basis</div>
+                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(totalCost)}</div>
                 </div>
                 <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Current Price</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;">${formatUSD(price)}</div>
-                    <div class="${price >= avgBuyPrice ? 'price-positive' : 'price-negative'}" style="font-size: 0.75rem;">
-                        ${price >= avgBuyPrice ? '+' : ''}${((price - avgBuyPrice) / avgBuyPrice * 100).toFixed(2)}%
+                    <div style="color: var(--gray); font-size: 0.8rem;">Profit/Loss</div>
+                    <div style="font-size: 1.2rem; font-weight: 600;" class="${profitLoss >= 0 ? 'price-positive' : 'price-negative'}">
+                        ${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)}
+                    </div>
+                    <div class="${profitLossPercent >= 0 ? 'price-positive' : 'price-negative'}">
+                        ${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%
                     </div>
                 </div>
                 <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Total P&L</div>
-                    <div style="font-size: 1.2rem; font-weight: 600;" class="${profitLossClass}">
-                        ${profitLossArrow} ${totalProfitLoss >= 0 ? '+' : ''}${formatUSD(totalProfitLoss)}
-                    </div>
-                    <div class="${profitLossClass}" style="font-size: 0.75rem;">
-                        ${totalProfitLossPercentage >= 0 ? '+' : ''}${totalProfitLossPercentage.toFixed(2)}%
-                    </div>
-                </div>
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 20px; background: rgba(255,255,255,0.03); padding: 15px; border-radius: 8px;">
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Total Bought</div>
-                    <div style="font-size: 1.0rem;">${formatNumberWithCommas(totalBought, 6)} ${asset.symbol.toUpperCase()}</div>
-                    <div style="color: var(--gray);">${formatUSD(totalCost)}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Total Sold</div>
-                    <div style="font-size: 1.0rem;">${formatNumberWithCommas(totalSold, 6)} ${asset.symbol.toUpperCase()}</div>
-                    <div style="color: var(--gray);">${formatUSD(totalProceeds)}</div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Realized P&L</div>
-                    <div style="font-size: 1.0rem;" class="${realizedProfitLoss >= 0 ? 'price-positive' : 'price-negative'}">
-                        ${realizedProfitLoss >= 0 ? '+' : ''}${formatUSD(realizedProfitLoss)}
-                    </div>
-                </div>
-                <div>
-                    <div style="color: var(--gray); font-size: 0.8rem;">Unrealized P&L</div>
-                    <div style="font-size: 1.0rem;" class="${unrealizedProfitLoss >= 0 ? 'price-positive' : 'price-negative'}">
-                        ${unrealizedProfitLoss >= 0 ? '+' : ''}${formatUSD(unrealizedProfitLoss)}
-                    </div>
+                    <div style="color: var(--gray); font-size: 0.8rem;">Total Trades</div>
+                    <div style="font-size: 1.2rem; font-weight: 600;">${currentAssetTransactions.length}</div>
+                    <div style="color: var(--gray);">Since ${firstTradeDate}</div>
                 </div>
             </div>
         `;
-        
-        // Get all transactions for this asset
-        currentAssetTransactions = (allTransactions || []).filter(t => {
-            const tAsset = (t.asset || t.method || '').toLowerCase();
-            const fromAsset = (t.fromAsset || '').toLowerCase();
-            const toAsset = (t.toAsset || '').toLowerCase();
-            return tAsset === asset.symbol || fromAsset === asset.symbol || toAsset === asset.symbol;
-        }).sort((a, b) => new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0));
         
         // Reset to first page
         assetTransactionsPage = 1;
         renderAssetTransactionsList();
         
-        // Show/hide pagination based on number of transactions
+        // Show/hide pagination based on number of trades
         if (currentAssetTransactions.length > assetTransactionsPerPage) {
             pagination.style.display = 'flex';
         } else {
@@ -4291,7 +4238,7 @@
         list.innerHTML = '';
         
         if (currentAssetTransactions.length === 0) {
-            list.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--gray);">No transactions found for this asset</div>';
+            list.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--gray);">No trades found for this asset</div>';
             return;
         }
         
@@ -4300,56 +4247,49 @@
         const pageTransactions = currentAssetTransactions.slice(start, end);
         
         pageTransactions.forEach(t => {
-            const date = new Date(t.date || t.createdAt || new Date());
+            const date = new Date(t.executedAt || t.createdAt || new Date());
             const formattedDate = date.toLocaleDateString('en-US', {
                 year: 'numeric', month: 'long', day: 'numeric',
                 hour: '2-digit', minute: '2-digit'
             });
             
-            let amount = 0;
-            let isPositive = false;
-            let amountDisplay = '';
+            const isBuy = t.orderType === 'buy';
+            const isSell = t.orderType === 'sell';
             
-            const assetSymbol = t.asset || t.fromAsset || t.toAsset || 'btc';
-            
-            if ((t.asset || '').toLowerCase() === assetSymbol) {
-                amount = parseFloat(t.amount) || 0;
-                isPositive = t.type === 'deposit' || t.type === 'interest' || t.type === 'referral';
-                amountDisplay = `${isPositive ? '+' : '-'}${formatNumberWithCommas(Math.abs(amount), 6)} ${assetSymbol.toUpperCase()}`;
-            } else if ((t.toAsset || '').toLowerCase() === assetSymbol) {
-                amount = parseFloat(t.toAmount) || 0;
-                isPositive = true;
-                amountDisplay = `+${formatNumberWithCommas(amount, 6)} ${assetSymbol.toUpperCase()}`;
-            } else if ((t.fromAsset || '').toLowerCase() === assetSymbol) {
-                amount = parseFloat(t.fromAmount) || 0;
-                isPositive = false;
-                amountDisplay = `-${formatNumberWithCommas(Math.abs(amount), 6)} ${assetSymbol.toUpperCase()}`;
+            let profitLossHTML = '';
+            if (isSell && (t.profitAmount > 0 || t.lossAmount > 0)) {
+                const profitClass = t.profitAmount > 0 ? 'price-positive' : 'price-negative';
+                const profitAmount = t.profitAmount > 0 ? t.profitAmount : -t.lossAmount;
+                const profitPercent = t.profitPercentage > 0 ? t.profitPercentage : -t.lossPercentage;
+                profitLossHTML = `
+                    <div class="${profitClass}" style="font-size: 0.85rem; margin-top: 4px;">
+                        ${t.profitAmount > 0 ? '+' : '-'}${formatUSD(Math.abs(profitAmount))} (${profitPercent >= 0 ? '+' : ''}${profitPercent.toFixed(2)}%)
+                    </div>
+                `;
             }
             
             const item = document.createElement('div');
             item.className = 'asset-transaction-item';
             item.onclick = () => {
                 closeAssetTransactionsModal();
-                openTransactionDetails(t);
+                openTradeDetails(t);
             };
-            
-            let statusBadge = '';
-            if (t.status === 'completed') {
-                statusBadge = '<span class="status-badge success">Completed</span>';
-            } else if (t.status === 'pending') {
-                statusBadge = '<span class="status-badge pending">Pending</span>';
-            } else {
-                statusBadge = '<span class="status-badge failed">Failed</span>';
-            }
             
             item.innerHTML = `
                 <div class="asset-transaction-date">${formattedDate}</div>
                 <div class="asset-transaction-details">
                     <div>
-                        <span class="asset-transaction-type">${t.type || 'Transaction'}</span>
-                        <span style="margin-left: 10px;">${statusBadge}</span>
+                        <span class="asset-transaction-type" style="color: ${isBuy ? 'var(--success)' : 'var(--error)'};">
+                            ${t.orderType?.toUpperCase() || 'TRADE'}
+                        </span>
+                        <span style="margin-left: 10px;" class="status-badge ${t.status === 'completed' ? 'success' : 'pending'}">
+                            ${t.status || 'completed'}
+                        </span>
                     </div>
-                    <div class="asset-transaction-amount ${isPositive ? 'positive' : 'negative'}">${amountDisplay}</div>
+                    <div class="asset-transaction-amount ${isBuy ? 'positive' : 'negative'}">
+                        ${isBuy ? '+' : '-'}${formatNumberWithCommas(t.assetAmount, 6)} @ $${t.price.toFixed(2)}
+                    </div>
+                    ${profitLossHTML}
                 </div>
             `;
             
@@ -4383,7 +4323,134 @@
     }
     
     /* ============================================= */
-    /* Enhanced Price Fetching - PRIMARY: CoinGecko with proper mapping */
+    /* Trade Details Modal - Shows Full Trade Info */
+    /* ============================================= */
+    
+    function openTradeDetails(trade) {
+        const modal = document.getElementById('trade-details-modal');
+        const body = document.getElementById('trade-details-body');
+        
+        const asset = topAssets.find(a => a.symbol === trade.asset) || topAssets[0];
+        const isBuy = trade.orderType === 'buy';
+        const isSell = trade.orderType === 'sell';
+        
+        const date = new Date(trade.executedAt || trade.createdAt || new Date());
+        const formattedDate = date.toLocaleString('en-US', {
+            year: 'numeric', month: 'long', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+        
+        let profitLossSection = '';
+        if (isSell) {
+            const profitClass = trade.profitAmount > 0 ? 'price-positive' : 'price-negative';
+            profitLossSection = `
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px;">
+                    <div style="background: rgba(255, 255, 255, 0.03); padding: 15px; border-radius: 12px;">
+                        <div style="color: var(--gray); font-size: 0.85rem;">Profit/Loss Amount</div>
+                        <div style="font-size: 1.4rem; font-weight: 700;" class="${profitClass}">
+                            ${trade.profitAmount > 0 ? '+' : '-'}${formatUSD(Math.abs(trade.profitAmount || trade.lossAmount || 0))}
+                        </div>
+                    </div>
+                    <div style="background: rgba(255, 255, 255, 0.03); padding: 15px; border-radius: 12px;">
+                        <div style="color: var(--gray); font-size: 0.85rem;">Profit/Loss Percentage</div>
+                        <div style="font-size: 1.4rem; font-weight: 700;" class="${profitClass}">
+                            ${(trade.profitPercentage || trade.lossPercentage || 0) >= 0 ? '+' : ''}${(trade.profitPercentage || trade.lossPercentage || 0).toFixed(2)}%
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        body.innerHTML = `
+            <div style="text-align: center; margin-bottom: 25px;">
+                <img src="${asset.logo}" style="width: 64px; height: 64px; border-radius: 50%; margin-bottom: 15px;">
+                <h4 style="color: var(--dark); font-size: 1.4rem; margin-bottom: 5px;">
+                    ${isBuy ? 'Buy Order' : 'Sell Order'}
+                </h4>
+                <div style="font-size: 0.9rem; color: var(--gray);">Order ID: ${trade.orderId}</div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
+                    <div style="color: var(--gray); font-size: 0.9rem; margin-bottom: 8px;">Amount (USD)</div>
+                    <div style="font-size: 2rem; font-weight: 700; ${isBuy ? 'color: var(--success);' : 'color: var(--error);'}">
+                        ${isBuy ? '+' : '-'}${formatUSD(trade.amountUSD || 0)}
+                    </div>
+                </div>
+                <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
+                    <div style="color: var(--gray); font-size: 0.9rem; margin-bottom: 8px;">Amount (${asset.symbol.toUpperCase()})</div>
+                    <div style="font-size: 2rem; font-weight: 700;">
+                        ${formatNumberWithCommas(trade.assetAmount, 8)}
+                    </div>
+                </div>
+            </div>
+            
+            <div style="background: rgba(255, 255, 255, 0.02); padding: 20px; border-radius: 16px; margin-bottom: 20px;">
+                <h5 style="color: var(--dark); margin-bottom: 15px;">Trade Details</h5>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.85rem;">Date & Time</div>
+                        <div style="color: var(--dark);">${formattedDate}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.85rem;">Price</div>
+                        <div style="color: var(--dark); font-weight: 600;">$${trade.price.toFixed(2)}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.85rem;">Total Value</div>
+                        <div style="color: var(--dark);">${formatUSD(trade.totalValue || trade.amountUSD || 0)}</div>
+                    </div>
+                    <div>
+                        <div style="color: var(--gray); font-size: 0.85rem;">Status</div>
+                        <div><span class="status-badge success">${trade.status || 'completed'}</span></div>
+                    </div>
+                </div>
+                
+                ${isSell && trade.buyingPrice ? `
+                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--gray-light);">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div>
+                            <div style="color: var(--gray); font-size: 0.85rem;">Average Buying Price</div>
+                            <div style="color: var(--dark);">$${trade.buyingPrice.toFixed(2)}</div>
+                        </div>
+                        <div>
+                            <div style="color: var(--gray); font-size: 0.85rem;">Selling Price</div>
+                            <div style="color: var(--dark);">$${trade.sellingPrice.toFixed(2)}</div>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+                
+                ${trade.balanceSource ? `
+                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--gray-light);">
+                    <div style="color: var(--gray); font-size: 0.85rem; margin-bottom: 8px;">Balance Source</div>
+                    <div style="display: flex; gap: 20px;">
+                        ${trade.mainAmountUsed > 0 ? `<div>Main: ${formatUSD(trade.mainAmountUsed)}</div>` : ''}
+                        ${trade.maturedAmountUsed > 0 ? `<div>Matured: ${formatUSD(trade.maturedAmountUsed)}</div>` : ''}
+                    </div>
+                </div>
+                ` : ''}
+                
+                ${profitLossSection}
+            </div>
+            
+            <div style="display: flex; justify-content: flex-end;">
+                <button class="btn btn-outline" onclick="closeTradeDetails()" style="padding: 8px 20px;">
+                    <i class="fas fa-times"></i> Close
+                </button>
+            </div>
+        `;
+        
+        modal.classList.add('active');
+    }
+    
+    function closeTradeDetails() {
+        document.getElementById('trade-details-modal').classList.remove('active');
+    }
+    
+    /* ============================================= */
+    /* Enhanced Price Fetching - PRIMARY: CoinGecko */
     /* ============================================= */
     
     async function fetchCoinGeckoPrices() {
@@ -4879,7 +4946,7 @@
     }
     
     /* ============================================= */
-    /* Asset Details Modal Functions - Updated with Buy/Sell */
+    /* Asset Details Modal Functions - Updated with Buy/Sell and Auto-Close */
     /* ============================================= */
     
     async function openAssetDetails(asset) {
@@ -4897,14 +4964,11 @@
         const balance = parseFloat(userAssetBalances[asset.symbol] || 0);
         const balanceUsd = balance * price;
         
-        // Get portfolio data for this asset
-        const portfolioData = userPortfolio[asset.symbol] || null;
-        const avgBuyPrice = portfolioData?.buyPrice || 0;
-        const profitLoss = portfolioData ? (price - avgBuyPrice) * balance : 0;
-        const profitLossPercentage = avgBuyPrice > 0 ? ((price - avgBuyPrice) / avgBuyPrice) * 100 : 0;
-        
-        // Determine profit/loss class
-        const profitLossClass = profitLoss >= 0 ? 'price-positive' : 'price-negative';
+        // Find portfolio data for this asset
+        const portfolioAsset = userPortfolio.assets?.find(a => a.asset === asset.symbol);
+        const averageBuyPrice = portfolioAsset?.averageBuyPrice || price;
+        const profitLoss = balanceUsd - (portfolioAsset?.totalCost || 0);
+        const profitLossPercent = portfolioAsset?.totalCost > 0 ? (profitLoss / portfolioAsset.totalCost) * 100 : 0;
         
         document.getElementById('asset-details-grid').innerHTML = `
             <div class="asset-detail-item">
@@ -4929,16 +4993,15 @@
                 <div class="asset-detail-label">Your Balance</div>
                 <div class="asset-detail-value">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div>
                 <div style="font-size: 0.85rem; color: var(--gray);">${formatUSD(balanceUsd)}</div>
+                ${profitLoss !== 0 ? `
+                    <div class="${profitLoss >= 0 ? 'price-positive' : 'price-negative'}" style="font-size: 0.85rem;">
+                        ${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)} (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
+                    </div>
+                ` : ''}
             </div>
             <div class="asset-detail-item">
-                <div class="asset-detail-label">Avg Buy Price</div>
-                <div class="asset-detail-value">${formatUSD(avgBuyPrice)}</div>
-            </div>
-            <div class="asset-detail-item">
-                <div class="asset-detail-label">Profit/Loss</div>
-                <div class="asset-detail-value ${profitLossClass}">
-                    ${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)} (${profitLossPercentage >= 0 ? '+' : ''}${profitLossPercentage.toFixed(2)}%)
-                </div>
+                <div class="asset-detail-label">Avg. Buy Price</div>
+                <div class="asset-detail-value">${formatUSD(averageBuyPrice)}</div>
             </div>
         `;
         
@@ -4954,7 +5017,7 @@
         modal.classList.add('active');
         
         // Store current asset for trading
-        window.currentModalAsset = asset;
+        AppState.currentModalAsset = asset;
     }
     
     function createTradingViewChart(symbol) {
@@ -4986,7 +5049,7 @@
     }
     
     async function buyAssetFromModal() {
-        const asset = window.currentModalAsset;
+        const asset = AppState.currentModalAsset;
         if (!asset) return;
         
         const amountUSD = parseFloat(document.getElementById('modal-trade-amount').value) || 0;
@@ -4995,36 +5058,16 @@
             return;
         }
         
-        // Check if user has matured balance (must have matured balance to buy)
-        const maturedBalanceUSD = userBalances.matured || 0;
-        if (maturedBalanceUSD <= 0) {
-            showNotification('error', 'Insufficient Matured Balance', 'You need matured balance to buy assets. Please wait for your investments to mature.');
-            return;
-        }
-        
-        // Calculate total available (matured + main)
         const mainBalanceUSD = userBalances.main || 0;
-        const totalAvailableUSD = maturedBalanceUSD + mainBalanceUSD;
+        const maturedBalanceUSD = userBalances.matured || 0;
+        const totalAvailable = mainBalanceUSD + maturedBalanceUSD;
         
-        if (amountUSD > totalAvailableUSD) {
-            showNotification('error', 'Insufficient Balance', `You only have ${formatUSD(totalAvailableUSD)} available (Matured: ${formatUSD(maturedBalanceUSD)} + Main: ${formatUSD(mainBalanceUSD)})`);
+        if (amountUSD > totalAvailable) {
+            showNotification('error', 'Insufficient Balance', `You only have ${formatUSD(totalAvailable)} available (Main: ${formatUSD(mainBalanceUSD)} + Matured: ${formatUSD(maturedBalanceUSD)}). Redirecting to deposit page...`);
+            setTimeout(() => {
+                window.location.href = 'deposit.html';
+            }, 2000);
             return;
-        }
-        
-        // Determine how much to take from each wallet
-        let mainAmountUsed = 0;
-        let maturedAmountUsed = 0;
-        let balanceSource = 'matured';
-        
-        if (amountUSD <= maturedBalanceUSD) {
-            // Take entirely from matured
-            maturedAmountUsed = amountUSD;
-            balanceSource = 'matured';
-        } else {
-            // Take all matured + remainder from main
-            maturedAmountUsed = maturedBalanceUSD;
-            mainAmountUsed = amountUSD - maturedBalanceUSD;
-            balanceSource = 'both';
         }
         
         try {
@@ -5040,64 +5083,41 @@
                 },
                 body: JSON.stringify({
                     asset: asset.symbol,
-                    assetId: asset.id,
                     amountUSD: amountUSD,
                     assetAmount: assetAmount,
-                    price: price,
-                    totalCost: amountUSD,
-                    balanceSource: balanceSource,
-                    mainAmountUsed: mainAmountUsed,
-                    maturedAmountUsed: maturedAmountUsed
+                    price: price
                 })
             });
             
             if (response.ok) {
-                const data = await response.json();
                 showNotification('success', 'Purchase Successful', `Bought ${formatNumberWithCommas(assetAmount, 6)} ${asset.symbol.toUpperCase()} for ${formatUSD(amountUSD)}`);
                 
                 // Update balances
-                userBalances.main -= mainAmountUsed;
-                userBalances.matured -= maturedAmountUsed;
-                userAssetBalances[asset.symbol] = (parseFloat(userAssetBalances[asset.symbol] || 0) + assetAmount).toFixed(8);
-                
-                // Add to portfolio tracking
-                if (!userPortfolio[asset.symbol]) {
-                    userPortfolio[asset.symbol] = {
-                        id: asset.id,
-                        amount: 0,
-                        totalCost: 0,
-                        buyPrice: 0,
-                        trades: []
-                    };
+                if (mainBalanceUSD >= amountUSD) {
+                    userBalances.main -= amountUSD;
+                } else {
+                    userBalances.main = 0;
+                    userBalances.matured -= (amountUSD - mainBalanceUSD);
                 }
-                userPortfolio[asset.symbol].amount += assetAmount;
-                userPortfolio[asset.symbol].totalCost += amountUSD;
-                userPortfolio[asset.symbol].buyPrice = userPortfolio[asset.symbol].totalCost / userPortfolio[asset.symbol].amount;
-                userPortfolio[asset.symbol].trades.push({
-                    type: 'buy',
-                    asset: asset.symbol,
-                    assetAmount: assetAmount,
-                    amount: amountUSD,
-                    price: price,
-                    timestamp: new Date()
-                });
+                userAssetBalances[asset.symbol] = (parseFloat(userAssetBalances[asset.symbol] || 0) + assetAmount).toFixed(8);
                 
                 // Refresh data
                 await loadBalances();
                 await loadAssetBalances();
+                await loadPortfolio();
+                await loadTrades();
                 await loadAvailableAssets();
                 await loadTransactions();
-                await loadUserTrades();
                 
                 // Update modal
                 const newBalance = parseFloat(userAssetBalances[asset.symbol] || 0);
                 const newBalanceUsd = newBalance * price;
                 document.getElementById('modal-balance-info').textContent = `Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})`;
                 
-                // Close modal after success (automatically as requested)
+                // Close modal automatically after success
                 setTimeout(() => {
                     closeAssetDetails();
-                }, 500);
+                }, 2000);
             } else {
                 const error = await response.json();
                 showNotification('error', 'Purchase Failed', error.message || 'Please try again');
@@ -5109,7 +5129,7 @@
     }
     
     async function sellAssetFromModal() {
-        const asset = window.currentModalAsset;
+        const asset = AppState.currentModalAsset;
         if (!asset) return;
         
         const amountUSD = parseFloat(document.getElementById('modal-trade-amount').value) || 0;
@@ -5127,12 +5147,6 @@
             return;
         }
         
-        // Calculate profit/loss
-        const portfolioData = userPortfolio[asset.symbol] || { buyPrice: price, totalCost: amountUSD };
-        const buyPrice = portfolioData.buyPrice || price;
-        const profitLoss = (price - buyPrice) * assetAmount;
-        const profitLossPercentage = buyPrice > 0 ? ((price - buyPrice) / buyPrice) * 100 : 0;
-        
         try {
             const token = localStorage.getItem('jwtToken');
             
@@ -5144,59 +5158,46 @@
                 },
                 body: JSON.stringify({
                     asset: asset.symbol,
-                    assetId: asset.id,
                     amountUSD: amountUSD,
                     assetAmount: assetAmount,
-                    sellPrice: price,
-                    buyPrice: buyPrice,
-                    profitLoss: profitLoss,
-                    profitLossPercentage: profitLossPercentage
+                    price: price
                 })
             });
             
             if (response.ok) {
                 const data = await response.json();
                 
-                showNotification('success', 'Sale Successful', `Sold ${formatNumberWithCommas(assetAmount, 6)} ${asset.symbol.toUpperCase()} for ${formatUSD(amountUSD)}`);
+                const profitLossMsg = data.data?.profitLoss?.profitAmount > 0 ? 
+                    `Profit: ${formatUSD(data.data.profitLoss.profitAmount)} (${data.data.profitLoss.profitPercentage.toFixed(2)}%)` :
+                    data.data?.profitLoss?.lossAmount > 0 ?
+                    `Loss: -${formatUSD(data.data.profitLoss.lossAmount)} (${data.data.profitLoss.lossPercentage.toFixed(2)}%)` : '';
                 
-                // Update balances - sale amount added to matured balance
-                userBalances.matured += amountUSD;
+                showNotification('success', 'Sale Successful', `Sold ${formatNumberWithCommas(assetAmount, 6)} ${asset.symbol.toUpperCase()} for ${formatUSD(amountUSD)}. ${profitLossMsg}`);
+                
+                // Update balances
+                userBalances.matured += amountUSD; // Proceeds go to matured balance
                 userAssetBalances[asset.symbol] = (currentBalance - assetAmount).toFixed(8);
-                
-                // Update portfolio
-                if (userPortfolio[asset.symbol]) {
-                    userPortfolio[asset.symbol].amount -= assetAmount;
-                    userPortfolio[asset.symbol].totalCost -= (assetAmount * buyPrice);
-                    userPortfolio[asset.symbol].trades.push({
-                        type: 'sell',
-                        asset: asset.symbol,
-                        assetAmount: assetAmount,
-                        amount: amountUSD,
-                        price: price,
-                        profitLoss: profitLoss,
-                        profitLossPercentage: profitLossPercentage,
-                        timestamp: new Date()
-                    });
-                    
-                    if (userPortfolio[asset.symbol].amount <= 0) {
-                        delete userPortfolio[asset.symbol];
-                    } else {
-                        userPortfolio[asset.symbol].buyPrice = userPortfolio[asset.symbol].totalCost / userPortfolio[asset.symbol].amount;
-                    }
-                }
                 
                 // Refresh data
                 await loadBalances();
                 await loadAssetBalances();
+                await loadPortfolio();
+                await loadTrades();
                 await loadAvailableAssets();
                 await loadTransactions();
-                await loadUserTrades();
                 
-                // Close modal after success (automatically as requested)
+                // Check if user wants to withdraw using gray centered notification
+                showWithdrawalNotification();
+                
+                // Update modal
+                const newBalance = parseFloat(userAssetBalances[asset.symbol] || 0);
+                const newBalanceUsd = newBalance * price;
+                document.getElementById('modal-balance-info').textContent = `Your balance: ${formatNumberWithCommas(newBalance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(newBalanceUsd)})`;
+                
+                // Close modal automatically after success
                 setTimeout(() => {
                     closeAssetDetails();
-                }, 500);
-                
+                }, 2000);
             } else {
                 const error = await response.json();
                 showNotification('error', 'Sale Failed', error.message || 'Please try again');
@@ -5205,6 +5206,46 @@
             console.error('Sell error:', error);
             showNotification('error', 'Sale Failed', 'Network error, please try again');
         }
+    }
+    
+    function showWithdrawalNotification() {
+        // Create gray centered notification
+        const notification = document.createElement('div');
+        notification.className = 'withdrawal-notification';
+        notification.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2a2a2a;
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            z-index: 10000;
+            text-align: center;
+            min-width: 300px;
+        `;
+        
+        notification.innerHTML = `
+            <h3 style="margin-bottom: 15px; color: white;">Withdraw Funds?</h3>
+            <p style="margin-bottom: 25px; color: #ccc;">Amount added to matured wallet. Would you like to withdraw now?</p>
+            <div style="display: flex; gap: 15px; justify-content: center;">
+                <button id="cancel-withdraw" style="background: #ff4444; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer; font-weight: 600;">Cancel</button>
+                <button id="confirm-withdraw" style="background: #00ff00; color: black; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer; font-weight: 600;">Withdraw</button>
+            </div>
+        `;
+        
+        document.body.appendChild(notification);
+        
+        document.getElementById('cancel-withdraw').addEventListener('click', function() {
+            notification.remove();
+        });
+        
+        document.getElementById('confirm-withdraw').addEventListener('click', function() {
+            notification.remove();
+            window.location.href = 'withdrawal.html';
+        });
     }
     
     function closeAssetDetails() {
@@ -5219,102 +5260,115 @@
         const modal = document.getElementById('transaction-details-modal');
         const body = document.getElementById('transaction-details-body');
         
-        // Get asset logo based on the actual transaction asset
+        // Get asset logo based on the actual transaction asset - NEVER use BTC for non-BTC assets
         const assetSymbol = transaction.asset || 
                           (transaction.type === 'deposit' ? transaction.method || 'usdt' : 
                            transaction.type === 'withdrawal' ? transaction.method || 'btc' : 
-                           transaction.type === 'buy' ? transaction.asset || 'btc' :
-                           transaction.type === 'sell' ? transaction.asset || 'btc' : 'btc');
+                           transaction.type === 'buy' || transaction.type === 'sell' ? transaction.asset || 'btc' : 
+                           'btc');
         
         const isBuySell = transaction.type === 'buy' || transaction.type === 'sell';
+        const isBuy = transaction.type === 'buy';
         
         // Ensure we never reference BTC for non-BTC transactions
         const primaryAssetLogo = assetLogos[assetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
         
         const usdAmount = parseFloat(transaction.amount) || 0;
-        const assetAmount = parseFloat(transaction.assetAmount) || 
-                          (transaction.type === 'buy' ? parseFloat(transaction.buyDetails?.assetAmount) || 0 : 
-                           transaction.type === 'sell' ? parseFloat(transaction.sellDetails?.assetAmount) || 0 : 0);
-        
-        // Determine fee
-        let fee = parseFloat(transaction.fee) || 0;
-        let feeDisplay = fee > 0 ? `-${formatUSD(fee)}` : 'None';
+        const assetAmount = parseFloat(transaction.assetAmount) || 0;
         
         const isIncoming = transaction.type === 'deposit' || 
                           transaction.type === 'interest' || 
-                          transaction.type === 'referral';
+                          transaction.type === 'referral' ||
+                          transaction.type === 'buy' ||
+                          (transaction.amount && transaction.amount > 0 && transaction.type !== 'withdrawal');
         
-        const isOutgoing = transaction.type === 'withdrawal';
-        const isBuy = transaction.type === 'buy';
-        const isSell = transaction.type === 'sell';
+        const isOutgoing = transaction.type === 'withdrawal' || 
+                          transaction.type === 'sell' ||
+                          (transaction.amount && transaction.amount < 0);
         
-        const amountClass = isIncoming ? 'price-positive' : (isOutgoing ? 'price-negative' : (isBuy ? 'price-positive' : (isSell ? 'price-positive' : '')));
-        const amountPrefix = isIncoming ? '+' : (isOutgoing ? '-' : (isBuy ? '+' : (isSell ? '+' : '')));
+        const amountClass = isIncoming ? 'price-positive' : (isOutgoing ? 'price-negative' : '');
+        const amountPrefix = isIncoming ? '+' : (isOutgoing ? '-' : '');
         
-        // Get the correct price for this asset
-        let exchangeRate = 1.00;
-        const assetIdForRate = topAssets.find(a => a.symbol === assetSymbol.toLowerCase())?.id || 'bitcoin';
-        exchangeRate = currentPrices[assetIdForRate]?.usd || 1.00;
+        // Use the correct exchange rate for this specific transaction's asset
+        let exchangeRate = transaction.exchangeRateAtTime || 1.00;
         
-        // Special handling for stablecoins
-        if (assetSymbol.toLowerCase() === 'usdt' || assetSymbol.toLowerCase() === 'usdc') {
-            exchangeRate = 1.00;
-        }
-        
-        // Ensure network is never "Unknown"
+        // Ensure network is never "Unknown" - use the correct network for the asset
         let network = transaction.network;
         if (!network || network === 'Unknown' || network === 'unknown') {
+            // Map the asset to its correct network
             const assetKey = assetSymbol.toLowerCase();
-            network = assetNetworks[assetKey] || 'Bitcoin';
+            network = assetNetworks[assetKey] || (assetKey === 'btc' ? 'Bitcoin' : 
+                                                  assetKey === 'eth' ? 'Ethereum (ERC20)' : 
+                                                  assetKey === 'usdt' ? 'Tron (TRC-20)' : 
+                                                  assetKey === 'bnb' ? 'BNB Smart Chain (BEP-20)' : 
+                                                  'Bitcoin');
         }
         
         const transactionDate = transaction.date || transaction.createdAt || transaction.timestamp || new Date();
         const formattedDate = new Date(transactionDate).toLocaleString('en-US', { 
             year: 'numeric', month: 'long', day: 'numeric', 
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-            hour12: true
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
         });
         
         let detailsHTML = '';
         
-        if (isBuy || isSell) {
-            const buySellDetails = transaction.buyDetails || transaction.sellDetails || {};
-            const profitLoss = transaction.sellDetails?.profitLoss || 0;
-            const profitLossPercentage = transaction.sellDetails?.profitLossPercentage || 0;
-            const profitLossClass = profitLoss >= 0 ? 'price-positive' : 'price-negative';
-            
+        if (isBuySell) {
+            const tradeDetails = transaction.tradeDetails || {};
             detailsHTML = `
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
-                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">${isBuy ? 'Total Cost' : 'Total Received'}</div>
-                        <div style="font-size: 1.8rem; font-weight: 700; ${amountClass}">${amountPrefix}${formatUSD(Math.abs(usdAmount))}</div>
-                        <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-                            <img src="${primaryAssetLogo}" style="width: 20px; height: 20px; border-radius: 50%;">
-                            <span style="color: var(--gray);">${formatNumberWithCommas(assetAmount, 8)} ${assetSymbol.toUpperCase()}</span>
+                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Amount (USD)</div>
+                        <div style="font-size: 1.8rem; font-weight: 700; ${isBuy ? 'color: var(--success);' : 'color: var(--error);'}">
+                            ${isBuy ? '+' : '-'}${formatUSD(usdAmount)}
                         </div>
-                        ${isBuy && buySellDetails.balanceSource ? `
-                            <div style="margin-top: 10px; font-size: 0.8rem;">
-                                <span style="color: var(--gray);">Source: </span>
-                                <span style="color: var(--dark);">${buySellDetails.balanceSource}</span>
-                                ${buySellDetails.mainAmountUsed > 0 ? `<div>Main used: ${formatUSD(buySellDetails.mainAmountUsed)}</div>` : ''}
-                                ${buySellDetails.maturedAmountUsed > 0 ? `<div>Matured used: ${formatUSD(buySellDetails.maturedAmountUsed)}</div>` : ''}
-                            </div>
-                        ` : ''}
                     </div>
-                    
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
-                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Transaction Status</div>
-                        <div style="margin-bottom: 15px;">
-                            <span class="status-badge ${transaction.status === 'completed' ? 'success' : transaction.status === 'pending' ? 'pending' : 'failed'}" style="font-size: 0.9rem; padding: 6px 12px;">
-                                ${(transaction.status || 'pending').toUpperCase()}
-                            </span>
+                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Amount (${assetSymbol.toUpperCase()})</div>
+                        <div style="font-size: 1.8rem; font-weight: 700;">
+                            ${formatNumberWithCommas(assetAmount, 8)}
                         </div>
-                        <div style="font-size: 0.9rem; color: var(--gray);">Price: <span style="color: var(--dark);">${formatUSD(buySellDetails.price || exchangeRate)}</span></div>
-                        ${isSell ? `
-                            <div style="font-size: 0.9rem; color: var(--gray);">Buy Price: <span style="color: var(--dark);">${formatUSD(buySellDetails.buyPrice || 0)}</span></div>
-                            <div style="font-size: 0.9rem; color: var(--gray);">Profit/Loss: <span class="${profitLossClass}">${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)} (${profitLossPercentage >= 0 ? '+' : ''}${profitLossPercentage.toFixed(2)}%)</span></div>
+                    </div>
+                </div>
+                
+                <div style="background: rgba(255, 255, 255, 0.02); padding: 20px; border-radius: 16px; margin-bottom: 20px;">
+                    <h5 style="color: var(--dark); margin-bottom: 15px;">Trade Details</h5>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Date & Time</div>
+                            <div style="color: var(--dark);">${formattedDate}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Price</div>
+                            <div style="color: var(--dark); font-weight: 600;">$${exchangeRate.toFixed(2)}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Order ID</div>
+                            <div style="color: var(--dark); font-size: 0.85rem;">${tradeDetails.orderId || 'N/A'}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Status</div>
+                            <div><span class="status-badge ${transaction.status === 'completed' ? 'success' : 'pending'}">${transaction.status}</span></div>
+                        </div>
+                        ${!isBuy && tradeDetails.profitAmount ? `
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Profit/Loss</div>
+                            <div class="${tradeDetails.profitAmount > 0 ? 'price-positive' : 'price-negative'}">
+                                ${tradeDetails.profitAmount > 0 ? '+' : '-'}${formatUSD(Math.abs(tradeDetails.profitAmount || tradeDetails.lossAmount || 0))}
+                                (${(tradeDetails.profitPercentage || tradeDetails.lossPercentage || 0).toFixed(2)}%)
+                            </div>
+                        </div>
                         ` : ''}
-                        <div style="font-size: 0.9rem; color: var(--gray);">Network: <span style="color: var(--dark);">${network}</span></div>
+                        ${tradeDetails.balanceSource ? `
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Balance Source</div>
+                            <div style="color: var(--dark);">${tradeDetails.balanceSource}</div>
+                        </div>
+                        ` : ''}
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Network</div>
+                            <div style="color: var(--primary);">${network}</div>
+                        </div>
                     </div>
                 </div>
             `;
@@ -5322,23 +5376,48 @@
             detailsHTML = `
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
                     <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
-                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Total Amount (USD)</div>
+                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Amount (USD)</div>
                         <div style="font-size: 1.8rem; font-weight: 700; ${amountClass}">${amountPrefix}${formatUSD(Math.abs(usdAmount))}</div>
-                        <div style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-                            <img src="${primaryAssetLogo}" style="width: 20px; height: 20px; border-radius: 50%;">
-                            <span style="color: var(--gray);">${amountPrefix}${formatNumberWithCommas(Math.abs(usdAmount / exchangeRate), 8)} ${assetSymbol.toUpperCase()}</span>
+                    </div>
+                    <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
+                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Amount (${assetSymbol.toUpperCase()})</div>
+                        <div style="font-size: 1.8rem; font-weight: 700;">
+                            ${amountPrefix}${formatNumberWithCommas(Math.abs(usdAmount / exchangeRate), 8)}
                         </div>
                     </div>
+                </div>
+                
+                <div style="background: rgba(255, 255, 255, 0.02); padding: 20px; border-radius: 16px; margin-bottom: 20px;">
+                    <h5 style="color: var(--dark); margin-bottom: 15px;">Transaction Details</h5>
                     
-                    <div style="background: rgba(255, 255, 255, 0.03); padding: 20px; border-radius: 16px;">
-                        <div style="font-size: 0.85rem; color: var(--gray); margin-bottom: 8px;">Transaction Status</div>
-                        <div style="margin-bottom: 15px;">
-                            <span class="status-badge ${transaction.status === 'completed' ? 'success' : transaction.status === 'pending' ? 'pending' : 'failed'}" style="font-size: 0.9rem; padding: 6px 12px;">
-                                ${(transaction.status || 'pending').toUpperCase()}
-                            </span>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Date & Time</div>
+                            <div style="color: var(--dark);">${formattedDate}</div>
                         </div>
-                        <div style="font-size: 0.9rem; color: var(--gray);">Exchange Rate: <span style="color: var(--dark);">$${exchangeRate.toFixed(2)}</span></div>
-                        <div style="font-size: 0.9rem; color: var(--gray);">Network: <span style="color: var(--dark);">${network}</span></div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Type</div>
+                            <div style="color: var(--dark); text-transform: capitalize;">${transaction.type}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Asset</div>
+                            <div style="display: flex; align-items: center; gap: 6px;">
+                                <img src="${primaryAssetLogo}" style="width: 18px; height: 18px; border-radius: 50%;">
+                                <span style="color: var(--dark);">${assetSymbol.toUpperCase()}</span>
+                            </div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Exchange Rate</div>
+                            <div style="color: var(--dark);">$${exchangeRate.toFixed(2)}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Network</div>
+                            <div style="color: var(--primary);">${network}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Reference</div>
+                            <div style="color: var(--dark); font-size: 0.85rem;">${transaction.reference || 'N/A'}</div>
+                        </div>
                     </div>
                 </div>
             `;
@@ -5352,72 +5431,6 @@
             </div>
             
             ${detailsHTML}
-            
-            <div style="background: rgba(255, 255, 255, 0.02); padding: 20px; border-radius: 16px; margin-bottom: 20px;">
-                <h5 style="color: var(--dark); margin-bottom: 15px; font-size: 1rem;">Transaction Details</h5>
-                
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Date & Time</div>
-                        <div style="color: var(--dark);">${formattedDate}</div>
-                    </div>
-                    
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Transaction Type</div>
-                        <div style="color: var(--dark); text-transform: capitalize;">${transaction.type || 'Transfer'}</div>
-                    </div>
-                    
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Asset</div>
-                        <div style="display: flex; align-items: center; gap: 6px;">
-                            <img src="${primaryAssetLogo}" style="width: 18px; height: 18px; border-radius: 50%;">
-                            <span style="color: var(--dark);">${assetSymbol.toUpperCase()}</span>
-                        </div>
-                    </div>
-                    
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Exchange Rate</div>
-                        <div style="color: var(--dark);">1 ${assetSymbol.toUpperCase()} = ${formatUSD(exchangeRate)}</div>
-                    </div>
-                    
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Transaction Fee</div>
-                        <div style="color: var(--error);">${feeDisplay}</div>
-                    </div>
-                    
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Net Amount</div>
-                        <div style="color: var(--dark); font-weight: 600;">${formatUSD(usdAmount - fee)}</div>
-                    </div>
-                    
-                    ${transaction.method ? `
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Payment Method</div>
-                        <div style="color: var(--dark); text-transform: uppercase;">${transaction.method}</div>
-                    </div>
-                    ` : ''}
-                    
-                    <div style="grid-column: span 2;">
-                        <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Network</div>
-                        <div style="color: var(--primary); font-weight: 500;">${network}</div>
-                    </div>
-                </div>
-                
-                ${transaction.txHash ? `
-                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--gray-light);">
-                    <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 4px;">Transaction Hash</div>
-                    <div style="font-family: monospace; font-size: 0.85rem; color: var(--primary); word-break: break-all;">
-                        ${transaction.txHash}
-                    </div>
-                </div>
-                ` : ''}
-                
-                ${transaction.reference ? `
-                <div style="margin-top: 10px; font-size: 0.8rem; color: var(--gray);">
-                    Reference: ${transaction.reference}
-                </div>
-                ` : ''}
-            </div>
             
             <div style="display: flex; justify-content: flex-end;">
                 <button class="btn btn-outline" onclick="closeTransactionDetails()" style="padding: 8px 20px;">
@@ -5657,16 +5670,16 @@
                     // Find the correct asset ID and use its exchange rate
                     const assetObj = topAssets.find(a => a.symbol === asset.toLowerCase()) || topAssets[0];
                     
-                    // For USDT and stablecoins, always use $1.00
-                    let assetPrice = 1.00;
+                    // CRITICAL FIX: For USDT and stablecoins, always use $1.00
+                    let assetPrice = 1.00; // Default for stablecoins
                     
                     if (asset.toLowerCase() === 'usdt' || asset.toLowerCase() === 'usdc') {
-                        assetPrice = 1.00;
+                        assetPrice = 1.00; // Stablecoins are always $1.00
                     } else {
-                        assetPrice = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                        assetPrice = t.exchangeRateAtTime || currentPrices[assetObj?.id]?.usd || currentBTCPrice;
                     }
                     
-                    const assetAmount = assetPrice ? amount / assetPrice : 0;
+                    const assetAmount = t.assetAmount || (assetPrice ? amount / assetPrice : 0);
                     
                     return {
                         ...t,
@@ -5731,16 +5744,11 @@
             
             let isIncoming = false;
             let isOutgoing = false;
-            let isBuySell = transaction.type === 'buy' || transaction.type === 'sell';
             
-            if (transaction.type === 'deposit' || transaction.type === 'interest' || transaction.type === 'referral') {
+            if (transaction.type === 'deposit' || transaction.type === 'interest' || transaction.type === 'referral' || transaction.type === 'buy') {
                 isIncoming = true;
-            } else if (transaction.type === 'withdrawal') {
+            } else if (transaction.type === 'withdrawal' || transaction.type === 'sell') {
                 isOutgoing = true;
-            } else if (transaction.type === 'buy') {
-                isIncoming = true; // Buy is positive for asset
-            } else if (transaction.type === 'sell') {
-                isIncoming = true; // Sell is positive for USD
             } else {
                 isIncoming = parseFloat(transaction.amount) > 0;
                 isOutgoing = parseFloat(transaction.amount) < 0;
@@ -5750,6 +5758,7 @@
             const amountPrefix = isIncoming ? '+' : (isOutgoing ? '-' : '');
             
             let assetSymbol = transaction.asset || 'btc';
+            // Format asset symbol to proper case (e.g., USDT not usdt)
             const formattedAssetSymbol = assetSymbol.toUpperCase();
             let assetLogo = assetLogos[assetSymbol.toLowerCase()] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
             
@@ -5762,30 +5771,34 @@
             
             const usdAmount = parseFloat(transaction.amount) || 0;
             let assetAmount = 0;
+            
             let amountDisplay;
-            
             // Get correct exchange rates for display
-            let exchangeRate = 1.00;
-            const assetForRate = assetSymbol.toLowerCase();
+            let exchangeRate = transaction.exchangeRate || 50000;
             
-            if (assetForRate === 'usdt' || assetForRate === 'usdc') {
-                exchangeRate = 1.00;
+            if (transaction.type === 'buy' || transaction.type === 'sell') {
+                assetAmount = parseFloat(transaction.assetAmount) || 0;
+                amountDisplay = `
+                    <div class="${amountClass}">
+                        ${amountPrefix}${formatUSD(Math.abs(usdAmount))}
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;">
+                        <img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
+                        ${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} @ $${exchangeRate.toFixed(2)}
+                    </div>
+                `;
             } else {
-                const assetObj = topAssets.find(a => a.symbol === assetForRate);
-                exchangeRate = currentPrices[assetObj?.id]?.usd || currentBTCPrice;
+                assetAmount = usdAmount / exchangeRate;
+                amountDisplay = `
+                    <div class="${amountClass}">
+                        ${amountPrefix}${formatUSD(Math.abs(usdAmount))}
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;">
+                        <img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
+                        ${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}
+                    </div>
+                `;
             }
-            
-            assetAmount = usdAmount / exchangeRate;
-            
-            amountDisplay = `
-                <div class="${amountClass}">
-                    ${amountPrefix}${formatUSD(Math.abs(usdAmount))}
-                </div>
-                <div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;">
-                    <img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">
-                    ${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}
-                </div>
-            `;
             
             // Determine network for display
             let network = transaction.network;
@@ -5794,26 +5807,29 @@
                 network = assetNetworks[assetKey] || 'Bitcoin';
             }
             
-            // Generate description
-            let detailText = transaction.description || transaction.details || '';
+            // Generate description without any undefined references
+            let detailText = transaction.details?.description || transaction.description || '';
             
             if (!detailText || detailText.trim() === '') {
-                if (transaction.type === 'deposit') {
-                    detailText = `Deposit of ${formattedAssetSymbol} at rate $${exchangeRate.toFixed(2)} on ${network}`;
+                if (transaction.type === 'buy') {
+                    detailText = `Bought ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)}`;
+                } else if (transaction.type === 'sell') {
+                    const profitLoss = transaction.tradeDetails;
+                    if (profitLoss?.profitAmount > 0) {
+                        detailText = `Sold ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)} (Profit: ${formatUSD(profitLoss.profitAmount)})`;
+                    } else if (profitLoss?.lossAmount > 0) {
+                        detailText = `Sold ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)} (Loss: -${formatUSD(profitLoss.lossAmount)})`;
+                    } else {
+                        detailText = `Sold ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)}`;
+                    }
+                } else if (transaction.type === 'deposit') {
+                    detailText = `Deposit of ${formattedAssetSymbol} on ${network}`;
                 } else if (transaction.type === 'withdrawal') {
                     detailText = `Withdrawal of ${formattedAssetSymbol} on ${network}`;
                 } else if (transaction.type === 'interest') {
-                    detailText = `Cloud mining earnings in ${formattedAssetSymbol}`;
-                } else if (transaction.type === 'buy') {
-                    detailText = `Bought ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)}`;
-                } else if (transaction.type === 'sell') {
-                    const profitLoss = transaction.sellDetails?.profitLoss || 0;
-                    const profitLossClass = profitLoss >= 0 ? 'price-positive' : 'price-negative';
-                    detailText = `Sold ${formattedAssetSymbol} at $${exchangeRate.toFixed(2)} <span class="${profitLossClass}">${profitLoss >= 0 ? '+' : ''}${formatUSD(profitLoss)}</span>`;
+                    detailText = `Interest earned in ${formattedAssetSymbol}`;
                 } else if (transaction.type === 'referral') {
                     detailText = `Referral bonus in ${formattedAssetSymbol}`;
-                } else if (transaction.type === 'investment') {
-                    detailText = `Cloud mining investment in ${formattedAssetSymbol}`;
                 } else {
                     detailText = 'Transaction processed';
                 }
@@ -6042,6 +6058,7 @@
                     `Your loan application for ${formatUSD(amount)} has been submitted successfully.`);
                 
                 setTimeout(() => {
+                    closeLoanApplicationModal();
                     loadBalances();
                     checkLoanEligibility();
                 }, 2000);
