@@ -3677,7 +3677,6 @@
 
 
 
-
 <script>
     // Initialize AOS animation
     AOS.init({
@@ -3697,9 +3696,9 @@
     let selectedToAsset = null;
     let currentBalanceType = null;
     let userBalances = { main: 0, active: 0, matured: 0 };
-    let userAssetBalances = {};
+    let userAssetBalances = {}; // Asset-specific balances
     let userPreferences = { displayAsset: 'btc' };
-    let userPortfolio = [];
+    let userPortfolio = []; // Portfolio with profit/loss tracking
     let portfolioSummary = { totalValue: 0, totalProfitLoss: 0, totalProfitLossPercentage: 0, assetsCount: 0 };
     let AppState = {
         announcements: [],
@@ -3707,7 +3706,8 @@
         lastDepositCheck: null,
         defaultAsset: 'btc',
         availableAssets: [], // Assets user has balance in
-        assetTransactions: {} // Transactions grouped by asset
+        assetTransactions: {}, // Transactions grouped by asset
+        assetDetails: {} // Detailed info for each asset including profit/loss per order
     };
     let apiRetryCount = 0;
     const MAX_RETRIES = 5;
@@ -3774,7 +3774,7 @@
     // Network mapping for each asset (to ensure Network is never "Unknown")
     const assetNetworks = {
         'btc': 'Bitcoin',
-        'eth': 'Ethereum',
+        'eth': 'Ethereum (ERC-20)',
         'usdt': 'Tron (TRC-20)',
         'bnb': 'BNB Smart Chain (BEP-20)',
         'sol': 'Solana',
@@ -3821,8 +3821,8 @@
             await loadUserData();
             await checkUserDefaultAsset();
             await loadBalances();
-            await loadAssetBalances(); // Load asset balances
-            await loadPortfolio(); // Load portfolio with profit/loss
+            await loadAssetBalances(); // Load asset-specific balances
+            await loadPortfolio(); // Load portfolio with profit/loss per asset
             await loadAvailableAssets(); // Load assets user has balance in
             await loadInvestments();
             await loadTransactions();
@@ -4024,6 +4024,11 @@
                     userPortfolio = data.data.portfolio || [];
                     portfolioSummary = data.data.summary || { totalValue: 0, totalProfitLoss: 0, totalProfitLossPercentage: 0, assetsCount: 0 };
                     
+                    // Store detailed asset transactions for profit/loss per order
+                    if (data.data.assetDetails) {
+                        AppState.assetDetails = data.data.assetDetails;
+                    }
+                    
                     console.log('Portfolio loaded:', userPortfolio);
                 }
             }
@@ -4133,7 +4138,7 @@
     }
     
     /* ============================================= */
-    /* Asset Portfolio Modal Functions - Shows full details with profit/loss */
+    /* Asset Portfolio Modal Functions - Shows full details with profit/loss per order */
     /* ============================================= */
     
     function openAssetPortfolioModal(asset, assetData) {
@@ -4192,8 +4197,9 @@
             </div>
         `;
         
-        // Set transactions for pagination
-        currentAssetTransactions = asset.transactions || [];
+        // Get detailed transactions for this asset including profit/loss per order
+        const assetDetails = AppState.assetDetails[asset.asset] || {};
+        currentAssetTransactions = assetDetails.transactions || asset.transactions || [];
         
         // Reset to first page
         assetTransactionsPage = 1;
@@ -4234,16 +4240,32 @@
             });
             
             const isBuy = t.type === 'buy';
-            const amountClass = isBuy ? 'price-positive' : 'price-negative';
-            const amountPrefix = isBuy ? '+' : '-';
+            const isSell = t.type === 'sell';
+            const amountClass = isBuy ? 'price-positive' : (isSell ? 'price-negative' : '');
+            const amountPrefix = isBuy ? '+' : (isSell ? '-' : '');
             
             let profitDisplay = '';
+            let profitLossClass = '';
             if (t.type === 'sell') {
                 if (t.profit > 0) {
                     profitDisplay = `<span class="price-positive"> (+${formatUSD(t.profit)})</span>`;
+                    profitLossClass = 'price-positive';
                 } else if (t.loss > 0) {
                     profitDisplay = `<span class="price-negative"> (-${formatUSD(t.loss)})</span>`;
+                    profitLossClass = 'price-negative';
                 }
+            }
+            
+            // For buy orders, show the buying price
+            let orderDetails = '';
+            if (isBuy) {
+                orderDetails = `<div style="font-size: 0.8rem; color: var(--gray);">Buy Price: ${formatUSD(t.price)}</div>`;
+            } else if (isSell) {
+                orderDetails = `
+                    <div style="font-size: 0.8rem; color: var(--gray);">
+                        Sold at: ${formatUSD(t.price)} | Bought at: ${formatUSD(t.averageBuyPrice || t.costBasis || 0)}
+                    </div>
+                `;
             }
             
             const item = document.createElement('div');
@@ -4257,9 +4279,10 @@
                         <span class="transaction-price">@ ${formatUSD(t.price)}</span>
                     </div>
                     <div class="transaction-amount ${amountClass}">
-                        ${amountPrefix}${formatNumberWithCommas(t.amount || t.assetAmount, 6)} ${asset.asset.toUpperCase()}
+                        ${amountPrefix}${formatNumberWithCommas(t.amount || t.assetAmount, 6)} ${t.asset || asset.asset.toUpperCase()}
                         ${profitDisplay}
                     </div>
+                    ${orderDetails}
                 </div>
             `;
             
@@ -4929,10 +4952,10 @@
         // Update balance info in modal
         document.getElementById('modal-balance-info').textContent = `Your balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(balanceUsd)})`;
         
-        // Show available balances for purchase
+        // Show available balances for purchase - combined main + matured
         const mainBalance = userBalances.main || 0;
         const maturedBalance = userBalances.matured || 0;
-        const totalAvailable = mainBalance + maturedBalance;
+        const totalAvailable = mainBalance + maturedBalance; // Combined for purchases
         
         document.getElementById('modal-wallet-info').innerHTML = `
             <div style="margin-top: 10px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px;">
@@ -4945,8 +4968,11 @@
                     <span class="${maturedBalance >= 0 ? 'price-positive' : ''}">${formatUSD(maturedBalance)}</span>
                 </div>
                 <div style="display: flex; justify-content: space-between; font-weight: bold; border-top: 1px solid #333; padding-top: 5px;">
-                    <span>Total Available:</span>
+                    <span>Total Available for Purchase:</span>
                     <span>${formatUSD(totalAvailable)}</span>
+                </div>
+                <div style="font-size: 0.8rem; color: var(--gray); margin-top: 5px;">
+                    <i class="fas fa-info-circle"></i> You can use both wallets combined for purchases
                 </div>
             </div>
         `;
@@ -5001,9 +5027,10 @@
             return;
         }
         
+        // Combined balance from both wallets for purchase
         const mainBalance = userBalances.main || 0;
         const maturedBalance = userBalances.matured || 0;
-        const totalAvailable = mainBalance + maturedBalance;
+        const totalAvailable = mainBalance + maturedBalance; // Combined for purchases
         
         if (amountUSD > totalAvailable) {
             showNotification('error', 'Insufficient Balance', `You have $${totalAvailable.toFixed(2)} available (main + matured combined). Redirecting to deposit page...`);
@@ -5028,7 +5055,9 @@
                     asset: asset.symbol,
                     amountUSD: amountUSD,
                     assetAmount: assetAmount,
-                    price: price
+                    price: price,
+                    // Let backend handle balance allocation from both wallets
+                    useCombinedWallets: true // Flag to indicate both wallets can be used
                 })
             });
             
@@ -6301,9 +6330,3 @@
 </script>
 </body>
 </html>
-
-
-
-
-
-
