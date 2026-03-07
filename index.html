@@ -5813,7 +5813,7 @@
             <div class="user-balances">
                 <div class="user-balance" id="main-balance" onclick="redirectToDashboard()">
                     <i class="fas fa-wallet"></i>
-                    <div class="balance-asset-row" id="main-balance-asset" style="display: none;">
+                    <div class="balance-asset-row" id="main-balance-asset">
                         <img src="" class="balance-asset-logo" id="main-asset-logo">
                         <span id="main-asset-amount">0.000000</span>
                         <span id="main-asset-symbol">BTC</span>
@@ -5821,7 +5821,7 @@
                 </div>
                 <div class="user-balance" id="matured-balance" onclick="redirectToDashboard()">
                     <i class="fas fa-piggy-bank"></i>
-                    <div class="balance-asset-row" id="matured-balance-asset" style="display: none;">
+                    <div class="balance-asset-row" id="matured-balance-asset">
                         <img src="" class="balance-asset-logo" id="matured-asset-logo">
                         <span id="matured-asset-amount">0.000000</span>
                         <span id="matured-asset-symbol">BTC</span>
@@ -6499,6 +6499,204 @@
 
 <script>
     // =============================================
+    // ENHANCED BALANCE FETCHING WITH PREFERRED ASSET
+    // =============================================
+    
+    // Global state with enhanced balance handling
+    let currentPrices = {};
+    let currentBTCPrice = 43000;
+    let userBalances = { main: 0, matured: 0 };
+    let userPreferences = { displayAsset: 'btc' };
+    let apiRetryCount = 0;
+    const MAX_RETRIES = 5;
+    const RETRY_DELAY = 30000;
+
+    // Enhanced balance fetching with preferred asset from endpoint
+    async function fetchAndUpdateBalances() {
+        const token = localStorage.getItem('jwtToken');
+        const userBalanceContainer = document.getElementById('user-balance-container');
+        
+        if (!token) {
+            if (userBalanceContainer) userBalanceContainer.style.display = 'none';
+            return;
+        }
+        
+        try {
+            // Fetch balances with retry logic for high traffic
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/balances', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response && response.ok) {
+                const data = await response.json();
+                const mainBalance = data.data?.balances?.main || 0;
+                const maturedBalance = data.data?.balances?.matured || 0;
+                
+                // Fetch user preferences to get preferred display asset
+                await fetchUserPreferences(token);
+                
+                // Update UI with preferred asset format
+                await updateBalanceDisplay(mainBalance, maturedBalance);
+                
+                if (userBalanceContainer) userBalanceContainer.style.display = 'block';
+                
+                // Show notification if balances changed significantly
+                if (Math.abs(userBalances.main - mainBalance) > 0.01) {
+                    showNotification('info', 'Balance Updated', 'Your balances have been refreshed.');
+                }
+                
+                userBalances.main = mainBalance;
+                userBalances.matured = maturedBalance;
+            } else if (response && response.status === 401) {
+                // Token expired
+                localStorage.removeItem('jwtToken');
+                if (userBalanceContainer) userBalanceContainer.style.display = 'none';
+                showNotification('error', 'Session Expired', 'Please login again');
+            }
+        } catch (error) {
+            console.error('Error fetching balances:', error);
+            showNotification('error', 'Balance Update Failed', 'Could not refresh balances. Will retry automatically.');
+            
+            // Exponential backoff retry
+            setTimeout(fetchAndUpdateBalances, Math.min(30000, 1000 * Math.pow(2, apiRetryCount)));
+        }
+    }
+    
+    // Fetch user preferences including preferred display asset
+    async function fetchUserPreferences(token) {
+        try {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/preferences', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            
+            if (response && response.ok) {
+                const data = await response.json();
+                if (data.data && data.data.displayAsset) {
+                    userPreferences.displayAsset = data.data.displayAsset;
+                }
+            }
+        } catch (error) {
+            console.warn('Could not fetch preferences, using defaults:', error);
+            // Keep default BTC
+        }
+    }
+    
+    // Update balance display with preferred asset format
+    async function updateBalanceDisplay(mainBalance, maturedBalance) {
+        const asset = userPreferences.displayAsset;
+        
+        // Get asset data and logo
+        const assetData = await getAssetData(asset);
+        const assetLogo = getAssetLogo(asset) || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
+        const price = assetData?.current_price || currentPrices[asset]?.usd || currentBTCPrice;
+        
+        // Calculate asset amounts
+        const mainAssetAmount = price > 0 ? mainBalance / price : 0;
+        const maturedAssetAmount = price > 0 ? maturedBalance / price : 0;
+        
+        // Update DOM with asset format
+        const mainAmountEl = document.getElementById('main-asset-amount');
+        const maturedAmountEl = document.getElementById('matured-asset-amount');
+        const mainSymbolEl = document.getElementById('main-asset-symbol');
+        const maturedSymbolEl = document.getElementById('matured-asset-symbol');
+        const mainLogoEl = document.getElementById('main-asset-logo');
+        const maturedLogoEl = document.getElementById('matured-asset-logo');
+        
+        if (mainAmountEl) mainAmountEl.textContent = formatAssetAmount(mainAssetAmount);
+        if (maturedAmountEl) maturedAmountEl.textContent = formatAssetAmount(maturedAssetAmount);
+        if (mainSymbolEl) mainSymbolEl.textContent = asset.toUpperCase();
+        if (maturedSymbolEl) maturedSymbolEl.textContent = asset.toUpperCase();
+        if (mainLogoEl) mainLogoEl.src = assetLogo;
+        if (maturedLogoEl) maturedLogoEl.src = assetLogo;
+        
+        // Show asset rows
+        document.getElementById('main-balance-asset').style.display = 'flex';
+        document.getElementById('matured-balance-asset').style.display = 'flex';
+    }
+    
+    // Format asset amount based on value
+    function formatAssetAmount(amount) {
+        if (amount >= 1) {
+            return amount.toFixed(4);
+        } else if (amount >= 0.0001) {
+            return amount.toFixed(6);
+        } else {
+            return amount.toFixed(8);
+        }
+    }
+    
+    // Fetch with retry logic for high traffic
+    async function fetchWithRetry(url, options = {}, retries = 3) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+                
+                const response = await fetch(url, {
+                    ...options,
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (response.status === 429) { // Too Many Requests
+                    const delay = Math.min(30000, 1000 * Math.pow(2, i));
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+                
+                return response;
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.warn(`Request timeout (attempt ${i + 1}/${retries})`);
+                } else {
+                    console.warn(`Request failed (attempt ${i + 1}/${retries}):`, error);
+                }
+                
+                if (i === retries - 1) throw error;
+                
+                const delay = Math.min(30000, 1000 * Math.pow(2, i));
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+    
+    // Get asset data from cache or fetch
+    async function getAssetData(symbol) {
+        // Return from cache if available
+        if (currentPrices[symbol]) return { current_price: currentPrices[symbol].usd };
+        
+        // Otherwise fetch minimal data
+        try {
+            const asset = topAssets.find(a => a.symbol === symbol) || topAssets[0];
+            const response = await fetchWithRetry(`https://api.coingecko.com/api/v3/simple/price?ids=${asset.id}&vs_currencies=usd`);
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data[asset.id] && data[asset.id].usd) {
+                    currentPrices[asset.id] = { usd: data[asset.id].usd };
+                    if (symbol === 'btc') currentBTCPrice = data[asset.id].usd;
+                    return { current_price: data[asset.id].usd };
+                }
+            }
+        } catch (error) {
+            console.warn(`Could not fetch price for ${symbol}:`, error);
+        }
+        
+        return { current_price: currentBTCPrice };
+    }
+
+    // Start polling for balance updates (every 15 seconds for high traffic sites)
+    function startBalancePolling() {
+        setInterval(async () => {
+            const token = localStorage.getItem('jwtToken');
+            if (token) {
+                await fetchAndUpdateBalances();
+            }
+        }, 15000);
+    }
+
+    // =============================================
     // ASSET DATA FROM COINGECKO + BACKUP SOURCES (40 TOP ASSETS)
     // =============================================
     const topAssets = [
@@ -6554,15 +6752,6 @@
     ];
 
     // Global state
-    let currentPrices = {};
-    let currentBTCPrice = 43000;
-    let userBalances = { main: 0, matured: 0 };
-    let userPreferences = { displayAsset: 'btc' };
-    let apiRetryCount = 0;
-    const MAX_RETRIES = 5;
-    const RETRY_DELAY = 30000;
-
-    // Market data state
     let marketPage = 1;
     const marketAssetsPerPage = 5;
     let allMarketAssets = [];
@@ -6982,7 +7171,7 @@
 
     async function fetchOrderBook(symbol) {
         try {
-            const response = await fetch(`https://bithash-backend.onrender.com/api/market/orderbook/${symbol}`);
+            const response = await fetchWithRetry(`https://bithash-backend.onrender.com/api/market/orderbook/${symbol}`);
             
             if (response.ok) {
                 const data = await response.json();
@@ -7043,7 +7232,7 @@
 
     async function fetchRecentTrades(symbol) {
         try {
-            const response = await fetch(`https://bithash-backend.onrender.com/api/market/trades/${symbol}?limit=20`);
+            const response = await fetchWithRetry(`https://bithash-backend.onrender.com/api/market/trades/${symbol}?limit=20`);
             
             if (response.ok) {
                 const data = await response.json();
@@ -7115,7 +7304,7 @@
         if (!token) return;
         
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/trading/orders', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/trading/orders', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
@@ -7156,7 +7345,7 @@
         if (!token) return;
         
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/trading/history', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/trading/history', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
@@ -7199,7 +7388,7 @@
         if (!token) return;
         
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/trading/positions', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/trading/positions', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
@@ -7272,7 +7461,7 @@
         
         try {
             // Fetch balances if logged in
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/balances', {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             
@@ -7334,7 +7523,7 @@
         }
         
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/trading/orders', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/trading/orders', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -7430,7 +7619,7 @@
             
             document.getElementById('loan-balances-container').style.display = 'grid';
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/loans/balances', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/loans/balances', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -7530,6 +7719,9 @@
             
             // Set up amount input listener for order modal
             document.getElementById('order-amount').addEventListener('input', updateEstimatedAsset);
+            
+            // Start balance polling for high traffic reliability
+            startBalancePolling();
             
         }, 1000);
     });
@@ -7837,7 +8029,7 @@
 
     async function loadStatsData() {
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/stats');
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/stats');
             if (response.ok) {
                 const data = await response.json();
                 
@@ -7881,7 +8073,7 @@
                 </div>
             `;
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/btc-news');
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/btc-news');
             if (response.ok) {
                 const data = await response.json();
                 allNewsData = data.data || [];
@@ -8016,7 +8208,7 @@
                 return;
             }
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/me', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/me', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -8041,40 +8233,12 @@
         }
     }
 
-    async function fetchAndUpdateBalances() {
-        try {
-            const token = localStorage.getItem('jwtToken');
-            const userBalanceContainer = document.getElementById('user-balance-container');
-            
-            if (!token) {
-                if (userBalanceContainer) userBalanceContainer.style.display = 'none';
-                return;
-            }
-            
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
-                headers: {
-                    'Authorization': `Bearer ${token}`
-                }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                userBalances.main = data.data?.balances?.main || 0;
-                userBalances.matured = data.data?.balances?.matured || 0;
-                
-                if (userBalanceContainer) userBalanceContainer.style.display = 'block';
-            }
-        } catch (error) {
-            console.error('Error fetching balances:', error);
-        }
-    }
-
     async function loadPlansData() {
         try {
             const token = localStorage.getItem('jwtToken');
             const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
             
-            const plansResponse = await fetch('https://bithash-backend.onrender.com/api/plans', {
+            const plansResponse = await fetchWithRetry('https://bithash-backend.onrender.com/api/plans', {
                 headers: headers
             });
             
@@ -8089,7 +8253,7 @@
             
             if (token) {
                 try {
-                    const balanceResponse = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
+                    const balanceResponse = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/balances', {
                         headers: headers
                     });
                     
@@ -8510,7 +8674,7 @@
             const token = localStorage.getItem('jwtToken');
             if (!token) return;
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/balances', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -8666,7 +8830,7 @@
                 return false;
             }
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/users/balances', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -8708,7 +8872,7 @@
             statusElement.style.color = 'var(--primary)';
             confirmBtn.disabled = true;
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/investments', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/investments', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -8923,7 +9087,7 @@
             document.getElementById('loan-limit-display').style.display = 'none';
             document.getElementById('not-eligible-button').style.display = 'none';
             
-            const eligibilityResponse = await fetch('https://bithash-backend.onrender.com/api/loans/check-eligibility', {
+            const eligibilityResponse = await fetchWithRetry('https://bithash-backend.onrender.com/api/loans/check-eligibility', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -9074,7 +9238,7 @@
             submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
             if (statusElement) statusElement.textContent = 'Submitting your loan application...';
             
-            const response = await fetch('https://bithash-backend.onrender.com/api/loans/apply', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/loans/apply', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -9152,7 +9316,7 @@
         }
         
         try {
-            const response = await fetch(url, {
+            const response = await fetchWithRetry(url, {
                 ...options,
                 headers
             });
@@ -9173,7 +9337,7 @@
         if (!token) return;
         
         try {
-            const response = await fetch('https://bithash-backend.onrender.com/api/investments/active', {
+            const response = await fetchWithRetry('https://bithash-backend.onrender.com/api/investments/active', {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -9204,7 +9368,7 @@
         if (!token) return;
         
         try {
-            const response = await fetch(`https://bithash-backend.onrender.com/api/investments/${investmentId}/complete`, {
+            const response = await fetchWithRetry(`https://bithash-backend.onrender.com/api/investments/${investmentId}/complete`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`
