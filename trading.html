@@ -1683,7 +1683,10 @@
             // Pagination
             ASSETS_PER_PAGE: 10,
             ORDERS_PER_PAGE: 10,
-            TRADES_PER_PAGE: 10
+            TRADES_PER_PAGE: 10,
+            
+            // Minimum trading amount
+            MIN_TRADE_AMOUNT_USD: 20
         };
 
         // =============================================
@@ -1779,10 +1782,14 @@
         let currentTimeframe = '15';
         let currentChartTab = 'chart';
         
+        // Flag to prevent multiple simultaneous order submissions
+        let isOrderProcessing = false;
+        
         // Interval IDs for cleanup
         let orderBookInterval = null;
         let priceInterval = null;
         let tradesInterval = null;
+        let userTradesInterval = null;
 
         // =============================================
         // SAFE DOM ELEMENT GETTER WITH ERROR HANDLING
@@ -2059,6 +2066,14 @@
                     await fetchRecentTradesFromBinance();
                 }
             }, 500);
+            
+            // Fetch user trades every 2 seconds for real-time updates
+            if (userTradesInterval) clearInterval(userTradesInterval);
+            userTradesInterval = setInterval(async () => {
+                if (isAuthenticated) {
+                    await loadUserTrades();
+                }
+            }, 2000);
         }
 
         // =============================================
@@ -2671,6 +2686,12 @@
         }
 
         async function placeOrder() {
+            // Prevent multiple simultaneous order submissions
+            if (isOrderProcessing) {
+                showNotification('warning', 'Order Processing', 'Please wait for your previous order to complete');
+                return;
+            }
+
             if (!isAuthenticated) {
                 showAuthModal();
                 return;
@@ -2688,11 +2709,25 @@
                 return;
             }
 
+            // Check minimum trading amount ($20 worth)
+            if (total < CONFIG.MIN_TRADE_AMOUNT_USD) {
+                showNotification('error', 'Minimum Amount Required', `Minimum trade amount is $${CONFIG.MIN_TRADE_AMOUNT_USD} worth of ${currentBaseAsset}`);
+                return;
+            }
+
             const totalAvailable = userMainBalance + userMaturedBalance;
             
             if (currentOrderTab === 'buy' && total > totalAvailable) {
                 showNotification('error', 'Insufficient Balance', `You need ${formatUSD(total)} USDT to place this order`);
                 return;
+            }
+
+            // Set processing flag and disable button
+            isOrderProcessing = true;
+            const placeOrderBtn = safeGetElement('placeOrderBtn');
+            if (placeOrderBtn) {
+                placeOrderBtn.disabled = true;
+                placeOrderBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
             }
 
             const endpoint = currentOrderTab === 'buy' ? CONFIG.BUY_ENDPOINT : CONFIG.SELL_ENDPOINT;
@@ -2718,7 +2753,8 @@
 
                 if (response.ok) {
                     const data = await response.json();
-                    showNotification('success', 'Order Placed', `Your ${currentOrderTab} order has been placed`);
+                    // Green success popup
+                    showNotification('success', 'Order Placed Successfully', `Your ${currentOrderTab} order for ${formatNumber(amount)} ${currentBaseAsset} has been placed`);
                     
                     // Clear form
                     if (amountInput) amountInput.value = '';
@@ -2730,13 +2766,29 @@
                     
                     // Reload orders
                     await loadUserOrders();
+                    
+                    // Reload user trades
+                    await loadUserTrades();
                 } else {
                     const error = await response.json();
+                    // Red error popup
                     showNotification('error', 'Order Failed', error.message || 'Failed to place order');
                 }
             } catch (error) {
                 console.error('Order placement failed:', error);
+                // Red error popup
                 showNotification('error', 'Order Failed', 'Network error. Please try again.');
+            } finally {
+                // Reset processing flag and re-enable button
+                isOrderProcessing = false;
+                if (placeOrderBtn) {
+                    placeOrderBtn.disabled = false;
+                    if (currentOrderTab === 'buy') {
+                        placeOrderBtn.innerHTML = `Buy ${currentBaseAsset}`;
+                    } else {
+                        placeOrderBtn.innerHTML = `Sell ${currentBaseAsset}`;
+                    }
+                }
             }
         }
 
@@ -3275,6 +3327,9 @@
             }
             if (tradesInterval) {
                 clearInterval(tradesInterval);
+            }
+            if (userTradesInterval) {
+                clearInterval(userTradesInterval);
             }
         });
     </script>
