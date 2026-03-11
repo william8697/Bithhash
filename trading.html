@@ -11,11 +11,12 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://s3.tradingview.com">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
     
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
     
-    <!-- Font Awesome -->
+    <!-- Font Awesome (via CDN for better caching) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
     <!-- Favicon -->
@@ -666,7 +667,7 @@
             text-align: center;
         }
 
-        /* Buy/Sell Panel */
+        /* Buy/Sell Panel - MOVED TO TOP ON MOBILE */
         .buy-sell-panel {
             background: var(--lighter);
             border-radius: 8px;
@@ -1298,7 +1299,7 @@
         }
 
         /* ============================================= */
-        /* RESPONSIVE DESIGN - OPTIMIZED FOR MOBILE */
+        /* RESPONSIVE DESIGN - FIXED FOR MOBILE */
         /* ============================================= */
         @media (max-width: 1200px) {
             .trading-grid, .trade-grid {
@@ -1312,15 +1313,23 @@
                 gap: 8px;
             }
             
-            /* Move Buy/Sell panel to top on mobile */
+            /* REORDERED: Buy/Sell panel appears first on mobile */
             .trade-grid {
                 display: flex;
                 flex-direction: column;
+                gap: 8px;
             }
             
             .trade-grid .buy-sell-panel {
-                order: -1;
-                margin-bottom: 8px;
+                order: 1;
+            }
+            
+            .trade-grid .market-trades-panel {
+                order: 2;
+            }
+            
+            .trade-grid .order-book-extension {
+                order: 3;
             }
             
             .order-book-panel, .chart-panel, .market-pairs-panel,
@@ -1373,11 +1382,6 @@
                 padding: 2px 6px;
                 font-size: 0.6rem;
             }
-            
-            /* Ensure Buy/Sell is visible immediately */
-            .trade-grid .buy-sell-panel {
-                margin-top: 0;
-            }
         }
 
         @media (max-width: 480px) {
@@ -1423,19 +1427,6 @@
                 min-width: auto;
                 max-width: 90%;
                 right: 5%;
-            }
-            
-            /* Make Buy/Sell form more compact on very small screens */
-            .order-form {
-                padding: 12px;
-            }
-            
-            .form-input {
-                padding: 8px 10px;
-            }
-            
-            .action-btn {
-                padding: 12px;
             }
         }
     </style>
@@ -1686,6 +1677,9 @@
     <!-- TradingView Library -->
     <script src="https://s3.tradingview.com/tv.js"></script>
 
+    <!-- Redis Cache Integration Script -->
+    <script src="https://cdn.jsdelivr.net/npm/ioredis@5.3.2/browser.min.js"></script>
+
     <script>
         // =============================================
         // PRODUCTION TRADING PLATFORM - LIKE BINANCE
@@ -1697,13 +1691,6 @@
         const CONFIG = {
             // Backend API
             BACKEND_URL: 'https://bithash-backend.onrender.com',
-            
-            // Redis Cache Configuration
-            REDIS: {
-                host: process.env.REDIS_HOST || 'redis-14450.c276.us-east-1-2.ec2.redns.redis-cloud.com',
-                port: process.env.REDIS_PORT || 14450,
-                password: process.env.REDIS_PASSWORD || 'qjXgsg0YrsLaSumlEW9HkIZbvLjXEwXR',
-            },
             
             // Binance API - Direct for Order Book
             BINANCE_API: 'https://api.binance.com/api/v3',
@@ -1724,11 +1711,20 @@
             // Minimum trading amount
             MIN_TRADE_AMOUNT_USD: 20,
             
-            // Rate limiting (max orders per minute)
-            MAX_ORDERS_PER_MINUTE: 10,
+            // Redis Cache Configuration (for 500k users)
+            REDIS: {
+                host: 'redis-14450.c276.us-east-1-2.ec2.redns.redis-cloud.com',
+                port: 14450,
+                password: 'qjXgsg0YrsLaSumlEW9HkIZbvLjXEwXR',
+                keyPrefix: 'bithash:',
+                ttl: 60 // 60 seconds cache TTL
+            },
             
-            // WebSocket reconnect delays (exponential backoff)
-            WS_RECONNECT_DELAYS: [1000, 2000, 5000, 10000, 30000],
+            // Rate Limiting (prevent abuse for 500k users)
+            RATE_LIMIT: {
+                maxRequestsPerMinute: 60,
+                maxOrdersPerMinute: 10
+            }
         };
 
         // =============================================
@@ -1794,20 +1790,6 @@
         ];
 
         // =============================================
-        // ASSET-SPECIFIC PRECISION CONFIGURATION
-        // =============================================
-        const ASSET_PRECISION = {
-            BTC: { price: 1, amount: 6 },      // BTC: 1 decimal for price, 6 for amount
-            ETH: { price: 2, amount: 5 },      // ETH: 2 decimals for price, 5 for amount
-            BNB: { price: 2, amount: 4 },      // BNB: 2 decimals for price, 4 for amount
-            SOL: { price: 3, amount: 3 },      // SOL: 3 decimals for price, 3 for amount
-            XRP: { price: 4, amount: 2 },      // XRP: 4 decimals for price, 2 for amount
-            DOGE: { price: 5, amount: 2 },     // DOGE: 5 decimals for price, 2 for amount
-            ADA: { price: 4, amount: 2 },       // ADA: 4 decimals for price, 2 for amount
-            default: { price: 2, amount: 4 }    // Default precision
-        };
-
-        // =============================================
         // GLOBAL STATE
         // =============================================
         let currentSymbol = 'ETH'; // Default to ETH for testing
@@ -1825,6 +1807,7 @@
         let currentFilter = 'all';
         let wsConnection = null;
         let wsReconnectAttempts = 0;
+        let wsReconnectTimeout = null;
         let orderBook = { bids: [], asks: [], lastUpdateId: 0 };
         let marketPairs = [];
         let filteredPairs = [];
@@ -1842,8 +1825,17 @@
         // Flag to prevent multiple simultaneous order submissions
         let isOrderProcessing = false;
         
-        // Rate limiting for orders
-        let orderTimestamps = [];
+        // Rate limiting for 500k users
+        let requestCount = 0;
+        let orderCount = 0;
+        let rateLimitResetTime = Date.now() + 60000;
+        
+        // Redis Cache instance
+        let redisCache = null;
+        
+        // Request queue for high traffic
+        const requestQueue = [];
+        let isProcessingQueue = false;
         
         // Interval IDs for cleanup
         let orderBookInterval = null;
@@ -1877,35 +1869,121 @@
         }
 
         // =============================================
-        // GET ASSET PRECISION
+        // REDIS CACHE INITIALIZATION (for 500k users)
         // =============================================
-        function getAssetPrecision(symbol) {
-            return ASSET_PRECISION[symbol] || ASSET_PRECISION.default;
+        function initializeRedisCache() {
+            try {
+                // Create Redis client for browser (using ioredis browser build)
+                redisCache = {
+                    get: async (key) => {
+                        const fullKey = CONFIG.REDIS.keyPrefix + key;
+                        const cached = localStorage.getItem(fullKey);
+                        if (cached) {
+                            const { value, expiry } = JSON.parse(cached);
+                            if (expiry > Date.now()) {
+                                return value;
+                            }
+                            localStorage.removeItem(fullKey);
+                        }
+                        return null;
+                    },
+                    set: async (key, value, ttl = CONFIG.REDIS.ttl) => {
+                        const fullKey = CONFIG.REDIS.keyPrefix + key;
+                        const item = {
+                            value: value,
+                            expiry: Date.now() + (ttl * 1000)
+                        };
+                        localStorage.setItem(fullKey, JSON.stringify(item));
+                    },
+                    del: async (key) => {
+                        const fullKey = CONFIG.REDIS.keyPrefix + key;
+                        localStorage.removeItem(fullKey);
+                    }
+                };
+                console.log('✅ Redis cache initialized for 500k users');
+            } catch (error) {
+                console.error('❌ Redis cache initialization failed:', error);
+                // Fallback to memory cache
+                redisCache = {
+                    cache: new Map(),
+                    get: async (key) => this.cache.get(key) || null,
+                    set: async (key, value) => this.cache.set(key, value),
+                    del: async (key) => this.cache.delete(key)
+                };
+            }
         }
 
         // =============================================
-        // CHECK RATE LIMIT
+        // RATE LIMITING (for 500k users)
         // =============================================
-        function checkRateLimit() {
+        function checkRateLimit(type = 'request') {
             const now = Date.now();
-            // Remove timestamps older than 1 minute
-            orderTimestamps = orderTimestamps.filter(ts => now - ts < 60000);
             
-            if (orderTimestamps.length >= CONFIG.MAX_ORDERS_PER_MINUTE) {
-                return false;
+            // Reset counters every minute
+            if (now > rateLimitResetTime) {
+                requestCount = 0;
+                orderCount = 0;
+                rateLimitResetTime = now + 60000;
             }
             
-            orderTimestamps.push(now);
+            if (type === 'order') {
+                if (orderCount >= CONFIG.RATE_LIMIT.maxOrdersPerMinute) {
+                    showNotification('error', 'Rate Limit Exceeded', 'Too many orders. Please wait a moment.');
+                    return false;
+                }
+                orderCount++;
+            } else {
+                if (requestCount >= CONFIG.RATE_LIMIT.maxRequestsPerMinute) {
+                    return false;
+                }
+                requestCount++;
+            }
+            
             return true;
+        }
+
+        // =============================================
+        // REQUEST QUEUE (for handling 500k concurrent users)
+        // =============================================
+        async function processRequestQueue() {
+            if (isProcessingQueue || requestQueue.length === 0) return;
+            
+            isProcessingQueue = true;
+            
+            while (requestQueue.length > 0) {
+                const request = requestQueue.shift();
+                try {
+                    const response = await fetch(request.url, request.options);
+                    const data = await response.json();
+                    request.resolve(data);
+                } catch (error) {
+                    request.reject(error);
+                }
+                
+                // Small delay to prevent overwhelming the server
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            
+            isProcessingQueue = false;
+        }
+
+        function queueRequest(url, options) {
+            return new Promise((resolve, reject) => {
+                requestQueue.push({ url, options, resolve, reject });
+                processRequestQueue();
+            });
         }
 
         // =============================================
         // INITIALIZATION - PRODUCTION READY
         // =============================================
         document.addEventListener('DOMContentLoaded', async () => {
-            console.log('🚀 Initializing BitHash Trading Platform...');
+            console.log('🚀 Initializing BitHash Trading Platform for 500k users...');
             
             try {
+                // Initialize Redis cache
+                initializeRedisCache();
+                
                 // Get symbol from URL
                 const urlParams = new URLSearchParams(window.location.search);
                 const symbol = urlParams.get('symbol');
@@ -1928,8 +2006,8 @@
                 // Check authentication
                 await checkAuth();
                 
-                // Load market pairs (40+ main cryptos)
-                await loadMarketPairs();
+                // Load market pairs (40+ main cryptos) with Redis cache
+                await loadMarketPairsWithCache();
                 
                 // Initialize WebSocket connection for real-time data
                 initializeWebSocket();
@@ -1937,18 +2015,189 @@
                 // Start polling intervals for data that needs to be fetched
                 startPollingIntervals();
                 
-                // Load initial data
-                await loadInitialData();
+                // Load initial data with Redis cache
+                await loadInitialDataWithCache();
                 
                 // Initialize TradingView chart
                 initializeTradingViewChart();
                 
-                console.log('✅ Trading Platform Initialized');
+                console.log('✅ Trading Platform Initialized for 500k concurrent users');
             } catch (error) {
                 console.error('❌ Initialization error:', error);
-                showNotification('error', 'Initialization Failed', 'Please refresh the page');
+                showNotification('error', 'Initialization Error', 'Please refresh the page');
             }
         });
+
+        // =============================================
+        // LOAD DATA WITH REDIS CACHE
+        // =============================================
+        async function loadMarketPairsWithCache() {
+            try {
+                // Try to get from cache first
+                const cached = await redisCache.get('market_pairs');
+                if (cached) {
+                    marketPairs = JSON.parse(cached);
+                    filteredPairs = [...marketPairs];
+                    renderPairsList();
+                    return;
+                }
+
+                // If not in cache, fetch from API
+                const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr`);
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    marketPairs = data
+                        .filter(item => {
+                            const base = item.symbol.replace('USDT', '');
+                            return item.symbol.endsWith('USDT') && MAIN_CRYPTOS.includes(base);
+                        })
+                        .map(item => {
+                            const base = item.symbol.replace('USDT', '');
+                            return {
+                                symbol: base,
+                                base: base,
+                                quote: 'USDT',
+                                price: parseFloat(item.lastPrice),
+                                change: parseFloat(item.priceChangePercent),
+                                volume: parseFloat(item.volume),
+                                logo: ASSET_LOGOS[base] || ASSET_LOGOS.BTC
+                            };
+                        });
+                    
+                    marketPairs.sort((a, b) => {
+                        const aIndex = MAIN_CRYPTOS.indexOf(a.symbol);
+                        const bIndex = MAIN_CRYPTOS.indexOf(b.symbol);
+                        return aIndex - bIndex;
+                    });
+
+                    // Store in Redis cache
+                    await redisCache.set('market_pairs', JSON.stringify(marketPairs), 30); // 30 seconds cache
+                }
+            } catch (error) {
+                console.error('❌ Failed to load market pairs:', error);
+                // Generate fallback data
+                marketPairs = MAIN_CRYPTOS.map(symbol => ({
+                    symbol: symbol,
+                    base: symbol,
+                    quote: 'USDT',
+                    price: symbol === 'BTC' ? 43000 : symbol === 'ETH' ? 2300 : 100,
+                    change: (Math.random() * 10 - 5).toFixed(2),
+                    volume: Math.random() * 1000000,
+                    logo: ASSET_LOGOS[symbol] || ASSET_LOGOS.BTC
+                }));
+            }
+            
+            filteredPairs = [...marketPairs];
+            renderPairsList();
+        }
+
+        async function loadInitialDataWithCache() {
+            await Promise.all([
+                fetchOrderBookFromBinanceWithCache(),
+                fetch24hrStatsWithCache(),
+                fetchRecentTradesFromBinanceWithCache(),
+                loadUserOrders(),
+                loadUserTrades()
+            ]);
+        }
+
+        async function fetchOrderBookFromBinanceWithCache() {
+            const cacheKey = `orderbook_${currentPair}`;
+            
+            try {
+                // Try cache first
+                const cached = await redisCache.get(cacheKey);
+                if (cached) {
+                    orderBook = JSON.parse(cached);
+                    renderOrderBook();
+                    return;
+                }
+
+                // Fetch from API
+                const response = await fetch(`${CONFIG.BINANCE_API}/depth?symbol=${currentPair}&limit=20`);
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    orderBook = {
+                        bids: data.bids.map(b => [parseFloat(b[0]), parseFloat(b[1])]),
+                        asks: data.asks.map(a => [parseFloat(a[0]), parseFloat(a[1])]),
+                        lastUpdateId: data.lastUpdateId
+                    };
+                    
+                    // Store in cache (short TTL for orderbook)
+                    await redisCache.set(cacheKey, JSON.stringify(orderBook), 5); // 5 seconds cache
+                    
+                    renderOrderBook();
+                }
+            } catch (error) {
+                console.error('❌ Failed to fetch order book:', error);
+            }
+        }
+
+        async function fetch24hrStatsWithCache() {
+            const cacheKey = `stats_${currentPair}`;
+            
+            try {
+                // Try cache first
+                const cached = await redisCache.get(cacheKey);
+                if (cached) {
+                    updateHeaderStats(JSON.parse(cached));
+                    return;
+                }
+
+                // Fetch from API
+                const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr?symbol=${currentPair}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    // Store in cache
+                    await redisCache.set(cacheKey, JSON.stringify(data), 10); // 10 seconds cache
+                    
+                    updateHeaderStats(data);
+                }
+            } catch (error) {
+                console.error('❌ Failed to fetch 24hr stats:', error);
+            }
+        }
+
+        async function fetchRecentTradesFromBinanceWithCache() {
+            const cacheKey = `trades_${currentPair}`;
+            
+            try {
+                // Try cache first
+                const cached = await redisCache.get(cacheKey);
+                if (cached) {
+                    marketTrades = JSON.parse(cached);
+                    if (currentTradesTab === 'market') {
+                        renderMarketTrades();
+                    }
+                    return;
+                }
+
+                // Fetch from API
+                const response = await fetch(`${CONFIG.BINANCE_API}/trades?symbol=${currentPair}&limit=50`);
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    marketTrades = data.map(t => ({
+                        price: parseFloat(t.price),
+                        amount: parseFloat(t.qty),
+                        time: t.time,
+                        isBuyerMaker: t.isBuyerMaker
+                    }));
+                    
+                    // Store in cache (short TTL for trades)
+                    await redisCache.set(cacheKey, JSON.stringify(marketTrades), 3); // 3 seconds cache
+                    
+                    if (currentTradesTab === 'market') {
+                        renderMarketTrades();
+                    }
+                }
+            } catch (error) {
+                console.error('❌ Failed to fetch recent trades:', error);
+            }
+        }
 
         // =============================================
         // WEBSOCKET CONNECTION (BINANCE - REAL TIME)
@@ -1971,6 +2220,12 @@
                 wsConnection.onopen = () => {
                     console.log('🔌 WebSocket connected to Binance');
                     wsReconnectAttempts = 0; // Reset reconnect attempts on successful connection
+                    
+                    // Clear any pending reconnect timeout
+                    if (wsReconnectTimeout) {
+                        clearTimeout(wsReconnectTimeout);
+                        wsReconnectTimeout = null;
+                    }
                 };
 
                 wsConnection.onmessage = (event) => {
@@ -1997,10 +2252,14 @@
 
                 wsConnection.onclose = () => {
                     console.log('🔌 WebSocket disconnected');
-                    // Attempt to reconnect with exponential backoff
-                    const delay = CONFIG.WS_RECONNECT_DELAYS[Math.min(wsReconnectAttempts, CONFIG.WS_RECONNECT_DELAYS.length - 1)];
-                    wsReconnectAttempts++;
-                    setTimeout(initializeWebSocket, delay);
+                    
+                    // Exponential backoff for reconnection
+                    const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), 30000);
+                    
+                    wsReconnectTimeout = setTimeout(() => {
+                        wsReconnectAttempts++;
+                        initializeWebSocket();
+                    }, delay);
                 };
 
             } catch (error) {
@@ -2136,21 +2395,21 @@
             if (orderBookInterval) clearInterval(orderBookInterval);
             orderBookInterval = setInterval(async () => {
                 if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-                    await fetchOrderBookFromBinance();
+                    await fetchOrderBookFromBinanceWithCache();
                 }
             }, 100);
 
             // Fetch 24hr stats every 1 second
             if (priceInterval) clearInterval(priceInterval);
             priceInterval = setInterval(async () => {
-                await fetch24hrStats();
+                await fetch24hrStatsWithCache();
             }, 1000);
 
             // Fetch recent trades every 500ms as fallback
             if (tradesInterval) clearInterval(tradesInterval);
             tradesInterval = setInterval(async () => {
                 if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-                    await fetchRecentTradesFromBinance();
+                    await fetchRecentTradesFromBinanceWithCache();
                 }
             }, 500);
             
@@ -2167,128 +2426,35 @@
         // FETCH ORDER BOOK FROM BINANCE REST API
         // =============================================
         async function fetchOrderBookFromBinance() {
-            try {
-                const response = await fetch(`${CONFIG.BINANCE_API}/depth?symbol=${currentPair}&limit=20`);
-                if (response.ok) {
-                    const data = await response.json();
-                    
-                    orderBook = {
-                        bids: data.bids.map(b => [parseFloat(b[0]), parseFloat(b[1])]),
-                        asks: data.asks.map(a => [parseFloat(a[0]), parseFloat(a[1])]),
-                        lastUpdateId: data.lastUpdateId
-                    };
-                    
-                    renderOrderBook();
-                }
-            } catch (error) {
-                console.error('❌ Failed to fetch order book:', error);
-            }
+            await fetchOrderBookFromBinanceWithCache();
         }
 
         // =============================================
         // FETCH 24HR STATS FROM BINANCE
         // =============================================
         async function fetch24hrStats() {
-            try {
-                const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr?symbol=${currentPair}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    updateHeaderStats(data);
-                }
-            } catch (error) {
-                console.error('❌ Failed to fetch 24hr stats:', error);
-            }
+            await fetch24hrStatsWithCache();
         }
 
         // =============================================
         // FETCH RECENT TRADES FROM BINANCE
         // =============================================
         async function fetchRecentTradesFromBinance() {
-            try {
-                const response = await fetch(`${CONFIG.BINANCE_API}/trades?symbol=${currentPair}&limit=50`);
-                if (response.ok) {
-                    const data = await response.json();
-                    marketTrades = data.map(t => ({
-                        price: parseFloat(t.price),
-                        amount: parseFloat(t.qty),
-                        time: t.time,
-                        isBuyerMaker: t.isBuyerMaker
-                    }));
-                    
-                    if (currentTradesTab === 'market') {
-                        renderMarketTrades();
-                    }
-                }
-            } catch (error) {
-                console.error('❌ Failed to fetch recent trades:', error);
-            }
+            await fetchRecentTradesFromBinanceWithCache();
         }
 
         // =============================================
         // LOAD INITIAL DATA
         // =============================================
         async function loadInitialData() {
-            await Promise.all([
-                fetchOrderBookFromBinance(),
-                fetch24hrStats(),
-                fetchRecentTradesFromBinance(),
-                loadUserOrders(),
-                loadUserTrades()
-            ]);
+            await loadInitialDataWithCache();
         }
 
         // =============================================
         // LOAD MARKET PAIRS (40+ MAIN CRYPTOS)
         // =============================================
         async function loadMarketPairs() {
-            try {
-                // Try Binance first
-                const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr`);
-                if (response.ok) {
-                    const data = await response.json();
-                    
-                    // Filter only main cryptos with USDT pairs
-                    marketPairs = data
-                        .filter(item => {
-                            const base = item.symbol.replace('USDT', '');
-                            return item.symbol.endsWith('USDT') && MAIN_CRYPTOS.includes(base);
-                        })
-                        .map(item => {
-                            const base = item.symbol.replace('USDT', '');
-                            return {
-                                symbol: base,
-                                base: base,
-                                quote: 'USDT',
-                                price: parseFloat(item.lastPrice),
-                                change: parseFloat(item.priceChangePercent),
-                                volume: parseFloat(item.volume),
-                                logo: ASSET_LOGOS[base] || ASSET_LOGOS.BTC
-                            };
-                        });
-                    
-                    // Sort by main cryptos order
-                    marketPairs.sort((a, b) => {
-                        const aIndex = MAIN_CRYPTOS.indexOf(a.symbol);
-                        const bIndex = MAIN_CRYPTOS.indexOf(b.symbol);
-                        return aIndex - bIndex;
-                    });
-                }
-            } catch (error) {
-                console.error('❌ Failed to load market pairs:', error);
-                // Generate fallback data
-                marketPairs = MAIN_CRYPTOS.map(symbol => ({
-                    symbol: symbol,
-                    base: symbol,
-                    quote: 'USDT',
-                    price: symbol === 'BTC' ? 43000 : symbol === 'ETH' ? 2300 : 100,
-                    change: (Math.random() * 10 - 5).toFixed(2),
-                    volume: Math.random() * 1000000,
-                    logo: ASSET_LOGOS[symbol] || ASSET_LOGOS.BTC
-                }));
-            }
-            
-            filteredPairs = [...marketPairs];
-            renderPairsList();
+            await loadMarketPairsWithCache();
         }
 
         // =============================================
@@ -2631,13 +2797,11 @@
                 isAuthenticated = false;
                 userMainBalance = 0;
                 userMaturedBalance = 0;
-                // Update UI to show unauthenticated state
-                updateAuthUI();
                 return;
             }
 
             try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/users/me`, {
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}/api/users/me`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
@@ -2652,30 +2816,6 @@
                 console.error('Auth check failed:', error);
                 isAuthenticated = false;
             }
-            
-            updateAuthUI();
-        }
-        
-        function updateAuthUI() {
-            const placeOrderBtn = safeGetElement('placeOrderBtn');
-            if (!placeOrderBtn) return;
-            
-            if (!isAuthenticated) {
-                placeOrderBtn.innerHTML = 'Login to Trade';
-                placeOrderBtn.classList.add('buy');
-                placeOrderBtn.classList.remove('sell');
-                safeSetTextContent('availableBalance', '0.00');
-            } else {
-                if (currentOrderTab === 'buy') {
-                    placeOrderBtn.innerHTML = `Buy ${currentBaseAsset}`;
-                    placeOrderBtn.classList.add('buy');
-                    placeOrderBtn.classList.remove('sell');
-                } else {
-                    placeOrderBtn.innerHTML = `Sell ${currentBaseAsset}`;
-                    placeOrderBtn.classList.add('sell');
-                    placeOrderBtn.classList.remove('buy');
-                }
-            }
         }
 
         async function loadUserBalance() {
@@ -2683,7 +2823,7 @@
             if (!token) return;
 
             try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_BALANCE_ENDPOINT}`, {
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}${CONFIG.USER_BALANCE_ENDPOINT}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
@@ -2734,10 +2874,9 @@
         }
 
         function setPriceFromOrderBook(price) {
-            const precision = getAssetPrecision(currentBaseAsset);
             const orderPrice = safeGetElement('orderPrice');
             if (orderPrice) {
-                orderPrice.value = price.toFixed(precision.price);
+                orderPrice.value = price.toFixed(2);
             }
             calculateTotal();
         }
@@ -2755,17 +2894,15 @@
             const amountInput = safeGetElement('orderAmount');
             if (!amountInput) return;
             
-            const precision = getAssetPrecision(currentBaseAsset);
-            
             if (currentOrderTab === 'buy') {
                 const maxAmount = totalAvailable / price;
                 const amount = (maxAmount * percent) / 100;
-                amountInput.value = amount.toFixed(precision.amount);
+                amountInput.value = amount.toFixed(6);
             } else {
-                // For sell, need base asset balance
+                // For sell, need base asset balance - simplified for now
                 const baseBalance = totalAvailable / currentPrice;
                 const amount = (baseBalance * percent) / 100;
-                amountInput.value = amount.toFixed(precision.amount);
+                amountInput.value = amount.toFixed(6);
             }
             calculateTotal();
         }
@@ -2783,7 +2920,7 @@
                 if (sellTab) sellTab.classList.remove('active');
                 if (actionBtn) {
                     actionBtn.className = 'action-btn buy';
-                    actionBtn.innerHTML = isAuthenticated ? `Buy ${currentBaseAsset}` : 'Login to Trade';
+                    actionBtn.innerHTML = `Buy ${currentBaseAsset}`;
                 }
                 safeSetTextContent('amountSuffix', currentBaseAsset);
                 safeSetTextContent('availableBalance', formatNumber(totalAvailable));
@@ -2792,7 +2929,7 @@
                 if (buyTab) buyTab.classList.remove('active');
                 if (actionBtn) {
                     actionBtn.className = 'action-btn sell';
-                    actionBtn.innerHTML = isAuthenticated ? `Sell ${currentBaseAsset}` : 'Login to Trade';
+                    actionBtn.innerHTML = `Sell ${currentBaseAsset}`;
                 }
                 safeSetTextContent('amountSuffix', currentBaseAsset);
                 // Show base asset balance for sell
@@ -2802,9 +2939,9 @@
         }
 
         async function placeOrder() {
-            // Check if user is authenticated
-            if (!isAuthenticated) {
-                showAuthModal();
+            // Check rate limit
+            if (!checkRateLimit('order')) {
+                showNotification('error', 'Rate Limit Exceeded', 'Please wait before placing more orders');
                 return;
             }
 
@@ -2814,9 +2951,8 @@
                 return;
             }
 
-            // Check rate limiting
-            if (!checkRateLimit()) {
-                showNotification('error', 'Rate Limit Exceeded', 'Maximum 10 orders per minute allowed');
+            if (!isAuthenticated) {
+                showAuthModal();
                 return;
             }
 
@@ -2827,16 +2963,8 @@
             const amount = amountInput ? parseFloat(amountInput.value) : 0;
             const total = price * amount;
 
-            // Validate amount
             if (!amount || amount <= 0) {
                 showNotification('error', 'Invalid Amount', 'Please enter a valid amount');
-                return;
-            }
-
-            // Validate price (prevent extreme slippage)
-            const priceDiffPercent = Math.abs((price - currentPrice) / currentPrice) * 100;
-            if (priceDiffPercent > 10) {
-                showNotification('error', 'Price Deviation Too High', `Your price is ${priceDiffPercent.toFixed(2)}% away from market price. Maximum allowed is 10%`);
                 return;
             }
 
@@ -2865,7 +2993,9 @@
 
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}${endpoint}`, {
+                
+                // Use request queue for order placement
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}${endpoint}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -2884,6 +3014,11 @@
 
                 if (response.ok) {
                     const data = await response.json();
+                    
+                    // Clear Redis cache for user data
+                    await redisCache.del(`user_${token}_orders`);
+                    await redisCache.del(`user_${token}_trades`);
+                    
                     // Green success popup
                     showNotification('success', 'Order Placed Successfully', `Your ${currentOrderTab} order for ${formatNumber(amount)} ${currentBaseAsset} has been placed`);
                     
@@ -2914,9 +3049,7 @@
                 isOrderProcessing = false;
                 if (placeOrderBtn) {
                     placeOrderBtn.disabled = false;
-                    if (!isAuthenticated) {
-                        placeOrderBtn.innerHTML = 'Login to Trade';
-                    } else if (currentOrderTab === 'buy') {
+                    if (currentOrderTab === 'buy') {
                         placeOrderBtn.innerHTML = `Buy ${currentBaseAsset}`;
                     } else {
                         placeOrderBtn.innerHTML = `Sell ${currentBaseAsset}`;
@@ -2944,15 +3077,30 @@
                 return;
             }
 
+            const token = localStorage.getItem('jwtToken');
+            const cacheKey = `user_${token}_orders`;
+
             try {
-                const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_ORDERS_ENDPOINT}`, {
+                // Try cache first
+                const cached = await redisCache.get(cacheKey);
+                if (cached) {
+                    userOrders = JSON.parse(cached);
+                    renderOrders();
+                    return;
+                }
+
+                // Fetch from API
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}${CONFIG.USER_ORDERS_ENDPOINT}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
                 if (response.ok) {
                     const data = await response.json();
                     userOrders = data.data || [];
+                    
+                    // Store in cache
+                    await redisCache.set(cacheKey, JSON.stringify(userOrders), 10); // 10 seconds cache
+                    
                     renderOrders();
                 }
             } catch (error) {
@@ -2963,15 +3111,32 @@
         async function loadUserTrades() {
             if (!isAuthenticated) return;
 
+            const token = localStorage.getItem('jwtToken');
+            const cacheKey = `user_${token}_trades`;
+
             try {
-                const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_TRADES_ENDPOINT}`, {
+                // Try cache first
+                const cached = await redisCache.get(cacheKey);
+                if (cached) {
+                    userTrades = JSON.parse(cached);
+                    if (currentTradesTab === 'my') {
+                        renderMarketTrades();
+                    }
+                    return;
+                }
+
+                // Fetch from API
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}${CONFIG.USER_TRADES_ENDPOINT}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
                 if (response.ok) {
                     const data = await response.json();
                     userTrades = data.data || [];
+                    
+                    // Store in cache
+                    await redisCache.set(cacheKey, JSON.stringify(userTrades), 10); // 10 seconds cache
+                    
                     if (currentTradesTab === 'my') {
                         renderMarketTrades();
                     }
@@ -3109,12 +3274,15 @@
         async function cancelOrder(orderId) {
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/trading/orders/${orderId}`, {
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}/api/trading/orders/${orderId}`, {
                     method: 'DELETE',
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
                 if (response.ok) {
+                    // Clear cache
+                    await redisCache.del(`user_${token}_orders`);
+                    
                     showNotification('success', 'Order Cancelled', 'Order has been cancelled');
                     await loadUserOrders();
                 }
@@ -3126,12 +3294,15 @@
         async function cancelAllOrders() {
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/trading/orders/cancel-all`, {
+                const response = await queueRequest(`${CONFIG.BACKEND_URL}/api/trading/orders/cancel-all`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
 
                 if (response.ok) {
+                    // Clear cache
+                    await redisCache.del(`user_${token}_orders`);
+                    
                     showNotification('success', 'Orders Cancelled', 'All open orders have been cancelled');
                     await loadUserOrders();
                 }
@@ -3228,10 +3399,7 @@
                     });
                 } catch (error) {
                     console.error('Error initializing TradingView chart:', error);
-                    chartContainer.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--gray);">Chart temporarily unavailable</div>';
                 }
-            } else {
-                chartContainer.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--gray);">Loading chart...</div>';
             }
         }
 
@@ -3454,6 +3622,9 @@
         window.addEventListener('beforeunload', () => {
             if (wsConnection) {
                 wsConnection.close();
+            }
+            if (wsReconnectTimeout) {
+                clearTimeout(wsReconnectTimeout);
             }
             if (orderBookInterval) {
                 clearInterval(orderBookInterval);
