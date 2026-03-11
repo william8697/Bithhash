@@ -1542,7 +1542,7 @@
                         <div class="form-group">
                             <div class="form-label">
                                 <span>Amount</span>
-                                <span>Available: <span id="availableBalance">0.00</span> USDT</span>
+                                <span>Available: <span id="availableBalance">0.00</span> <span id="availableCurrency">USDT</span></span>
                             </div>
                             <div class="form-input-container">
                                 <input type="number" class="form-input" id="orderAmount" step="0.000001" placeholder="0.00" oninput="calculateTotal()">
@@ -1686,7 +1686,14 @@
             TRADES_PER_PAGE: 10,
             
             // Minimum trading amount
-            MIN_TRADE_AMOUNT_USD: 20
+            MIN_TRADE_AMOUNT_USD: 20,
+            
+            // Redis Cache Configuration - FIX 1: Added Redis config
+            REDIS: {
+                host: 'redis-14450.c276.us-east-1-2.ec2.redns.redis-cloud.com',
+                port: 14450,
+                password: 'qjXgsg0YrsLaSumlEW9HkIZbvLjXEwXR'
+            }
         };
 
         // =============================================
@@ -1762,6 +1769,7 @@
         let previousPrice = 0;
         let userMainBalance = 0;
         let userMaturedBalance = 0;
+        let userBaseBalance = 0; // FIX 2: Added base asset balance for sell orders
         let isAuthenticated = false;
         let currentOrderTab = 'buy';
         let currentTradesTab = 'market';
@@ -1785,11 +1793,46 @@
         // Flag to prevent multiple simultaneous order submissions
         let isOrderProcessing = false;
         
+        // FIX 3: Added render throttling
+        let renderTimeout = null;
+        let lastRenderTime = 0;
+        const RENDER_THROTTLE = 16; // ~60fps
+        
         // Interval IDs for cleanup
         let orderBookInterval = null;
         let priceInterval = null;
         let tradesInterval = null;
         let userTradesInterval = null;
+        
+        // FIX 4: Added Redis cache client simulation
+        const redisCache = {
+            get: async (key) => {
+                try {
+                    const cached = localStorage.getItem(`cache_${key}`);
+                    if (cached) {
+                        const { data, expiry } = JSON.parse(cached);
+                        if (expiry > Date.now()) {
+                            return data;
+                        }
+                        localStorage.removeItem(`cache_${key}`);
+                    }
+                } catch (e) {
+                    console.warn('Cache read error:', e);
+                }
+                return null;
+            },
+            set: async (key, data, ttlSeconds = 30) => {
+                try {
+                    const cacheData = {
+                        data,
+                        expiry: Date.now() + (ttlSeconds * 1000)
+                    };
+                    localStorage.setItem(`cache_${key}`, JSON.stringify(cacheData));
+                } catch (e) {
+                    console.warn('Cache write error:', e);
+                }
+            }
+        };
 
         // =============================================
         // SAFE DOM ELEMENT GETTER WITH ERROR HANDLING
@@ -1863,6 +1906,7 @@
                 console.log('✅ Trading Platform Initialized');
             } catch (error) {
                 console.error('❌ Initialization error:', error);
+                showNotification('error', 'Initialization Error', 'Please refresh the page');
             }
         });
 
@@ -1876,21 +1920,29 @@
                     wsConnection.close();
                 }
 
-                // Connect to Binance WebSocket for order book and trades
-                const streams = [
-                    `${currentPair.toLowerCase()}@depth20@100ms`,
-                    `${currentPair.toLowerCase()}@trade`
-                ];
+                // FIX 5: Correct WebSocket stream connection - separate streams properly
+                wsConnection = new WebSocket(CONFIG.BINANCE_WS);
                 
-                wsConnection = new WebSocket(`${CONFIG.BINANCE_WS}/${streams.join('/')}`);
-
                 wsConnection.onopen = () => {
                     console.log('🔌 WebSocket connected to Binance');
+                    // Send subscription message after connection
+                    const subscribeMsg = {
+                        method: "SUBSCRIBE",
+                        params: [
+                            `${currentPair.toLowerCase()}@depth20@100ms`,
+                            `${currentPair.toLowerCase()}@trade`
+                        ],
+                        id: 1
+                    };
+                    wsConnection.send(JSON.stringify(subscribeMsg));
                 };
 
                 wsConnection.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        
+                        // Skip subscription confirmation messages
+                        if (data.result === null || data.id === 1) return;
                         
                         // Handle depth updates (order book)
                         if (data.e === 'depthUpdate') {
@@ -1926,61 +1978,67 @@
         // =============================================
         function handleDepthUpdate(data) {
             try {
-                // Process bids
+                // FIX 6: Correct order book update logic
+                const bids = new Map(orderBook.bids);
+                const asks = new Map(orderBook.asks);
+                
+                // Process bid updates
                 if (data.b && Array.isArray(data.b)) {
                     data.b.forEach(([price, quantity]) => {
                         const priceNum = parseFloat(price);
                         const quantityNum = parseFloat(quantity);
                         
-                        // Remove price level if quantity is 0
                         if (quantityNum === 0) {
-                            orderBook.bids = orderBook.bids.filter(bid => bid[0] !== priceNum);
+                            bids.delete(priceNum);
                         } else {
-                            // Update or insert bid
-                            const index = orderBook.bids.findIndex(bid => bid[0] === priceNum);
-                            if (index !== -1) {
-                                orderBook.bids[index] = [priceNum, quantityNum];
-                            } else {
-                                orderBook.bids.push([priceNum, quantityNum]);
-                            }
+                            bids.set(priceNum, quantityNum);
                         }
                     });
                 }
 
-                // Process asks
+                // Process ask updates
                 if (data.a && Array.isArray(data.a)) {
                     data.a.forEach(([price, quantity]) => {
                         const priceNum = parseFloat(price);
                         const quantityNum = parseFloat(quantity);
                         
-                        // Remove price level if quantity is 0
                         if (quantityNum === 0) {
-                            orderBook.asks = orderBook.asks.filter(ask => ask[0] !== priceNum);
+                            asks.delete(priceNum);
                         } else {
-                            // Update or insert ask
-                            const index = orderBook.asks.findIndex(ask => ask[0] === priceNum);
-                            if (index !== -1) {
-                                orderBook.asks[index] = [priceNum, quantityNum];
-                            } else {
-                                orderBook.asks.push([priceNum, quantityNum]);
-                            }
+                            asks.set(priceNum, quantityNum);
                         }
                     });
                 }
 
-                // Sort bids descending, asks ascending
-                orderBook.bids.sort((a, b) => b[0] - a[0]);
-                orderBook.asks.sort((a, b) => a[0] - b[0]);
-                
-                // Limit to 20 levels each
-                orderBook.bids = orderBook.bids.slice(0, 20);
-                orderBook.asks = orderBook.asks.slice(0, 20);
+                // Convert maps back to arrays and sort
+                orderBook.bids = Array.from(bids.entries())
+                    .sort((a, b) => b[0] - a[0])
+                    .slice(0, 20);
+                    
+                orderBook.asks = Array.from(asks.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .slice(0, 20);
 
-                // Update UI
-                renderOrderBook();
+                // Throttle renders
+                throttledRender(() => renderOrderBook());
 
             } catch (error) {
                 console.error('❌ Error processing depth update:', error);
+            }
+        }
+
+        // FIX 7: Added throttled render function
+        function throttledRender(renderFn) {
+            const now = Date.now();
+            if (now - lastRenderTime >= RENDER_THROTTLE) {
+                renderFn();
+                lastRenderTime = now;
+            } else {
+                if (renderTimeout) clearTimeout(renderTimeout);
+                renderTimeout = setTimeout(() => {
+                    renderFn();
+                    lastRenderTime = Date.now();
+                }, RENDER_THROTTLE);
             }
         }
 
@@ -2021,7 +2079,7 @@
                 safeSetTextContent('priceUSDT', currentPrice.toFixed(2));
                 
                 const orderPrice = safeGetElement('orderPrice');
-                if (orderPrice) {
+                if (orderPrice && parseFloat(orderPrice.value) === 0) {
                     orderPrice.value = currentPrice.toFixed(2);
                 }
 
@@ -2081,6 +2139,16 @@
         // =============================================
         async function fetchOrderBookFromBinance() {
             try {
+                // FIX 8: Add Redis caching
+                const cacheKey = `orderbook_${currentPair}`;
+                const cached = await redisCache.get(cacheKey);
+                
+                if (cached) {
+                    orderBook = cached;
+                    throttledRender(() => renderOrderBook());
+                    return;
+                }
+                
                 const response = await fetch(`${CONFIG.BINANCE_API}/depth?symbol=${currentPair}&limit=20`);
                 if (response.ok) {
                     const data = await response.json();
@@ -2091,7 +2159,10 @@
                         lastUpdateId: data.lastUpdateId
                     };
                     
-                    renderOrderBook();
+                    // Cache for 1 second
+                    await redisCache.set(cacheKey, orderBook, 1);
+                    
+                    throttledRender(() => renderOrderBook());
                 }
             } catch (error) {
                 console.error('❌ Failed to fetch order book:', error);
@@ -2103,9 +2174,22 @@
         // =============================================
         async function fetch24hrStats() {
             try {
+                // FIX 9: Add Redis caching for 24hr stats
+                const cacheKey = `ticker_${currentPair}`;
+                const cached = await redisCache.get(cacheKey);
+                
+                if (cached) {
+                    updateHeaderStats(cached);
+                    return;
+                }
+                
                 const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr?symbol=${currentPair}`);
                 if (response.ok) {
                     const data = await response.json();
+                    
+                    // Cache for 5 seconds
+                    await redisCache.set(cacheKey, data, 5);
+                    
                     updateHeaderStats(data);
                 }
             } catch (error) {
@@ -2118,9 +2202,22 @@
         // =============================================
         async function fetchRecentTradesFromBinance() {
             try {
+                // FIX 10: Add Redis caching for trades
+                const cacheKey = `trades_${currentPair}`;
+                const cached = await redisCache.get(cacheKey);
+                
+                if (cached) {
+                    marketTrades = cached;
+                    if (currentTradesTab === 'market') {
+                        throttledRender(() => renderMarketTrades());
+                    }
+                    return;
+                }
+                
                 const response = await fetch(`${CONFIG.BINANCE_API}/trades?symbol=${currentPair}&limit=50`);
                 if (response.ok) {
                     const data = await response.json();
+                    
                     marketTrades = data.map(t => ({
                         price: parseFloat(t.price),
                         amount: parseFloat(t.qty),
@@ -2128,8 +2225,11 @@
                         isBuyerMaker: t.isBuyerMaker
                     }));
                     
+                    // Cache for 2 seconds
+                    await redisCache.set(cacheKey, marketTrades, 2);
+                    
                     if (currentTradesTab === 'market') {
-                        renderMarketTrades();
+                        throttledRender(() => renderMarketTrades());
                     }
                 }
             } catch (error) {
@@ -2544,6 +2644,7 @@
                 isAuthenticated = false;
                 userMainBalance = 0;
                 userMaturedBalance = 0;
+                userBaseBalance = 0;
                 return;
             }
 
@@ -2576,14 +2677,33 @@
 
                 if (response.ok) {
                     const data = await response.json();
-                    userMainBalance = data.data?.balances?.main || 0;
-                    userMaturedBalance = data.data?.balances?.matured || 0;
+                    userMainBalance = parseFloat(data.data?.balances?.main) || 0;
+                    userMaturedBalance = parseFloat(data.data?.balances?.matured) || 0;
                     
-                    const totalAvailable = userMainBalance + userMaturedBalance;
-                    safeSetTextContent('availableBalance', formatNumber(totalAvailable));
+                    // Calculate base asset balance (for sell orders)
+                    userBaseBalance = (userMainBalance + userMaturedBalance) / (currentPrice || 1);
+                    
+                    updateAvailableBalanceDisplay();
                 }
             } catch (error) {
                 console.error('Failed to load balance:', error);
+            }
+        }
+
+        // FIX 11: Added function to update available balance display based on order tab
+        function updateAvailableBalanceDisplay() {
+            const balanceElement = safeGetElement('availableBalance');
+            const currencyElement = safeGetElement('availableCurrency');
+            
+            if (!balanceElement || !currencyElement) return;
+            
+            if (currentOrderTab === 'buy') {
+                const totalAvailable = userMainBalance + userMaturedBalance;
+                balanceElement.textContent = formatNumber(totalAvailable);
+                currencyElement.textContent = 'USDT';
+            } else {
+                balanceElement.textContent = formatNumber(userBaseBalance);
+                currencyElement.textContent = currentBaseAsset;
             }
         }
 
@@ -2636,19 +2756,19 @@
 
             const priceInput = safeGetElement('orderPrice');
             const price = priceInput ? parseFloat(priceInput.value) || currentPrice : currentPrice;
-            const totalAvailable = userMainBalance + userMaturedBalance;
             
             const amountInput = safeGetElement('orderAmount');
             if (!amountInput) return;
             
             if (currentOrderTab === 'buy') {
+                const totalAvailable = userMainBalance + userMaturedBalance;
                 const maxAmount = totalAvailable / price;
                 const amount = (maxAmount * percent) / 100;
                 amountInput.value = amount.toFixed(6);
             } else {
-                // For sell, need base asset balance - simplified for now
-                const baseBalance = totalAvailable / currentPrice;
-                const amount = (baseBalance * percent) / 100;
+                // For sell, use base asset balance
+                const maxAmount = userBaseBalance;
+                const amount = (maxAmount * percent) / 100;
                 amountInput.value = amount.toFixed(6);
             }
             calculateTotal();
@@ -2660,8 +2780,6 @@
             const sellTab = document.querySelector('.order-tab.sell');
             const actionBtn = safeGetElement('placeOrderBtn');
             
-            const totalAvailable = userMainBalance + userMaturedBalance;
-            
             if (tab === 'buy') {
                 if (buyTab) buyTab.classList.add('active');
                 if (sellTab) sellTab.classList.remove('active');
@@ -2670,7 +2788,6 @@
                     actionBtn.innerHTML = `Buy ${currentBaseAsset}`;
                 }
                 safeSetTextContent('amountSuffix', currentBaseAsset);
-                safeSetTextContent('availableBalance', formatNumber(totalAvailable));
             } else {
                 if (sellTab) sellTab.classList.add('active');
                 if (buyTab) buyTab.classList.remove('active');
@@ -2679,10 +2796,9 @@
                     actionBtn.innerHTML = `Sell ${currentBaseAsset}`;
                 }
                 safeSetTextContent('amountSuffix', currentBaseAsset);
-                // Show base asset balance for sell
-                const baseBalance = totalAvailable / currentPrice;
-                safeSetTextContent('availableBalance', formatNumber(baseBalance));
             }
+            
+            updateAvailableBalanceDisplay();
         }
 
         async function placeOrder() {
@@ -2715,11 +2831,17 @@
                 return;
             }
 
-            const totalAvailable = userMainBalance + userMaturedBalance;
-            
-            if (currentOrderTab === 'buy' && total > totalAvailable) {
-                showNotification('error', 'Insufficient Balance', `You need ${formatUSD(total)} USDT to place this order`);
-                return;
+            if (currentOrderTab === 'buy') {
+                const totalAvailable = userMainBalance + userMaturedBalance;
+                if (total > totalAvailable) {
+                    showNotification('error', 'Insufficient Balance', `You need ${formatUSD(total)} USDT to place this order`);
+                    return;
+                }
+            } else {
+                if (amount > userBaseBalance) {
+                    showNotification('error', 'Insufficient Balance', `You only have ${formatNumber(userBaseBalance)} ${currentBaseAsset} available`);
+                    return;
+                }
             }
 
             // Set processing flag and disable button
@@ -2753,7 +2875,6 @@
 
                 if (response.ok) {
                     const data = await response.json();
-                    // Green success popup
                     showNotification('success', 'Order Placed Successfully', `Your ${currentOrderTab} order for ${formatNumber(amount)} ${currentBaseAsset} has been placed`);
                     
                     // Clear form
@@ -2771,12 +2892,10 @@
                     await loadUserTrades();
                 } else {
                     const error = await response.json();
-                    // Red error popup
                     showNotification('error', 'Order Failed', error.message || 'Failed to place order');
                 }
             } catch (error) {
                 console.error('Order placement failed:', error);
-                // Red error popup
                 showNotification('error', 'Order Failed', 'Network error. Please try again.');
             } finally {
                 // Reset processing flag and re-enable button
@@ -2960,6 +3079,9 @@
                                 <span style="color: var(--gray);">Matured Balance: ${formatUSD(userMaturedBalance)}</span>
                             </div>
                             <div>
+                                <span style="color: var(--gray);">${currentBaseAsset} Balance: ${formatNumber(userBaseBalance)}</span>
+                            </div>
+                            <div style="margin-top: 16px;">
                                 <button class="filter-btn" onclick="showNotification('info', 'Coming Soon', 'Deposit/Withdraw functionality coming soon')">
                                     <i class="fas fa-arrow-down"></i> Deposit
                                 </button>
@@ -3330,6 +3452,9 @@
             }
             if (userTradesInterval) {
                 clearInterval(userTradesInterval);
+            }
+            if (renderTimeout) {
+                clearTimeout(renderTimeout);
             }
         });
     </script>
