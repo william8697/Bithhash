@@ -639,7 +639,8 @@
         }
 
         /* ============================================= */
-        /* TRADE INTERACTION GRID - MODIFIED FOR MOBILE */
+        /* TRADE INTERACTION GRID - REORGANIZED FOR MOBILE */
+        /* Buy/Sell panel appears first on mobile */
         /* ============================================= */
         .trade-grid {
             display: grid;
@@ -666,7 +667,7 @@
             text-align: center;
         }
 
-        /* Buy/Sell Panel */
+        /* Buy/Sell Panel - Will appear first on mobile */
         .buy-sell-panel {
             background: var(--lighter);
             border-radius: 8px;
@@ -1299,6 +1300,7 @@
 
         /* ============================================= */
         /* RESPONSIVE DESIGN - OPTIMIZED FOR MOBILE */
+        /* Buy/Sell panel appears first on mobile */
         /* ============================================= */
         @media (max-width: 1200px) {
             .trading-grid, .trade-grid {
@@ -1339,7 +1341,15 @@
             
             /* Buy/Sell panel appears first on mobile */
             .buy-sell-panel {
-                order: -1;
+                order: 1;
+            }
+            
+            .order-book-extension {
+                order: 2;
+            }
+            
+            .market-trades-panel {
+                order: 3;
             }
         }
 
@@ -1426,10 +1436,6 @@
             }
             
             /* Ensure buy/sell is immediately visible at the top */
-            .trade-grid {
-                margin-top: 0;
-            }
-            
             .buy-sell-panel {
                 margin-top: 0;
             }
@@ -1720,7 +1726,7 @@
             ORDERS_PER_PAGE: 10,
             TRADES_PER_PAGE: 10,
             
-            // Minimum trading amount (in USD)
+            // Minimum trading amount
             MIN_TRADE_AMOUNT_USD: 20
         };
 
@@ -1836,7 +1842,7 @@
         // =============================================
         // GLOBAL STATE
         // =============================================
-        let currentSymbol = 'ETH';
+        let currentSymbol = 'ETH'; // Default to ETH for testing
         let currentPair = 'ETHUSDT';
         let currentBaseAsset = 'ETH';
         let currentQuoteAsset = 'USDT';
@@ -1844,7 +1850,7 @@
         let previousPrice = 0;
         let userMainBalance = 0;
         let userMaturedBalance = 0;
-        let userBaseBalance = 0;
+        let userBaseBalance = 0; // Balance of the base asset (e.g., ETH)
         let isAuthenticated = false;
         let currentOrderTab = 'buy';
         let currentTradesTab = 'market';
@@ -1905,35 +1911,35 @@
         }
 
         // =============================================
-        // REDIS CACHE INITIALIZATION
+        // REDIS CACHE INITIALIZATION - FIXED
         // =============================================
         async function initializeRedis() {
             try {
                 console.log('📦 Initializing Redis cache...');
                 
+                // For browser environment, we'll use a simple in-memory cache as fallback
+                // In production, Redis would be accessed via backend API
                 const cache = {
+                    cache: {},
                     set: (key, value, ttl = 300) => {
                         try {
-                            const item = {
+                            cache.cache[key] = {
                                 value: value,
                                 expiry: Date.now() + (ttl * 1000)
                             };
-                            localStorage.setItem(`redis_cache_${key}`, JSON.stringify(item));
                         } catch (e) {
                             console.warn('Redis cache set failed:', e);
                         }
                     },
                     get: (key) => {
                         try {
-                            const item = localStorage.getItem(`redis_cache_${key}`);
+                            const item = cache.cache[key];
                             if (!item) return null;
-                            
-                            const parsed = JSON.parse(item);
-                            if (Date.now() > parsed.expiry) {
-                                localStorage.removeItem(`redis_cache_${key}`);
+                            if (Date.now() > item.expiry) {
+                                delete cache.cache[key];
                                 return null;
                             }
-                            return parsed.value;
+                            return item.value;
                         } catch (e) {
                             return null;
                         }
@@ -1944,6 +1950,7 @@
                 console.log('✅ Redis cache initialized');
             } catch (error) {
                 console.error('❌ Redis initialization failed:', error);
+                // Fallback to simple object cache
                 redisClient = {
                     cache: {},
                     set: (key, value, ttl = 300) => {
@@ -1972,8 +1979,10 @@
             console.log('🚀 Initializing BitHash Trading Platform...');
             
             try {
+                // Initialize Redis cache
                 await initializeRedis();
                 
+                // Get symbol from URL
                 const urlParams = new URLSearchParams(window.location.search);
                 const symbol = urlParams.get('symbol');
                 if (symbol && MAIN_CRYPTOS.includes(symbol.toUpperCase())) {
@@ -1982,6 +1991,7 @@
                     currentPair = `${currentSymbol}USDT`;
                 }
 
+                // Update UI with current symbol
                 safeSetTextContent('orderBookBase', currentBaseAsset);
                 safeSetTextContent('amountSuffix', currentBaseAsset);
                 safeSetTextContent('tradeAmountBase', currentBaseAsset);
@@ -1993,11 +2003,22 @@
                     actionBtn.innerHTML = `Buy ${currentBaseAsset}`;
                 }
 
+                // Check authentication
                 await checkAuth();
+                
+                // Load market pairs (40+ main cryptos)
                 await loadMarketPairs();
+                
+                // Initialize WebSocket connection for real-time data
                 initializeWebSocket();
+                
+                // Start polling intervals for data that needs to be fetched
                 startPollingIntervals();
+                
+                // Load initial data
                 await loadInitialData();
+                
+                // Initialize TradingView chart
                 initializeTradingViewChart();
                 
                 console.log('✅ Trading Platform Initialized');
@@ -2011,10 +2032,12 @@
         // =============================================
         function initializeWebSocket() {
             try {
+                // Close existing connection
                 if (wsConnection) {
                     wsConnection.close();
                 }
 
+                // Connect to Binance WebSocket for order book and trades
                 const streams = [
                     `${currentPair.toLowerCase()}@depth20@100ms`,
                     `${currentPair.toLowerCase()}@trade`
@@ -2031,10 +2054,12 @@
                     try {
                         const data = JSON.parse(event.data);
                         
+                        // Handle depth updates (order book)
                         if (data.e === 'depthUpdate') {
                             handleDepthUpdate(data);
                         }
                         
+                        // Handle trade updates
                         if (data.e === 'trade') {
                             handleNewTrade(data);
                         }
@@ -2049,6 +2074,7 @@
 
                 wsConnection.onclose = () => {
                     console.log('🔌 WebSocket disconnected');
+                    // Attempt to reconnect with exponential backoff
                     if (wsReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                         const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), 30000);
                         wsReconnectAttempts++;
@@ -2066,14 +2092,17 @@
         // =============================================
         function handleDepthUpdate(data) {
             try {
+                // Process bids
                 if (data.b && Array.isArray(data.b)) {
                     data.b.forEach(([price, quantity]) => {
                         const priceNum = parseFloat(price);
                         const quantityNum = parseFloat(quantity);
                         
+                        // Remove price level if quantity is 0
                         if (quantityNum === 0) {
                             orderBook.bids = orderBook.bids.filter(bid => bid[0] !== priceNum);
                         } else {
+                            // Update or insert bid
                             const index = orderBook.bids.findIndex(bid => bid[0] === priceNum);
                             if (index !== -1) {
                                 orderBook.bids[index] = [priceNum, quantityNum];
@@ -2084,14 +2113,17 @@
                     });
                 }
 
+                // Process asks
                 if (data.a && Array.isArray(data.a)) {
                     data.a.forEach(([price, quantity]) => {
                         const priceNum = parseFloat(price);
                         const quantityNum = parseFloat(quantity);
                         
+                        // Remove price level if quantity is 0
                         if (quantityNum === 0) {
                             orderBook.asks = orderBook.asks.filter(ask => ask[0] !== priceNum);
                         } else {
+                            // Update or insert ask
                             const index = orderBook.asks.findIndex(ask => ask[0] === priceNum);
                             if (index !== -1) {
                                 orderBook.asks[index] = [priceNum, quantityNum];
@@ -2102,12 +2134,15 @@
                     });
                 }
 
+                // Sort bids descending (highest bid first), asks ascending (lowest ask first)
                 orderBook.bids.sort((a, b) => b[0] - a[0]);
                 orderBook.asks.sort((a, b) => a[0] - b[0]);
                 
+                // Limit to 20 levels each
                 orderBook.bids = orderBook.bids.slice(0, 20);
                 orderBook.asks = orderBook.asks.slice(0, 20);
 
+                // Update UI
                 renderOrderBook();
 
             } catch (error) {
@@ -2124,17 +2159,20 @@
                     price: parseFloat(data.p),
                     amount: parseFloat(data.q),
                     time: data.T,
-                    isBuyerMaker: data.m
+                    isBuyerMaker: data.m  // True if the buyer is the maker (sell order)
                 };
 
+                // Add to market trades
                 marketTrades.unshift(trade);
                 if (marketTrades.length > 100) {
                     marketTrades.pop();
                 }
 
+                // Update current price
                 previousPrice = currentPrice;
                 currentPrice = trade.price;
 
+                // Flash price effect
                 const priceElement = safeGetElement('livePrice');
                 if (priceElement) {
                     priceElement.classList.add(currentPrice >= previousPrice ? 'flash-green' : 'flash-red');
@@ -2143,6 +2181,7 @@
                     }, 300);
                 }
 
+                // Update price displays
                 safeSetTextContent('livePrice', formatUSD(currentPrice));
                 safeSetTextContent('livePriceUSD', formatUSD(currentPrice));
                 safeSetTextContent('priceUSDT', currentPrice.toFixed(2));
@@ -2152,14 +2191,18 @@
                     orderPrice.value = currentPrice.toFixed(2);
                 }
 
+                // Update page title
                 updatePageTitle();
 
+                // Update trades list if market trades tab is active
                 if (currentTradesTab === 'market') {
                     renderMarketTrades();
                 }
 
+                // Calculate total if amount is entered
                 calculateTotal();
 
+                // Cache the price in Redis
                 if (redisClient) {
                     redisClient.set(`price_${currentPair}`, currentPrice, 5);
                 }
@@ -2173,6 +2216,7 @@
         // POLLING INTERVALS (FALLBACK FOR DATA)
         // =============================================
         function startPollingIntervals() {
+            // Fetch order book every 100ms as fallback
             if (orderBookInterval) clearInterval(orderBookInterval);
             orderBookInterval = setInterval(async () => {
                 if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
@@ -2180,11 +2224,13 @@
                 }
             }, 100);
 
+            // Fetch 24hr stats every 1 second
             if (priceInterval) clearInterval(priceInterval);
             priceInterval = setInterval(async () => {
                 await fetch24hrStats();
             }, 1000);
 
+            // Fetch recent trades every 500ms as fallback
             if (tradesInterval) clearInterval(tradesInterval);
             tradesInterval = setInterval(async () => {
                 if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
@@ -2192,6 +2238,7 @@
                 }
             }, 500);
             
+            // Fetch user trades every 2 seconds for real-time updates
             if (userTradesInterval) clearInterval(userTradesInterval);
             userTradesInterval = setInterval(async () => {
                 if (isAuthenticated) {
@@ -2205,6 +2252,7 @@
         // =============================================
         async function fetchOrderBookFromBinance() {
             try {
+                // Check cache first
                 if (redisClient) {
                     const cached = redisClient.get(`orderbook_${currentPair}`);
                     if (cached) {
@@ -2224,6 +2272,7 @@
                         lastUpdateId: data.lastUpdateId
                     };
                     
+                    // Cache for 1 second
                     if (redisClient) {
                         redisClient.set(`orderbook_${currentPair}`, orderBook, 1);
                     }
@@ -2240,6 +2289,7 @@
         // =============================================
         async function fetch24hrStats() {
             try {
+                // Check cache first
                 if (redisClient) {
                     const cached = redisClient.get(`stats_${currentPair}`);
                     if (cached) {
@@ -2252,6 +2302,7 @@
                 if (response.ok) {
                     const data = await response.json();
                     
+                    // Cache for 5 seconds
                     if (redisClient) {
                         redisClient.set(`stats_${currentPair}`, data, 5);
                     }
@@ -2268,6 +2319,7 @@
         // =============================================
         async function fetchRecentTradesFromBinance() {
             try {
+                // Check cache first
                 if (redisClient) {
                     const cached = redisClient.get(`trades_${currentPair}`);
                     if (cached) {
@@ -2289,6 +2341,7 @@
                         isBuyerMaker: t.isBuyerMaker
                     }));
                     
+                    // Cache for 2 seconds
                     if (redisClient) {
                         redisClient.set(`trades_${currentPair}`, marketTrades, 2);
                     }
@@ -2320,6 +2373,7 @@
         // =============================================
         async function loadMarketPairs() {
             try {
+                // Check cache first
                 if (redisClient) {
                     const cached = redisClient.get('market_pairs');
                     if (cached) {
@@ -2330,10 +2384,12 @@
                     }
                 }
 
+                // Try Binance first
                 const response = await fetch(`${CONFIG.BINANCE_API}/ticker/24hr`);
                 if (response.ok) {
                     const data = await response.json();
                     
+                    // Filter only main cryptos with USDT pairs
                     marketPairs = data
                         .filter(item => {
                             const base = item.symbol.replace('USDT', '');
@@ -2353,18 +2409,21 @@
                             };
                         });
                     
+                    // Sort by main cryptos order
                     marketPairs.sort((a, b) => {
                         const aIndex = MAIN_CRYPTOS.indexOf(a.symbol);
                         const bIndex = MAIN_CRYPTOS.indexOf(b.symbol);
                         return aIndex - bIndex;
                     });
                     
+                    // Cache for 30 seconds
                     if (redisClient) {
                         redisClient.set('market_pairs', marketPairs, 30);
                     }
                 }
             } catch (error) {
                 console.error('❌ Failed to load market pairs:', error);
+                // Generate fallback data
                 marketPairs = MAIN_CRYPTOS.map(symbol => ({
                     symbol: symbol,
                     base: symbol,
@@ -2390,12 +2449,14 @@
             
             if (!content || !depthContent) return;
             
+            // Calculate max totals for depth bars
             const allTotals = [
                 ...orderBook.asks.map(([price, amount]) => price * amount),
                 ...orderBook.bids.map(([price, amount]) => price * amount)
             ];
             const maxTotal = allTotals.length > 0 ? Math.max(...allTotals) : 1;
 
+            // Render asks (sell orders) - Show highest asks first (top of book)
             let html = '';
             const sortedAsks = [...orderBook.asks].sort((a, b) => b[0] - a[0]);
             
@@ -2412,6 +2473,7 @@
                 `;
             });
 
+            // Current price separator with correct bid/ask spread info
             const bestBid = orderBook.bids.length > 0 ? orderBook.bids[0][0] : currentPrice;
             const bestAsk = orderBook.asks.length > 0 ? orderBook.asks[0][0] : currentPrice;
             const changeClass = currentPrice >= previousPrice ? 'up' : 'down';
@@ -2426,6 +2488,7 @@
                 </div>
             `;
 
+            // Render bids (buy orders) - Show highest bids first
             const sortedBids = [...orderBook.bids].sort((a, b) => b[0] - a[0]);
             sortedBids.forEach(([price, amount]) => {
                 const total = price * amount;
@@ -2442,6 +2505,7 @@
 
             content.innerHTML = html;
 
+            // Calculate and display spread
             if (orderBook.asks.length > 0 && orderBook.bids.length > 0) {
                 const bestAsk = orderBook.asks[0][0];
                 const bestBid = orderBook.bids[0][0];
@@ -2458,8 +2522,10 @@
                 }
             }
 
+            // Render depth visualization
             let depthHtml = '<div style="padding: 8px;">';
             
+            // Top 5 asks
             const topAsks = [...orderBook.asks].sort((a, b) => a[0] - b[0]).slice(0, 5);
             topAsks.forEach(([price, amount]) => {
                 const total = price * amount;
@@ -2477,6 +2543,7 @@
 
             depthHtml += '<div style="height: 2px; background: var(--border-color); margin: 8px 0;"></div>';
 
+            // Top 5 bids
             const topBids = orderBook.bids.slice(0, 5);
             topBids.forEach(([price, amount]) => {
                 const total = price * amount;
@@ -2531,6 +2598,7 @@
                 `;
             }
 
+            // Update chart info bar
             const chartInfoBar = safeGetElement('chartInfoBar');
             if (chartInfoBar) {
                 chartInfoBar.innerHTML = `
@@ -2542,6 +2610,7 @@
                 `;
             }
 
+            // Update pair logos
             const pairLogos = safeGetElement('pairLogos');
             if (pairLogos) {
                 pairLogos.innerHTML = `
@@ -2553,6 +2622,7 @@
             safeSetTextContent('pairSymbol', `${currentBaseAsset}/${currentQuoteAsset}`);
             safeSetTextContent('pairBase', ASSET_NAMES[currentBaseAsset] || currentBaseAsset);
 
+            // Update favorite icon
             const favBtn = safeGetElement('favoriteBtn');
             if (favBtn) {
                 if (favoritePairs.includes(currentPair)) {
@@ -2600,9 +2670,10 @@
 
             list.innerHTML = html;
 
+            // Update pagination
             const totalItems = currentTradesTab === 'market' ? marketTrades.length : userTrades.length;
-            const totalPages = Math.ceil(totalItems / CONFIG.TRADES_PER_PAGE) || 1;
-            safeSetTextContent('tradesPageInfo', `${tradesPage}/${totalPages}`);
+            const totalPages = Math.ceil(totalItems / CONFIG.TRADES_PER_PAGE);
+            safeSetTextContent('tradesPageInfo', `${tradesPage}/${totalPages || 1}`);
             
             const prevBtn = safeGetElement('tradesPrevBtn');
             const nextBtn = safeGetElement('tradesNextBtn');
@@ -2645,8 +2716,9 @@
 
             list.innerHTML = html;
 
-            const totalPages = Math.ceil(filteredPairs.length / CONFIG.ASSETS_PER_PAGE) || 1;
-            safeSetTextContent('pairsPageInfo', `${pairsPage}/${totalPages}`);
+            // Update pagination
+            const totalPages = Math.ceil(filteredPairs.length / CONFIG.ASSETS_PER_PAGE);
+            safeSetTextContent('pairsPageInfo', `${pairsPage}/${totalPages || 1}`);
             
             const prevBtn = safeGetElement('pairsPrevBtn');
             const nextBtn = safeGetElement('pairsNextBtn');
@@ -2753,12 +2825,8 @@
                     userMainBalance = data.data?.balances?.main || 0;
                     userMaturedBalance = data.data?.balances?.matured || 0;
                     
-                    // Calculate base asset balance only if currentPrice is valid
-                    if (currentPrice > 0) {
-                        userBaseBalance = (userMainBalance + userMaturedBalance) / currentPrice;
-                    } else {
-                        userBaseBalance = 0;
-                    }
+                    // Calculate base asset balance (for selling)
+                    userBaseBalance = currentPrice > 0 ? (userMainBalance + userMaturedBalance) / currentPrice : 0;
                     
                     updateBalanceDisplay();
                 }
@@ -2776,10 +2844,6 @@
                 safeSetTextContent('availableBalance', formatNumber(totalAvailable));
                 if (availableCurrency) availableCurrency.textContent = 'USDT';
             } else {
-                // Only show base balance if we have a valid price
-                if (currentPrice > 0) {
-                    userBaseBalance = totalAvailable / currentPrice;
-                }
                 safeSetTextContent('availableBalance', formatNumber(userBaseBalance));
                 if (availableCurrency) availableCurrency.textContent = currentBaseAsset;
             }
@@ -2796,7 +2860,7 @@
         }
 
         function redirectToLogin() {
-            window.location.href = `login.html?redirect=trading.html?symbol=${currentSymbol}`;
+            window.location.href = `login?redirect=trading.html?symbol=${currentSymbol}`;
         }
 
         // =============================================
@@ -2838,21 +2902,15 @@
             const amountInput = safeGetElement('orderAmount');
             if (!amountInput) return;
             
-            const totalAvailable = userMainBalance + userMaturedBalance;
-            
             if (currentOrderTab === 'buy') {
+                const totalAvailable = userMainBalance + userMaturedBalance;
                 const maxAmount = totalAvailable / price;
                 const amount = (maxAmount * percent) / 100;
                 amountInput.value = amount.toFixed(6);
             } else {
-                // For sell, use totalAvailable in USDT converted to base asset
-                if (price > 0) {
-                    const baseBalance = totalAvailable / price;
-                    const amount = (baseBalance * percent) / 100;
-                    amountInput.value = amount.toFixed(6);
-                } else {
-                    amountInput.value = '0';
-                }
+                // For sell, use base asset balance
+                const amount = (userBaseBalance * percent) / 100;
+                amountInput.value = amount.toFixed(6);
             }
             calculateTotal();
         }
@@ -2885,6 +2943,7 @@
         }
 
         async function placeOrder() {
+            // Prevent multiple simultaneous order submissions
             if (isOrderProcessing) {
                 showNotification('warning', 'Order Processing', 'Please wait for your previous order to complete');
                 return;
@@ -2907,8 +2966,9 @@
                 return;
             }
 
+            // Check minimum trading amount ($20 worth)
             if (total < CONFIG.MIN_TRADE_AMOUNT_USD) {
-                showNotification('error', 'Minimum Amount Required', `Minimum trade amount is $${CONFIG.MIN_TRADE_AMOUNT_USD}`);
+                showNotification('error', 'Minimum Amount Required', `Minimum trade amount is $${CONFIG.MIN_TRADE_AMOUNT_USD} worth of ${currentBaseAsset}`);
                 return;
             }
 
@@ -2924,6 +2984,7 @@
                 return;
             }
 
+            // Set processing flag and disable button
             isOrderProcessing = true;
             const placeOrderBtn = safeGetElement('placeOrderBtn');
             if (placeOrderBtn) {
@@ -2956,12 +3017,18 @@
                     const data = await response.json();
                     showNotification('success', 'Order Placed Successfully', `Your ${currentOrderTab} order for ${formatNumber(amount)} ${currentBaseAsset} has been placed`);
                     
+                    // Clear form
                     if (amountInput) amountInput.value = '';
                     const totalInput = safeGetElement('orderTotal');
                     if (totalInput) totalInput.value = '';
                     
+                    // Reload balances
                     await loadUserBalance();
+                    
+                    // Reload orders
                     await loadUserOrders();
+                    
+                    // Reload user trades
                     await loadUserTrades();
                 } else {
                     const error = await response.json();
@@ -2971,6 +3038,7 @@
                 console.error('Order placement failed:', error);
                 showNotification('error', 'Order Failed', 'Network error. Please try again.');
             } finally {
+                // Reset processing flag and re-enable button
                 isOrderProcessing = false;
                 if (placeOrderBtn) {
                     placeOrderBtn.disabled = false;
@@ -3058,6 +3126,7 @@
                 return;
             }
 
+            // Apply filter
             if (currentFilter !== 'all') {
                 if (currentFilter === 'filled') {
                     filteredOrders = filteredOrders.filter(o => o.status === 'filled');
@@ -3114,8 +3183,9 @@
 
             tbody.innerHTML = html;
 
-            const totalPages = Math.ceil(filteredOrders.length / CONFIG.ORDERS_PER_PAGE) || 1;
-            safeSetTextContent('ordersPageInfo', `${ordersPage}/${totalPages}`);
+            // Update pagination
+            const totalPages = Math.ceil(filteredOrders.length / CONFIG.ORDERS_PER_PAGE);
+            safeSetTextContent('ordersPageInfo', `${ordersPage}/${totalPages || 1}`);
             
             const prevBtn = safeGetElement('ordersPrevBtn');
             const nextBtn = safeGetElement('ordersNextBtn');
@@ -3123,6 +3193,7 @@
             if (prevBtn) prevBtn.disabled = ordersPage === 1;
             if (nextBtn) nextBtn.disabled = ordersPage === totalPages || totalPages === 0;
 
+            // Show/hide cancel all button
             const hasOpenOrders = userOrders.some(o => o.status === 'open' || o.status === 'partial');
             const cancelAllBtn = safeGetElement('cancelAllBtn');
             if (cancelAllBtn) {
@@ -3221,19 +3292,16 @@
         }
 
         function changeOrdersPage(delta) {
-            const totalPages = Math.ceil((currentOrdersTab === 'trade' ? userTrades : userOrders).length / CONFIG.ORDERS_PER_PAGE) || 1;
             const newPage = ordersPage + delta;
-            if (newPage >= 1 && newPage <= totalPages) {
+            if (newPage >= 1) {
                 ordersPage = newPage;
                 renderOrders();
             }
         }
 
         function changeTradesPage(delta) {
-            const totalItems = currentTradesTab === 'market' ? marketTrades.length : userTrades.length;
-            const totalPages = Math.ceil(totalItems / CONFIG.TRADES_PER_PAGE) || 1;
             const newPage = tradesPage + delta;
-            if (newPage >= 1 && newPage <= totalPages) {
+            if (newPage >= 1) {
                 tradesPage = newPage;
                 renderMarketTrades();
             }
@@ -3332,6 +3400,7 @@
             } else if (tab === 'square') {
                 loadSquareData();
             } else {
+                // Show chart
                 chartContainer.innerHTML = '';
                 initializeTradingViewChart();
             }
@@ -3450,7 +3519,7 @@
             const n = parseFloat(num) || 0;
             if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
             if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-            if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+            if (n >= 1e3) return (n / 1e3).toFixed(2);
             if (n < 0.000001) return n.toFixed(8);
             if (n < 0.001) return n.toFixed(6);
             if (n < 1) return n.toFixed(4);
@@ -3461,7 +3530,7 @@
             const n = parseFloat(num) || 0;
             if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
             if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-            if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
+            if (n >= 1e3) return '$' + (n / 1e3).toFixed(2);
             if (n < 0.01) return '$' + n.toFixed(4);
             return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
         }
