@@ -1745,7 +1745,7 @@
             BINANCE_API: 'https://api.binance.com/api/v3',
             BINANCE_WS: 'wss://stream.binance.com:9443/ws',
             
-            // API Endpoints
+            // API Endpoints - UPDATED TO MATCH BACKEND STRUCTURE
             BUY_ENDPOINT: '/api/trading/orders/buy',
             SELL_ENDPOINT: '/api/trading/orders/sell',
             USER_BALANCE_ENDPOINT: '/api/users/balances',
@@ -1757,8 +1757,8 @@
             ORDERS_PER_PAGE: 10,
             TRADES_PER_PAGE: 10,
             
-            // Minimum trading amount
-            MIN_TRADE_AMOUNT_USD: 20,
+            // Minimum trading amount - UPDATED TO $10 TO MATCH BACKEND
+            MIN_TRADE_AMOUNT_USD: 10,
             
             // Rate limiting for 500k users
             RATE_LIMIT: {
@@ -2911,7 +2911,7 @@
         }
 
         // =============================================
-        // ORDER PLACEMENT
+        // ORDER PLACEMENT - UPDATED TO MATCH BACKEND STRUCTURE
         // =============================================
         function calculateTotal() {
             const priceInput = safeGetElement('orderPrice');
@@ -3050,8 +3050,9 @@
                 return;
             }
 
+            // UPDATED: Match backend minimum amount check ($10)
             if (total < CONFIG.MIN_TRADE_AMOUNT_USD) {
-                showNotification('error', 'Minimum Amount Required', `Minimum trade amount is $${CONFIG.MIN_TRADE_AMOUNT_USD} worth of ${currentBaseAsset}`);
+                showNotification('error', 'Minimum Amount Required', `Minimum trade amount is $${CONFIG.MIN_TRADE_AMOUNT_USD}. Your total is $${total.toFixed(2)}`);
                 return;
             }
 
@@ -3080,6 +3081,21 @@
 
             try {
                 const token = localStorage.getItem('jwtToken');
+                
+                // UPDATED: Request body matches backend exactly
+                const requestBody = {
+                    symbol: currentPair,
+                    baseAsset: currentBaseAsset,
+                    quoteAsset: currentQuoteAsset,
+                    side: currentOrderTab,
+                    type: 'limit',
+                    price: price,
+                    amount: amount,
+                    total: total,
+                    useMaturedBalance: true,
+                    timestamp: Date.now()
+                };
+
                 const response = await fetch(`${CONFIG.BACKEND_URL}${endpoint}`, {
                     method: 'POST',
                     headers: {
@@ -3087,18 +3103,7 @@
                         'Authorization': `Bearer ${token}`,
                         'X-Rate-Limit': CONFIG.RATE_LIMIT.MAX_REQUESTS_PER_MINUTE.toString()
                     },
-                    body: JSON.stringify({
-                        symbol: currentPair,
-                        baseAsset: currentBaseAsset,
-                        quoteAsset: currentQuoteAsset,
-                        side: currentOrderTab,
-                        type: 'limit',
-                        price: price,
-                        amount: amount,
-                        total: total,
-                        useMaturedBalance: true,
-                        timestamp: Date.now()
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 if (response.ok) {
@@ -3139,7 +3144,7 @@
         }
 
         // =============================================
-        // USER ORDERS - FETCH ALL OPEN ORDERS OF THAT PAIR FROM DATABASE
+        // USER ORDERS - UPDATED TO MATCH BACKEND FORMAT EXACTLY
         // =============================================
         async function loadUserOrders() {
             if (!isAuthenticated || !checkRateLimit('request')) {
@@ -3168,6 +3173,7 @@
 
                 if (response.ok) {
                     const data = await response.json();
+                    // Backend returns: { status: 'success', results: N, data: formattedOrders }
                     userOrders = data.data || [];
                     renderOrders();
                 }
@@ -3177,7 +3183,7 @@
         }
 
         // =============================================
-        // USER TRADES - FETCH ALL ORDER HISTORY OF THAT SPECIFIC PAIR FROM DATABASE IN REAL TIME
+        // USER TRADES - UPDATED TO MATCH BACKEND FORMAT EXACTLY
         // =============================================
         async function loadUserTrades() {
             if (!isAuthenticated || !checkRateLimit('request')) return;
@@ -3193,6 +3199,7 @@
 
                 if (response.ok) {
                     const data = await response.json();
+                    // Backend returns: { status: 'success', results: N, data: allTrades }
                     userTrades = data.data || [];
                     if (currentTradesTab === 'my') {
                         renderMarketTrades();
@@ -3214,17 +3221,24 @@
             
             // Fetch all open orders of that pair from the database
             if (currentOrdersTab === 'open') {
-                filteredOrders = userOrders.filter(o => (o.status === 'open' || o.status === 'partial') && o.symbol === currentPair);
+                filteredOrders = userOrders.filter(o => 
+                    (o.status === 'open' || o.status === 'partial' || o.status === 'pending') && 
+                    o.symbol === currentPair
+                );
             } 
             // Fetch all order history of that specific pair from the database
             else if (currentOrdersTab === 'history') {
-                filteredOrders = userOrders.filter(o => (o.status === 'filled' || o.status === 'cancelled') && o.symbol === currentPair);
+                filteredOrders = userOrders.filter(o => 
+                    (o.status === 'filled' || o.status === 'cancelled' || o.status === 'completed') && 
+                    o.symbol === currentPair
+                );
             } 
             // Fetch all trading history of that pair from the database
             else if (currentOrdersTab === 'trade') {
                 filteredOrders = userTrades.filter(t => t.symbol === currentPair).map(t => ({
                     ...t,
-                    isTrade: true
+                    isTrade: true,
+                    status: 'filled'
                 }));
             } 
             // Fetch funds from the database in realtime and map appropriately
@@ -3235,7 +3249,7 @@
 
             if (currentFilter !== 'all') {
                 if (currentFilter === 'filled') {
-                    filteredOrders = filteredOrders.filter(o => o.status === 'filled');
+                    filteredOrders = filteredOrders.filter(o => o.status === 'filled' || o.status === 'completed');
                 } else {
                     filteredOrders = filteredOrders.filter(o => o.side === currentFilter);
                 }
@@ -3258,29 +3272,38 @@
 
             let html = '';
             ordersToShow.forEach(order => {
-                const date = new Date(order.createdAt || order.time).toLocaleString();
+                const date = new Date(order.createdAt || order.time || Date.now()).toLocaleString();
                 const sideClass = order.side === 'buy' ? 'order-side-buy' : 'order-side-sell';
                 let statusClass = 'status-pending';
                 let status = order.status || (order.isTrade ? 'filled' : 'pending');
                 
-                if (status === 'filled') statusClass = 'status-filled';
+                if (status === 'filled' || status === 'completed') statusClass = 'status-filled';
                 if (status === 'cancelled') statusClass = 'status-cancelled';
                 if (status === 'partial') statusClass = 'status-partial';
+
+                // Handle different field names from backend
+                const orderSymbol = order.symbol || `${order.baseAsset}${order.quoteAsset}` || currentPair;
+                const orderType = order.type || 'limit';
+                const orderSide = order.side || (order.isBuyerMaker ? 'buy' : 'sell');
+                const orderPrice = order.price || (order.total / order.amount);
+                const orderAmount = order.amount;
+                const orderFilled = order.filled || (order.isTrade ? order.amount : 0);
+                const orderTotal = order.total || (order.price * order.amount);
 
                 html += `
                     <tr>
                         <td>${date}</td>
-                        <td>${order.symbol || currentPair}</td>
-                        <td>${order.type || 'limit'}</td>
-                        <td class="${sideClass}">${order.side ? order.side.toUpperCase() : 'BUY'}</td>
-                        <td>${formatUSD(order.price || (order.total / order.amount))}</td>
-                        <td>${formatNumber(order.amount)}</td>
-                        <td>${order.filled ? formatNumber(order.filled) : order.isTrade ? formatNumber(order.amount) : '0'}</td>
-                        <td>${formatUSD(order.total || order.price * order.amount)}</td>
+                        <td>${orderSymbol}</td>
+                        <td>${orderType}</td>
+                        <td class="${sideClass}">${orderSide ? orderSide.toUpperCase() : 'BUY'}</td>
+                        <td>${formatUSD(orderPrice)}</td>
+                        <td>${formatNumber(orderAmount)}</td>
+                        <td>${formatNumber(orderFilled)}</td>
+                        <td>${formatUSD(orderTotal)}</td>
                         <td><span class="order-status ${statusClass}">${order.isTrade ? 'filled' : status}</span></td>
                         <td>
-                            ${(order.status === 'open' || order.status === 'partial') && !order.isTrade ? 
-                                `<button class="cancel-order-btn" onclick="cancelOrder('${order.id}')">Cancel</button>` : 
+                            ${(status === 'open' || status === 'partial' || status === 'pending') && !order.isTrade ? 
+                                `<button class="cancel-order-btn" onclick="cancelOrder('${order.id || order._id}')">Cancel</button>` : 
                                 '-'}
                         </td>
                     </tr>
@@ -3298,7 +3321,10 @@
             if (prevBtn) prevBtn.disabled = ordersPage === 1;
             if (nextBtn) nextBtn.disabled = ordersPage === totalPages || totalPages === 0;
 
-            const hasOpenOrders = userOrders.some(o => (o.status === 'open' || o.status === 'partial') && o.symbol === currentPair);
+            const hasOpenOrders = userOrders.some(o => 
+                (o.status === 'open' || o.status === 'partial' || o.status === 'pending') && 
+                o.symbol === currentPair
+            );
             const cancelAllBtn = safeGetElement('cancelAllBtn');
             if (cancelAllBtn) {
                 cancelAllBtn.style.display = hasOpenOrders ? 'inline-block' : 'none';
