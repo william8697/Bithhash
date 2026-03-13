@@ -641,6 +641,37 @@
             to { transform: rotate(360deg); }
         }
 
+        /* Error State */
+        .error-state {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .error-state i {
+            font-size: 3rem;
+            color: var(--error);
+            margin-bottom: 20px;
+        }
+
+        .error-state h2 {
+            margin-bottom: 10px;
+        }
+
+        .error-state p {
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+        }
+
+        .error-state button {
+            background: var(--accent);
+            color: var(--bg-primary);
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
             .stats-grid {
@@ -728,6 +759,14 @@
         <div id="loadingState" class="loading-state">
             <div class="spinner"></div>
             <div>Loading plan details...</div>
+        </div>
+
+        <!-- Error State -->
+        <div id="errorState" class="error-state" style="display: none;">
+            <i class="fas fa-exclamation-triangle"></i>
+            <h2>Failed to Load Plan</h2>
+            <p id="errorMessage">The plan details could not be loaded. Please try again.</p>
+            <button onclick="window.location.href='index.html'">Return to Plans</button>
         </div>
 
         <!-- Content (hidden initially) -->
@@ -857,10 +896,12 @@
             // STATE MANAGEMENT
             // =============================================
             const State = {
-                sessionKey: null,
-                timestamp: null,
-                refCode: null,
                 planId: null,
+                planName: null,
+                minAmount: 0,
+                maxAmount: 0,
+                percentage: 0,
+                duration: 0,
                 planData: null,
                 userBalances: { main: 0, matured: 0 },
                 preferences: { displayAsset: 'btc' },
@@ -969,12 +1010,15 @@
                     return logos[symbol?.toLowerCase()] || CONFIG.BTC_LOGO;
                 },
 
-        parseURLParameters() {
+                parseURLParameters() {
                     const urlParams = new URLSearchParams(window.location.search);
                     return {
-                        session: urlParams.get('session'),
-                        v: urlParams.get('v'),
-                        ref: urlParams.get('ref')
+                        plan: urlParams.get('plan'),
+                        name: urlParams.get('name'),
+                        min: urlParams.get('min'),
+                        max: urlParams.get('max'),
+                        percentage: urlParams.get('percentage'),
+                        duration: urlParams.get('duration')
                     };
                 },
 
@@ -1037,24 +1081,18 @@
                 try {
                     // Parse URL parameters
                     const params = Utils.parseURLParameters();
-                    State.sessionKey = params.session;
-                    State.timestamp = params.v;
-                    State.refCode = params.ref;
+                    
+                    // Store plan details from URL
+                    State.planId = params.plan;
+                    State.planName = params.name || 'Cloud Mining';
+                    State.minAmount = parseFloat(params.min) || 0;
+                    State.maxAmount = parseFloat(params.max) || 0;
+                    State.percentage = parseFloat(params.percentage) || 0;
+                    State.duration = parseFloat(params.duration) || 0;
 
-                    if (!State.sessionKey) {
-                        NotificationSystem.show('error', 'Invalid Session', 'No session key provided');
-                        setTimeout(() => window.location.href = 'index.html', 2000);
-                        return;
-                    }
-
-                    // Extract plan ID from session (format: planId_timestamp_random)
-                    const sessionParts = State.sessionKey.split('_');
-                    if (sessionParts.length >= 1) {
-                        State.planId = sessionParts[0];
-                    }
-
-                    if (!State.planId) {
-                        throw new Error('Could not extract plan ID from session');
+                    // Validate we have the required parameters
+                    if (!State.planId || State.minAmount === 0 || State.maxAmount === 0 || State.percentage === 0 || State.duration === 0) {
+                        throw new Error('Missing or invalid plan parameters');
                     }
 
                     // Check authentication
@@ -1068,13 +1106,15 @@
                     // Load all data
                     await Promise.all([
                         loadUserData(),
-                        loadPlanDetails(),
                         loadBTCPrice()
                     ]);
 
                     // Hide loading, show content
                     document.getElementById('loadingState').style.display = 'none';
                     document.getElementById('content').style.display = 'block';
+
+                    // Render the plan details
+                    renderPlanDetails();
 
                     // Initialize chart
                     initTradingViewChart();
@@ -1084,20 +1124,11 @@
 
                 } catch (error) {
                     console.error('Initialization error:', error);
-                    NotificationSystem.show('error', 'Error', error.message || 'Failed to load page');
-                    document.getElementById('loadingState').innerHTML = `
-                        <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: var(--error);"></i>
-                        <p>Failed to load. Please try again.</p>
-                        <button onclick="location.reload()" style="
-                            background: var(--accent);
-                            border: none;
-                            color: var(--bg-primary);
-                            padding: 10px 20px;
-                            border-radius: 8px;
-                            margin-top: 20px;
-                            cursor: pointer;
-                        ">Retry</button>
-                    `;
+                    
+                    // Show error state
+                    document.getElementById('loadingState').style.display = 'none';
+                    document.getElementById('errorState').style.display = 'block';
+                    document.getElementById('errorMessage').textContent = error.message || 'Failed to load plan details';
                 }
             }
 
@@ -1127,35 +1158,6 @@
                 }
             }
 
-            async function loadPlanDetails() {
-                try {
-                    const response = await API.get('/plans');
-                    const plans = response.data?.plans || [];
-                    
-                    // Find plan by ID (assuming ID is part of session)
-                    State.planData = plans.find(p => p.id === State.planId);
-                    
-                    if (!State.planData) {
-                        // Fallback: use index from session if available
-                        const sessionParts = State.sessionKey.split('_');
-                        if (sessionParts.length > 1 && sessionParts[1]) {
-                            const index = parseInt(sessionParts[1]) % plans.length;
-                            State.planData = plans[index];
-                        }
-                    }
-
-                    if (!State.planData) {
-                        throw new Error('Plan not found');
-                    }
-
-                    renderPlanDetails();
-
-                } catch (error) {
-                    console.error('Error loading plan details:', error);
-                    throw error;
-                }
-            }
-
             async function loadBTCPrice() {
                 try {
                     const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
@@ -1172,31 +1174,31 @@
             // RENDERING
             // =============================================
             function renderPlanDetails() {
-                const plan = State.planData;
-                
-                // Plan names mapping
+                // Set plan name and description
+                document.getElementById('planName').textContent = `${State.planName} Plan`;
+                document.getElementById('planDescription').textContent = `Bitcoin cloud mining with ${State.percentage}% return`;
+
+                // Set stats
+                document.getElementById('minAmount').textContent = Utils.formatUSD(State.minAmount);
+                document.getElementById('maxAmount').textContent = Utils.formatUSD(State.maxAmount);
+                document.getElementById('returnRate').textContent = `+${State.percentage}%`;
+                document.getElementById('duration').innerHTML = `${State.duration}h <small>mining period</small>`;
+
+                // Determine index for miner selection (use planId or name)
                 const planNames = ['Basic', 'Standard', 'Pro', 'Enterprise', 'Ultimate', 'Institutional'];
-                const planIndex = parseInt(State.planId?.split('_')[1]) || 0;
-                const planName = planNames[planIndex % planNames.length] || 'Cloud Mining';
+                const planIndex = planNames.indexOf(State.planName);
+                const minerIndex = planIndex >= 0 ? planIndex : (parseInt(State.planId) || 0) % 6;
 
-                document.getElementById('planName').textContent = `${planName} Plan`;
-                document.getElementById('planDescription').textContent = `Bitcoin cloud mining with ${plan.percentage}% return`;
-
-                document.getElementById('minAmount').textContent = Utils.formatUSD(plan.minAmount);
-                document.getElementById('maxAmount').textContent = Utils.formatUSD(plan.maxAmount);
-                document.getElementById('returnRate').textContent = `+${plan.percentage}%`;
-                document.getElementById('duration').innerHTML = `${plan.duration}h <small>mining period</small>`;
-
-                // Miner details
-                renderMinerDetails(planIndex);
+                // Render miner details
+                renderMinerDetails(minerIndex);
                 
-                // Balance options
+                // Render balance options
                 renderBalanceOptions();
 
                 // Update amount hint
                 document.getElementById('amountHint').innerHTML = `
                     <i class="fas fa-info-circle"></i>
-                    Min: ${Utils.formatUSD(plan.minAmount)} | Max: ${Utils.formatUSD(plan.maxAmount)}
+                    Min: ${Utils.formatUSD(State.minAmount)} | Max: ${Utils.formatUSD(State.maxAmount)}
                 `;
             }
 
@@ -1296,7 +1298,6 @@
 
             function renderBalanceOptions() {
                 const container = document.getElementById('balanceOptions');
-                const minAmount = State.planData?.minAmount || 0;
                 
                 const assetLogo = Utils.getAssetLogo(State.preferences.displayAsset);
                 const assetSymbol = State.preferences.displayAsset.toUpperCase();
@@ -1306,7 +1307,7 @@
                 const maturedCrypto = State.btcPrice > 0 ? State.userBalances.matured / State.btcPrice : 0;
 
                 container.innerHTML = `
-                    <div class="balance-card ${State.userBalances.main >= minAmount ? '' : 'disabled'}" 
+                    <div class="balance-card ${State.userBalances.main >= State.minAmount ? '' : 'disabled'}" 
                          data-balance="main" 
                          data-amount="${State.userBalances.main}"
                          onclick="window.selectBalance('main', ${State.userBalances.main})">
@@ -1320,7 +1321,7 @@
                             <span>${Utils.formatNumber(mainCrypto)} ${assetSymbol}</span>
                         </div>
                     </div>
-                    <div class="balance-card ${State.userBalances.matured >= minAmount ? '' : 'disabled'}" 
+                    <div class="balance-card ${State.userBalances.matured >= State.minAmount ? '' : 'disabled'}" 
                          data-balance="matured" 
                          data-amount="${State.userBalances.matured}"
                          onclick="window.selectBalance('matured', ${State.userBalances.matured})">
@@ -1337,9 +1338,9 @@
                 `;
 
                 // Auto-select if one balance is sufficient
-                if (State.userBalances.main >= minAmount) {
+                if (State.userBalances.main >= State.minAmount) {
                     selectBalance('main', State.userBalances.main);
-                } else if (State.userBalances.matured >= minAmount) {
+                } else if (State.userBalances.matured >= State.minAmount) {
                     selectBalance('matured', State.userBalances.matured);
                 }
             }
@@ -1379,10 +1380,9 @@
                     State.selectedBalanceAmount = amount;
 
                     // Set default investment amount
-                    const minAmount = State.planData?.minAmount || 0;
                     const input = document.getElementById('investmentAmount');
-                    input.value = minAmount;
-                    input.max = Math.min(State.planData?.maxAmount || Infinity, amount);
+                    input.value = State.minAmount;
+                    input.max = Math.min(State.maxAmount, amount);
                     
                     // Update return
                     updateExpectedReturn();
@@ -1397,10 +1397,9 @@
             // =============================================
             function updateExpectedReturn() {
                 const amount = parseFloat(document.getElementById('investmentAmount').value) || 0;
-                const percentage = State.planData?.percentage || 0;
                 
                 if (amount > 0) {
-                    const totalReturn = Utils.calculateReturn(amount, percentage);
+                    const totalReturn = Utils.calculateReturn(amount, State.percentage);
                     document.getElementById('expectedReturnFiat').textContent = Utils.formatUSD(totalReturn);
 
                     // Crypto equivalent
@@ -1418,12 +1417,10 @@
 
             function validateInvestment() {
                 const amount = parseFloat(document.getElementById('investmentAmount').value) || 0;
-                const minAmount = State.planData?.minAmount || 0;
-                const maxAmount = State.planData?.maxAmount || 0;
                 const errorEl = document.getElementById('amountError');
                 const investBtn = document.getElementById('investButton');
 
-                const error = Utils.validateAmount(amount, minAmount, maxAmount, State.selectedBalanceAmount);
+                const error = Utils.validateAmount(amount, State.minAmount, State.maxAmount, State.selectedBalanceAmount);
                 
                 if (error) {
                     errorEl.textContent = error;
@@ -1446,7 +1443,7 @@
                 }
 
                 const amount = parseFloat(document.getElementById('investmentAmount').value);
-                const error = Utils.validateAmount(amount, State.planData.minAmount, State.planData.maxAmount, State.selectedBalanceAmount);
+                const error = Utils.validateAmount(amount, State.minAmount, State.maxAmount, State.selectedBalanceAmount);
                 
                 if (error) {
                     NotificationSystem.show('error', 'Invalid Amount', error);
@@ -1462,14 +1459,18 @@
                 statusEl.style.color = 'var(--accent)';
 
                 try {
-                    // Create investment - EXACT same format as modal
+                    // Create investment
                     const response = await API.post('/investments', {
-                        planId: State.planData.id,
+                        planId: State.planId,
                         amount: amount,
                         balanceType: State.selectedBalance,
-                        sessionKey: State.sessionKey,
-                        refCode: State.refCode,
-                        timestamp: State.timestamp
+                        planDetails: {
+                            name: State.planName,
+                            minAmount: State.minAmount,
+                            maxAmount: State.maxAmount,
+                            percentage: State.percentage,
+                            duration: State.duration
+                        }
                     });
 
                     if (response) {
