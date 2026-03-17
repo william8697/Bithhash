@@ -339,7 +339,7 @@
         }
         
         .panel.orders-panel {
-            height: 200px;
+            height: 400px;
         }
         
         /* Mobile Buy/Sell Panel */
@@ -387,7 +387,7 @@
             }
             
             .orders-table {
-                min-width: 600px;
+                min-width: 800px;
             }
             
             .panel.order-book-panel,
@@ -1085,7 +1085,7 @@
 
         .orders-table {
             width: 100%;
-            min-width: 800px;
+            min-width: 1000px;
             border-collapse: collapse;
             font-size: 0.8rem;
         }
@@ -1147,6 +1147,16 @@
         .status-pending {
             background-color: rgba(0, 216, 255, 0.1);
             color: var(--primary);
+        }
+
+        .pnl-positive {
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        .pnl-negative {
+            color: var(--error);
+            font-weight: 500;
         }
 
         .cancel-order-btn {
@@ -1991,6 +2001,7 @@
         let userTradesInterval = null;
         let balanceInterval = null;
         let rateLimitInterval = null;
+        let ordersInterval = null;
 
         // =============================================
         // SAFE DOM ELEMENT GETTER WITH ERROR HANDLING
@@ -2565,6 +2576,11 @@
                 calculateTotal();
                 calculateTotalMobile();
 
+                // Re-render orders to update PNL
+                if (isAuthenticated) {
+                    renderOrders();
+                }
+
             } catch (error) {
                 console.error('❌ Error processing new trade:', error);
             }
@@ -2606,6 +2622,13 @@
                     await loadUserBalance();
                 }
             }, 5000);
+            
+            if (ordersInterval) clearInterval(ordersInterval);
+            ordersInterval = setInterval(async () => {
+                if (isAuthenticated && checkRateLimit('request')) {
+                    await loadUserOrders();
+                }
+            }, 3000);
         }
 
         function startRateLimitInterval() {
@@ -2626,7 +2649,7 @@
         function startPNLTracking() {
             if (pnlInterval) clearInterval(pnlInterval);
             pnlInterval = setInterval(() => {
-                if (isAuthenticated && currentOrdersTab !== 'open') {
+                if (isAuthenticated && (currentOrdersTab === 'history' || currentOrdersTab === 'open')) {
                     renderOrders();
                 }
             }, 1000);
@@ -3369,13 +3392,24 @@
             const { takeProfit, stopLoss, trailingStop, activationPrice } = getTPSLData();
 
             // Validate TP/SL if provided
-            if (takeProfit && takeProfit <= price) {
-                showNotification('error', 'Invalid Take Profit', 'Take profit must be higher than entry price for buy orders');
-                return;
-            }
-            if (stopLoss && stopLoss >= price) {
-                showNotification('error', 'Invalid Stop Loss', 'Stop loss must be lower than entry price for buy orders');
-                return;
+            if (currentOrderTab === 'buy') {
+                if (takeProfit && takeProfit <= price) {
+                    showNotification('error', 'Invalid Take Profit', 'Take profit must be higher than entry price for buy orders');
+                    return;
+                }
+                if (stopLoss && stopLoss >= price) {
+                    showNotification('error', 'Invalid Stop Loss', 'Stop loss must be lower than entry price for buy orders');
+                    return;
+                }
+            } else {
+                if (takeProfit && takeProfit >= price) {
+                    showNotification('error', 'Invalid Take Profit', 'Take profit must be lower than entry price for sell orders');
+                    return;
+                }
+                if (stopLoss && stopLoss <= price) {
+                    showNotification('error', 'Invalid Stop Loss', 'Stop loss must be higher than entry price for sell orders');
+                    return;
+                }
             }
 
             isOrderProcessing = true;
@@ -3445,12 +3479,20 @@
                         if (tpInput) tpInput.value = '';
                         const mobileTpInput = safeGetElement('mobileTakeProfit');
                         if (mobileTpInput) mobileTpInput.value = '';
+                        const tpPercentInput = safeGetElement('takeProfitPercent');
+                        if (tpPercentInput) tpPercentInput.value = '';
+                        const mobileTpPercentInput = safeGetElement('mobileTakeProfitPercent');
+                        if (mobileTpPercentInput) mobileTpPercentInput.value = '';
                     }
                     if (stopLoss) {
                         const slInput = safeGetElement('stopLoss');
                         if (slInput) slInput.value = '';
                         const mobileSlInput = safeGetElement('mobileStopLoss');
                         if (mobileSlInput) mobileSlInput.value = '';
+                        const slPercentInput = safeGetElement('stopLossPercent');
+                        if (slPercentInput) slPercentInput.value = '';
+                        const mobileSlPercentInput = safeGetElement('mobileStopLossPercent');
+                        if (mobileSlPercentInput) mobileSlPercentInput.value = '';
                     }
                     
                     await loadUserBalance();
@@ -3497,7 +3539,7 @@
 
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_ORDERS_ENDPOINT}`, {
+                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_ORDERS_ENDPOINT}?symbol=${currentPair}`, {
                     headers: { 
                         'Authorization': `Bearer ${token}`,
                         'X-Rate-Limit': CONFIG.RATE_LIMIT.MAX_REQUESTS_PER_MINUTE.toString()
@@ -3523,7 +3565,7 @@
 
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_TRADES_ENDPOINT}`, {
+                const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.USER_TRADES_ENDPOINT}?symbol=${currentPair}`, {
                     headers: { 
                         'Authorization': `Bearer ${token}`,
                         'X-Rate-Limit': CONFIG.RATE_LIMIT.MAX_REQUESTS_PER_MINUTE.toString()
@@ -3562,13 +3604,13 @@
                 pnlValue = (entryPrice - currentValue) * (order.amount || 0);
             }
             
-            const pnlPercent = entryPrice > 0 ? ((currentValue - entryPrice) / entryPrice) * 100 : 0;
-            const isProfit = (side === 'buy' && pnlValue > 0) || (side === 'sell' && pnlValue < 0);
+            const pnlPercent = entryPrice > 0 ? (pnlValue / (entryPrice * (order.amount || 1))) * 100 : 0;
+            const isProfit = pnlValue > 0;
             
             return {
                 value: pnlValue,
                 percent: Math.abs(pnlPercent),
-                isProfit: pnlValue > 0
+                isProfit: isProfit
             };
         }
 
@@ -3581,20 +3623,18 @@
             // Open Orders - Fetch all open orders of that pair from the database
             if (currentOrdersTab === 'open') {
                 filteredOrders = userOrders.filter(o => 
-                    (o.status === 'open' || o.status === 'partial' || o.status === 'pending') && 
-                    o.symbol === currentPair
+                    (o.status === 'open' || o.status === 'partial' || o.status === 'pending')
                 );
             } 
             // Order History - Fetch all order history of that specific pair from the database
             else if (currentOrdersTab === 'history') {
                 filteredOrders = userOrders.filter(o => 
-                    (o.status === 'filled' || o.status === 'cancelled' || o.status === 'completed') && 
-                    o.symbol === currentPair
+                    (o.status === 'filled' || o.status === 'cancelled' || o.status === 'completed')
                 );
             } 
             // Trade History - Fetch all trading history of that pair from the database
             else if (currentOrdersTab === 'trade') {
-                filteredOrders = userTrades.filter(t => t.symbol === currentPair).map(t => ({
+                filteredOrders = userTrades.map(t => ({
                     ...t,
                     isTrade: true,
                     status: 'filled'
@@ -3618,7 +3658,7 @@
                 tbody.innerHTML = `
                     <tr>
                         <td colspan="11" style="text-align: center; padding: var(--spacing-xl); color: var(--gray);">
-                            No orders found
+                            No ${currentOrdersTab} found for ${currentPair}
                         </td>
                     </tr>
                 `;
@@ -3650,7 +3690,7 @@
                 if (status === 'filled' && !order.isTrade && orderSide) {
                     const pnl = calculatePNL(order);
                     pnlHtml = `
-                        <span style="color: ${pnl.isProfit ? 'var(--success)' : 'var(--error)'};">
+                        <span class="${pnl.isProfit ? 'pnl-positive' : 'pnl-negative'}">
                             ${pnl.isProfit ? '+' : ''}${formatUSD(pnl.value)} (${pnl.isProfit ? '+' : '-'}${pnl.percent.toFixed(2)}%)
                         </span>
                     `;
@@ -3689,8 +3729,7 @@
             if (nextBtn) nextBtn.disabled = ordersPage === totalPages || totalPages === 0;
 
             const hasOpenOrders = userOrders.some(o => 
-                (o.status === 'open' || o.status === 'partial' || o.status === 'pending') && 
-                o.symbol === currentPair
+                (o.status === 'open' || o.status === 'partial' || o.status === 'pending')
             );
             const cancelAllBtn = safeGetElement('cancelAllBtn');
             if (cancelAllBtn) {
@@ -3759,7 +3798,7 @@
             
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/trading/orders/cancel-all`, {
+                const response = await fetch(`${CONFIG.BACKEND_URL}/api/trading/orders/cancel-all?symbol=${currentPair}`, {
                     method: 'POST',
                     headers: { 
                         'Authorization': `Bearer ${token}`,
@@ -3768,7 +3807,7 @@
                 });
 
                 if (response.ok) {
-                    showNotification('success', 'Orders Cancelled', 'All open orders have been cancelled');
+                    showNotification('success', 'Orders Cancelled', 'All open orders for ${currentPair} have been cancelled');
                     await loadUserOrders();
                 }
             } catch (error) {
@@ -3784,6 +3823,14 @@
                 event.target.classList.add('active');
             }
             ordersPage = 1;
+            
+            // Load appropriate data based on tab
+            if (tab === 'open' || tab === 'history') {
+                loadUserOrders();
+            } else if (tab === 'trade') {
+                loadUserTrades();
+            }
+            
             renderOrders();
         }
 
@@ -4117,6 +4164,9 @@
             }
             if (pnlInterval) {
                 clearInterval(pnlInterval);
+            }
+            if (ordersInterval) {
+                clearInterval(ordersInterval);
             }
         });
     </script>
