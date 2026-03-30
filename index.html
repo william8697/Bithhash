@@ -7707,9 +7707,14 @@
 
 
 
-// Socket.IO connection to backend
+
+
+
+
+
+// Connect to Socket.IO
 const socket = io('https://bithash-backend.onrender.com', {
-    transports: ['websocket', 'polling'],
+    transports: ['websocket'],
     reconnection: true,
     reconnectionAttempts: 10,
     reconnectionDelay: 1000,
@@ -7717,146 +7722,118 @@ const socket = io('https://bithash-backend.onrender.com', {
     timeout: 20000
 });
 
-// Connection status tracking
-let isConnected = false;
-let reconnectAttempts = 0;
+// Store current investor count
+let currentInvestorCount = 0;
 
-// Socket connection events
-socket.on('connect', () => {
-    console.log('✅ Connected to real-time stats server');
-    isConnected = true;
-    reconnectAttempts = 0;
-    
-    // Optional: Show connection status to user
-    const statusElement = document.getElementById('connection-status');
-    if (statusElement) {
-        statusElement.style.display = 'none';
+// Listen for stats updates - THIS IS THE ONLY SOURCE OF TRUTH
+socket.on('stats-update', (data) => {
+    if (data && data.totalInvestors !== undefined) {
+        currentInvestorCount = data.totalInvestors;
+        
+        // Update ALL elements that display investor count
+        const investorElement = document.getElementById('total-cloud-miners');
+        if (investorElement) {
+            investorElement.innerText = currentInvestorCount.toLocaleString('en-US');
+        }
+        
+        // Update any other elements that might display this number
+        const allInvestorElements = document.querySelectorAll('[data-investor-count]');
+        allInvestorElements.forEach(el => {
+            el.innerText = currentInvestorCount.toLocaleString('en-US');
+        });
+        
+        console.log(`📊 [${new Date().toLocaleTimeString()}] Stats updated: ${currentInvestorCount.toLocaleString()} investors (ALL devices see this at same time)`);
     }
+});
+
+// Connection events
+socket.on('connect', () => {
+    console.log('✅ Connected to real-time stats server - ready for live updates');
+    
+    // Remove any loading indicators
+    const loadingElement = document.getElementById('stats-loading');
+    if (loadingElement) loadingElement.style.display = 'none';
 });
 
 socket.on('disconnect', () => {
-    console.log('❌ Disconnected from real-time stats server');
-    isConnected = false;
+    console.log('❌ Disconnected from stats server - attempting to reconnect');
     
-    // Optional: Show connection status to user
-    const statusElement = document.getElementById('connection-status');
-    if (statusElement) {
-        statusElement.style.display = 'flex';
-        statusElement.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Reconnecting...';
+    // Show reconnecting indicator
+    const investorElement = document.getElementById('total-cloud-miners');
+    if (investorElement && !investorElement.innerText) {
+        investorElement.innerText = 'Connecting...';
     }
 });
 
-socket.on('connect_error', (error) => {
-    console.error('Socket connection error:', error);
-    reconnectAttempts++;
+socket.on('reconnect', (attemptNumber) => {
+    console.log(`🔄 Reconnected to stats server after ${attemptNumber} attempts`);
+});
+
+socket.on('reconnect_error', (error) => {
+    console.error('Reconnection error:', error);
+});
+
+socket.on('reconnect_failed', () => {
+    console.error('Failed to reconnect to stats server');
+});
+
+// No REST API call - everything comes through WebSocket
+// The WebSocket connection itself provides the initial stats when connected
+
+// Optional: Add a small live indicator to show real-time connection status
+function addLiveIndicator() {
+    if (document.getElementById('live-indicator')) return;
     
-    // Optional: Show connection error
-    const statusElement = document.getElementById('connection-status');
-    if (statusElement && reconnectAttempts > 3) {
-        statusElement.style.display = 'flex';
-        statusElement.innerHTML = '<i class="fas fa-wifi"></i> Connection issue - using fallback';
-    }
-});
-
-// Listen for stats updates from server - ALL DEVICES RECEIVE SAME DATA AT SAME TIME
-socket.on('stats-update', (data) => {
-    // Update the frontend instantly when Redis updates
-    if (data && data.totalInvestors !== undefined) {
-        const investorCountElement = document.getElementById('total-cloud-miners');
-        if (investorCountElement) {
-            // Format the number with commas for better readability
-            const formattedNumber = data.totalInvestors.toLocaleString('en-US');
-            investorCountElement.innerText = formattedNumber;
-            console.log('📊 Real-time stats update received:', data.totalInvestors, 'investors');
+    const indicator = document.createElement('div');
+    indicator.id = 'live-indicator';
+    indicator.style.cssText = `
+        position: fixed;
+        bottom: 15px;
+        right: 15px;
+        background: rgba(34, 139, 34, 0.9);
+        color: white;
+        padding: 5px 12px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 500;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        backdrop-filter: blur(4px);
+        font-family: monospace;
+        pointer-events: none;
+    `;
+    indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; color: #00ff00;"></i> LIVE';
+    document.body.appendChild(indicator);
+    
+    socket.on('disconnect', () => {
+        if (indicator) {
+            indicator.style.background = 'rgba(255, 0, 0, 0.9)';
+            indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; color: #ff0000;"></i> RECONNECTING';
         }
-        
-        // Also update any other elements that display investor count
-        const anyOtherElements = document.querySelectorAll('.investor-count-display');
-        anyOtherElements.forEach(el => {
-            el.innerText = data.totalInvestors.toLocaleString('en-US');
-        });
-    }
-});
-
-// Initial load - get current stats via REST API (fallback in case WebSocket is slow)
-async function loadInitialStats() {
-    try {
-        const response = await fetch('https://bithash-backend.onrender.com/api/stats');
-        if (response.ok) {
-            const data = await response.json();
-            if (data.totalInvestors !== undefined) {
-                const investorCountElement = document.getElementById('total-cloud-miners');
-                if (investorCountElement) {
-                    const formattedNumber = data.totalInvestors.toLocaleString('en-US');
-                    investorCountElement.innerText = formattedNumber;
-                    console.log('📊 Initial stats loaded:', data.totalInvestors, 'investors');
-                }
-            }
-        } else {
-            console.warn('Failed to load initial stats, waiting for WebSocket');
+    });
+    
+    socket.on('connect', () => {
+        if (indicator) {
+            indicator.style.background = 'rgba(34, 139, 34, 0.9)';
+            indicator.innerHTML = '<i class="fas fa-circle" style="font-size: 8px; color: #00ff00;"></i> LIVE';
         }
-    } catch (error) {
-        console.error('Error loading initial stats:', error);
-    }
+    });
 }
 
-// Call initial load
-loadInitialStats();
-
-// Optional: Add a small indicator to show real-time updates are active
-function addConnectionIndicator() {
-    const heroSection = document.querySelector('.hero-section');
-    if (heroSection && !document.getElementById('realtime-indicator')) {
-        const indicator = document.createElement('div');
-        indicator.id = 'realtime-indicator';
-        indicator.style.cssText = `
-            position: fixed;
-            bottom: 10px;
-            left: 10px;
-            background: rgba(34, 139, 34, 0.8);
-            color: white;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: 500;
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            backdrop-filter: blur(4px);
-            pointer-events: none;
-        `;
-        indicator.innerHTML = '<i class="fas fa-bolt"></i> Live Updates Active';
-        document.body.appendChild(indicator);
-    }
-}
-
-// Add indicator after page loads
+// Initialize on page load
 window.addEventListener('load', () => {
-    setTimeout(addConnectionIndicator, 1000);
+    setTimeout(addLiveIndicator, 1000);
+    
+    const investorElement = document.getElementById('total-cloud-miners');
+    if (investorElement && !investorElement.innerText) {
+        investorElement.innerText = 'Connecting...';
+    }
 });
 
-// Optional: Function to manually refresh stats (if needed)
-window.refreshStatsManually = async function() {
-    try {
-        const response = await fetch('https://bithash-backend.onrender.com/api/stats');
-        if (response.ok) {
-            const data = await response.json();
-            const investorCountElement = document.getElementById('total-cloud-miners');
-            if (investorCountElement && data.totalInvestors !== undefined) {
-                investorCountElement.innerText = data.totalInvestors.toLocaleString('en-US');
-                console.log('📊 Manual stats refresh:', data.totalInvestors);
-            }
-        }
-    } catch (error) {
-        console.error('Manual refresh failed:', error);
-    }
-};
-
-
-
-
-
+// Expose for debugging
+window.getCurrentInvestorCount = () => currentInvestorCount;
 
 
 
