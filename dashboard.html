@@ -30,10 +30,11 @@
     <!-- TradingView Library (ONLY for charts) -->
     <script src="https://s3.tradingview.com/tv.js"></script>
     
-    <!-- Chart.js for donut chart -->
+    <!-- Chart.js for Donut Chart -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <!-- Socket.IO client -->
-    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    
+    <!-- Socket.IO for real-time updates -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
     <!-- Google tag (gtag.js) -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-46S59PXRGK"></script>
@@ -852,31 +853,34 @@
         
         /* Money Flow Donut Chart */
         .moneyflow-section {
-            margin: 10px 0 30px;
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: center;
         }
-        .moneyflow-card {
+        .donut-chart-card {
             background: var(--bg-hover);
-            border-radius: 16px;
+            border-radius: 20px;
             padding: 20px;
+            max-width: 400px;
+            width: 100%;
             text-align: center;
+            border: 1px solid var(--border);
         }
-        .moneyflow-title {
-            font-size: 1rem;
-            font-weight: 600;
-            color: var(--gray);
-            margin-bottom: 12px;
-            letter-spacing: 0.5px;
+        .donut-chart-card h3 {
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            color: var(--text-secondary);
         }
         .donut-chart-container {
-            max-width: 220px;
+            max-width: 280px;
             margin: 0 auto;
             position: relative;
         }
         canvas#moneyFlowDonut {
-            max-height: 200px;
-            width: 100%;
+            max-height: 260px;
+            width: 100% !important;
         }
-
+        
         .global-asset-selector {
             margin: 20px 0 40px;
             display: inline-flex;
@@ -2946,13 +2950,16 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Money Flow Analysis Donut Chart (REAL DASHBOARD) -->
+            
+            <!-- MONEY FLOW DONUT CHART SECTION -->
             <div class="moneyflow-section">
-                <div class="moneyflow-card">
-                    <div class="moneyflow-title">Money Flow Analysis (Real-time)</div>
+                <div class="donut-chart-card">
+                    <h3><i class="fas fa-chart-pie"></i> Money Flow Analysis</h3>
                     <div class="donut-chart-container">
-                        <canvas id="moneyFlowDonut" width="200" height="200"></canvas>
+                        <canvas id="moneyFlowDonut" width="280" height="260"></canvas>
+                    </div>
+                    <div style="margin-top: 12px; font-size: 0.8rem; color: var(--gray);" id="donut-chart-legend">
+                        Loading...
                     </div>
                 </div>
             </div>
@@ -3187,6 +3194,29 @@
         </div>
     </div>
 
+    <!-- FIAT CURRENCY SELECTOR MODAL -->
+    <div class="asset-selector-modal" id="fiat-currency-modal">
+        <div class="asset-selector-content">
+            <div class="asset-selector-header">
+                <h3>Select Fiat Currency</h3>
+                <button class="asset-selector-close" onclick="closeFiatModal()">&times;</button>
+            </div>
+            <div class="asset-selector-body">
+                <div class="asset-selector-search">
+                    <input type="text" id="fiat-search" placeholder="Search currency..." oninput="filterFiatList()">
+                </div>
+                <div class="asset-selector-list" id="fiat-list-container" style="max-height: 350px; overflow-y: auto;">
+                    <!-- Fiat list will be populated paginated from backend -->
+                </div>
+                <div class="asset-selector-pagination" id="fiat-pagination-controls">
+                    <button class="asset-selector-pagination-btn" id="fiat-prev-btn" disabled><i class="fas fa-chevron-left"></i></button>
+                    <span class="asset-selector-pagination-info" id="fiat-page-info">1/1</span>
+                    <button class="asset-selector-pagination-btn" id="fiat-next-btn"><i class="fas fa-chevron-right"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Asset Details Modal -->
     <div class="modal" id="asset-details-modal">
         <div class="modal-content">
@@ -3393,7 +3423,7 @@
         let allAssets = [];
         let userBalances = { main: 0, active: 0, matured: 0 };
         let userAssetBalances = {};
-        let userPreferences = { displayAsset: 'btc' };
+        let userPreferences = { displayAsset: 'btc', fiatCurrency: 'USD' };
         let userPortfolio = [];
         let portfolioSummary = { totalValue: 0, totalProfitLoss: 0, totalProfitLossPercentage: 0, assetsCount: 0 };
         let AppState = {
@@ -3402,8 +3432,14 @@
             lastDepositCheck: null,
             defaultAsset: 'btc',
             availableAssets: [],
-            assetTransactions: {}
+            assetTransactions: {},
+            fiatCurrencies: [],
+            fiatPage: 1,
+            fiatTotalPages: 1,
+            fiatFilteredList: []
         };
+        let donutChartInstance = null;
+        let socket = null;
         
         // Asset selector pagination
         let assetPage = 1;
@@ -3428,10 +3464,6 @@
         
         // Current mobile balance tab
         let currentMobileBalance = 'main';
-        
-        // Money Flow Chart
-        let moneyFlowChart = null;
-        let socket = null;
         
         // Top 30 assets by market cap
         const topAssets = [
@@ -3491,6 +3523,8 @@
                 await checkLoanEligibility();
                 await loadUserPreferences();
                 await checkAuthState();
+                await loadFiatCurrenciesFromBackend();
+                await initSocketAndDonut();
                 document.getElementById('current-year').textContent = new Date().getFullYear();
                 startAnnouncementsPolling();
                 startAutoRefresh();
@@ -3529,51 +3563,8 @@
                         renderDownlineTable();
                     }
                 });
-                
-                // Initialize Socket.IO and Donut Chart
-                initSocketAndDonut();
             }, 1000);
         });
-        
-        function initSocketAndDonut() {
-            // Connect to backend socket for real-time money flow
-            socket = io('https://bithash-backend.onrender.com', { transports: ['websocket'], reconnection: true });
-            socket.on('connect', () => {
-                console.log('Socket connected for money flow');
-                socket.emit('subscribe-moneyflow');
-            });
-            socket.on('moneyflow-update', (data) => {
-                if (moneyFlowChart && data && data.inflow !== undefined && data.outflow !== undefined) {
-                    moneyFlowChart.data.datasets[0].data = [data.inflow, data.outflow];
-                    moneyFlowChart.update();
-                }
-            });
-            // Initialize donut chart
-            const ctx = document.getElementById('moneyFlowDonut').getContext('2d');
-            moneyFlowChart = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Inflow (Deposits/Buys)', 'Outflow (Withdrawals/Sells)'],
-                    datasets: [{
-                        data: [0, 0],
-                        backgroundColor: ['#228B22', '#FF0000'],
-                        borderWidth: 0,
-                        cutout: '60%'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    plugins: {
-                        legend: { position: 'bottom', labels: { color: '#B7BDC6', font: { size: 10 } } },
-                        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toFixed(2)}` } }
-                    }
-                }
-            });
-            // Request initial data
-            fetch(`${window.location.protocol}//${window.location.hostname}:5000/api/moneyflow`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('jwtToken')}` } })
-                .then(res => res.json()).then(data => { if(data.inflow !== undefined && data.outflow !== undefined) moneyFlowChart.data.datasets[0].data = [data.inflow, data.outflow]; moneyFlowChart.update(); }).catch(console.warn);
-        }
         
         function startAutoRefresh() {
             setInterval(async () => {
@@ -3733,14 +3724,17 @@
             return parts[0];
         }
         
+        function formatFiat(amount) {
+            const symbol = userPreferences.fiatCurrency || 'USD';
+            const numericAmount = parseFloat(amount) || 0;
+            if (symbol === 'USD') return '$' + numericAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (symbol === 'EUR') return '€' + numericAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (symbol === 'GBP') return '£' + numericAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            return `${symbol} ${numericAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        }
+        
         function formatUSD(num) {
-            const numericNum = parseFloat(num) || 0;
-            if (numericNum >= 1e12) return '$' + (numericNum / 1e12).toFixed(2) + 'T';
-            if (numericNum >= 1e9) return '$' + (numericNum / 1e9).toFixed(2) + 'B';
-            if (numericNum >= 1e6) return '$' + (numericNum / 1e6).toFixed(2) + 'M';
-            const parts = numericNum.toFixed(2).split('.');
-            parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-            return '$' + parts.join('.');
+            return formatFiat(num);
         }
         
         function formatNumberWithCommas(num, decimals = 8) {
@@ -3854,17 +3848,17 @@
                         </div>
                         <div class="asset-balance-value">
                             <div class="asset-balance-amount">${formatNumberWithCommas(asset.totalAmount || 0, 6)}</div>
-                            <div class="asset-balance-usd">${formatUSD(asset.currentValue || 0)}</div>
+                            <div class="asset-balance-usd">${formatFiat(asset.currentValue || 0)}</div>
                         </div>
                     </div>
                     <div class="asset-balance-details">
                         <div class="detail-row">
                             <span>Avg Buy Price:</span>
-                            <span>${formatUSD(asset.averageBuyingPrice || 0)}</span>
+                            <span>${formatFiat(asset.averageBuyingPrice || 0)}</span>
                         </div>
                         <div class="detail-row ${profitLossClass}">
                             <span>P/L:</span>
-                            <span>${profitLossSign}${formatUSD(asset.unrealizedProfitLoss || 0)} (${profitLossSign}${(asset.unrealizedPercentage || 0).toFixed(2)}%)</span>
+                            <span>${profitLossSign}${formatFiat(asset.unrealizedProfitLoss || 0)} (${profitLossSign}${(asset.unrealizedPercentage || 0).toFixed(2)}%)</span>
                         </div>
                         <div class="detail-row ${changeClass}">
                             <span>24h Change:</span>
@@ -3895,32 +3889,32 @@
                     <div class="portfolio-stat-card">
                         <div class="stat-label">Current Balance</div>
                         <div class="stat-value">${formatNumberWithCommas(asset.totalAmount || 0, 6)} ${(asset.asset || 'btc').toUpperCase()}</div>
-                        <div class="stat-subvalue">${formatUSD(asset.currentValue || 0)}</div>
+                        <div class="stat-subvalue">${formatFiat(asset.currentValue || 0)}</div>
                     </div>
                     <div class="portfolio-stat-card">
                         <div class="stat-label">Average Buy Price</div>
-                        <div class="stat-value">${formatUSD(asset.averageBuyingPrice || 0)}</div>
-                        <div class="stat-subvalue">Current: ${formatUSD(asset.currentPrice || 0)}</div>
+                        <div class="stat-value">${formatFiat(asset.averageBuyingPrice || 0)}</div>
+                        <div class="stat-subvalue">Current: ${formatFiat(asset.currentPrice || 0)}</div>
                     </div>
                     <div class="portfolio-stat-card">
                         <div class="stat-label">Total Spent</div>
-                        <div class="stat-value">${formatUSD(asset.totalSpent || 0)}</div>
-                        <div class="stat-subvalue">Sold: ${formatUSD(asset.totalSold || 0)}</div>
+                        <div class="stat-value">${formatFiat(asset.totalSpent || 0)}</div>
+                        <div class="stat-subvalue">Sold: ${formatFiat(asset.totalSold || 0)}</div>
                     </div>
                 </div>
                 <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
                     <div class="portfolio-stat-card ${profitLossClass}">
                         <div class="stat-label">Unrealized P/L</div>
-                        <div class="stat-value">${profitLossSign}${formatUSD(asset.unrealizedProfitLoss || 0)}</div>
+                        <div class="stat-value">${profitLossSign}${formatFiat(asset.unrealizedProfitLoss || 0)}</div>
                         <div class="stat-subvalue">${profitLossSign}${(asset.unrealizedPercentage || 0).toFixed(2)}%</div>
                     </div>
                     <div class="portfolio-stat-card">
                         <div class="stat-label">Realized Profit</div>
-                        <div class="stat-value price-positive">+${formatUSD(asset.realizedProfit || 0)}</div>
+                        <div class="stat-value price-positive">+${formatFiat(asset.realizedProfit || 0)}</div>
                     </div>
                     <div class="portfolio-stat-card">
                         <div class="stat-label">Realized Loss</div>
-                        <div class="stat-value price-negative">-${formatUSD(asset.realizedLoss || 0)}</div>
+                        <div class="stat-value price-negative">-${formatFiat(asset.realizedLoss || 0)}</div>
                     </div>
                 </div>
             `;
@@ -3957,17 +3951,18 @@
                 const amountPrefix = isBuy ? '+' : '-';
                 let profitDisplay = '';
                 if (t.type === 'sell') {
-                    if (t.profit > 0) profitDisplay = `<span class="price-positive"> (+${formatUSD(t.profit)})</span>`;
-                    else if (t.loss > 0) profitDisplay = `<span class="price-negative"> (-${formatUSD(t.loss)})</span>`;
+                    if (t.profit > 0) profitDisplay = `<span class="price-positive"> (+${formatFiat(t.profit)})</span>`;
+                    else if (t.loss > 0) profitDisplay = `<span class="price-negative"> (-${formatFiat(t.loss)})</span>`;
                 }
                 const item = document.createElement('div');
                 item.className = 'portfolio-transaction-item';
+                item.onclick = () => navigateToTransactionPage(t);
                 item.innerHTML = `
                     <div class="transaction-date">${formattedDate}</div>
                     <div class="transaction-details">
                         <div>
                             <span class="transaction-type ${t.type || 'buy'}">${(t.type || 'buy').toUpperCase()}</span>
-                            <span class="transaction-price">@ ${formatUSD(t.price || 0)}</span>
+                            <span class="transaction-price">@ ${formatFiat(t.price || 0)}</span>
                         </div>
                         <div class="transaction-amount ${amountClass}">
                             ${amountPrefix}${formatNumberWithCommas(t.amount || t.assetAmount || 0, 6)} ${(t.asset || 'btc').toUpperCase()}${profitDisplay}
@@ -4080,7 +4075,7 @@
                     await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                        body: JSON.stringify({ displayAsset: asset.symbol })
+                        body: JSON.stringify({ displayAsset: asset.symbol, fiatCurrency: userPreferences.fiatCurrency })
                     });
                 }
             } catch (error) {
@@ -4098,21 +4093,21 @@
             const balanceUsd = balance * price;
             const portfolioItem = userPortfolio ? userPortfolio.find(p => p.asset === asset.symbol) : null;
             document.getElementById('asset-details-grid').innerHTML = `
-                <div class="asset-detail-item"><div class="asset-detail-label">Price</div><div class="asset-detail-value">${formatUSD(price)}</div></div>
+                <div class="asset-detail-item"><div class="asset-detail-label">Price</div><div class="asset-detail-value">${formatFiat(price)}</div></div>
                 <div class="asset-detail-item"><div class="asset-detail-label">24h Change</div><div class="asset-detail-value ${change24h >= 0 ? 'price-positive' : 'price-negative'}">${change24h >= 0 ? '<i class="fas fa-arrow-up"></i>+' : '<i class="fas fa-arrow-down"></i>'}${change24h.toFixed(2)}%</div></div>
-                <div class="asset-detail-item"><div class="asset-detail-label">Your Balance</div><div class="asset-detail-value">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div><div style="font-size: 0.85rem; color: var(--gray);">${formatUSD(balanceUsd)}</div></div>
-                ${portfolioItem ? `<div class="asset-detail-item"><div class="asset-detail-label">Avg Buy Price</div><div class="asset-detail-value">${formatUSD(portfolioItem.averageBuyingPrice || 0)}</div></div>
-                <div class="asset-detail-item"><div class="asset-detail-label">P/L (Unrealized)</div><div class="asset-detail-value ${(portfolioItem.unrealizedProfitLoss || 0) >= 0 ? 'price-positive' : 'price-negative'}">${(portfolioItem.unrealizedProfitLoss || 0) >= 0 ? '+' : ''}${formatUSD(portfolioItem.unrealizedProfitLoss || 0)} <span style="font-size: 0.85rem;">(${(portfolioItem.unrealizedPercentage || 0) >= 0 ? '+' : ''}${(portfolioItem.unrealizedPercentage || 0).toFixed(2)}%)</span></div></div>` : ''}
+                <div class="asset-detail-item"><div class="asset-detail-label">Your Balance</div><div class="asset-detail-value">${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()}</div><div style="font-size: 0.85rem; color: var(--gray);">${formatFiat(balanceUsd)}</div></div>
+                ${portfolioItem ? `<div class="asset-detail-item"><div class="asset-detail-label">Avg Buy Price</div><div class="asset-detail-value">${formatFiat(portfolioItem.averageBuyingPrice || 0)}</div></div>
+                <div class="asset-detail-item"><div class="asset-detail-label">P/L (Unrealized)</div><div class="asset-detail-value ${(portfolioItem.unrealizedProfitLoss || 0) >= 0 ? 'price-positive' : 'price-negative'}">${(portfolioItem.unrealizedProfitLoss || 0) >= 0 ? '+' : ''}${formatFiat(portfolioItem.unrealizedProfitLoss || 0)} <span style="font-size: 0.85rem;">(${(portfolioItem.unrealizedPercentage || 0) >= 0 ? '+' : ''}${(portfolioItem.unrealizedPercentage || 0).toFixed(2)}%)</span></div></div>` : ''}
             `;
-            document.getElementById('modal-balance-info').textContent = `Your balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()} (${formatUSD(balanceUsd)})`;
+            document.getElementById('modal-balance-info').textContent = `Your balance: ${formatNumberWithCommas(balance, 6)} ${asset.symbol.toUpperCase()} (${formatFiat(balanceUsd)})`;
             const mainBalance = userBalances.main || 0;
             const maturedBalance = userBalances.matured || 0;
             const totalAvailable = mainBalance + maturedBalance;
             document.getElementById('modal-wallet-info').innerHTML = `
                 <div style="margin-top: 10px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;"><span>Main Wallet:</span><span>${formatUSD(mainBalance)}</span></div>
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;"><span>Matured Wallet:</span><span>${formatUSD(maturedBalance)}</span></div>
-                    <div style="display: flex; justify-content: space-between; font-weight: bold; border-top: 1px solid #333; padding-top: 5px;"><span>Total Available:</span><span>${formatUSD(totalAvailable)}</span></div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;"><span>Main Wallet:</span><span>${formatFiat(mainBalance)}</span></div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;"><span>Matured Wallet:</span><span>${formatFiat(maturedBalance)}</span></div>
+                    <div style="display: flex; justify-content: space-between; font-weight: bold; border-top: 1px solid #333; padding-top: 5px;"><span>Total Available:</span><span>${formatFiat(totalAvailable)}</span></div>
                 </div>
             `;
             document.getElementById('modal-trade-amount').value = '';
@@ -4148,7 +4143,7 @@
             const maturedBalance = userBalances.matured || 0;
             const totalAvailable = mainBalance + maturedBalance;
             if (amountUSD > totalAvailable) {
-                showNotification('error', 'Insufficient Balance', `You have ${formatUSD(totalAvailable)} available. Redirecting to deposit page...`);
+                showNotification('error', 'Insufficient Balance', `You have ${formatFiat(totalAvailable)} available. Redirecting to deposit page...`);
                 setTimeout(() => window.location.href = 'deposit.html', 2000);
                 return;
             }
@@ -4289,9 +4284,9 @@
                     const data = await response.json();
                     const balances = data.data?.balances || data.balances || {};
                     userBalances = { main: parseFloat(balances.main) || 0, active: parseFloat(balances.active) || 0, matured: parseFloat(balances.matured) || 0 };
-                    document.getElementById('main-balance').textContent = formatUSD(userBalances.main);
-                    document.getElementById('active-balance').textContent = formatUSD(userBalances.active);
-                    document.getElementById('matured-balance').textContent = formatUSD(userBalances.matured);
+                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
                     ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
                 }
             } catch (error) {
@@ -4331,10 +4326,20 @@
                     if (data.data && data.data.displayAsset) {
                         userPreferences.displayAsset = data.data.displayAsset;
                     }
+                    if (data.data && data.data.fiatCurrency) {
+                        userPreferences.fiatCurrency = data.data.fiatCurrency;
+                    }
                     const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
                     document.getElementById('global-asset-logo').src = assetData.logo;
                     document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
                     ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
+                    
+                    // Refresh all displayed fiat values
+                    await loadBalances();
+                    await loadPortfolio();
+                    await loadInvestments();
+                    await loadTransactions();
+                    await loadReferralData();
                 }
             } catch (error) {
                 console.error('Error loading preferences:', error);
@@ -4361,7 +4366,7 @@
                         const row = document.createElement('tr');
                         const maturityDate = new Date(investment.endDate || investment.maturityDate);
                         const hoursLeft = Math.max(0, Math.ceil((maturityDate - new Date()) / (1000 * 60 * 60)));
-                        row.innerHTML = `<td>${investment.planName || 'Cloud Mining Plan'}</td><td>${formatUSD(parseFloat(investment.amount) || 0)}</td><td>${investment.durationHours || 0} hours</td><td>${investment.planName?.toLowerCase().includes('expert') ? 50 : investment.planName?.toLowerCase().includes('exclusive') ? 40 : investment.planName?.toLowerCase().includes('advance') ? 35 : investment.planName?.toLowerCase().includes('gold') ? 20 : 12}%</td><td>${maturityDate.toLocaleDateString()}</td><td><span class="status-badge ${investment.status === 'active' ? 'success' : 'pending'}">${investment.status === 'active' ? `${hoursLeft}h left` : 'Pending'}</span></td>`;
+                        row.innerHTML = `<td>${investment.planName || 'Cloud Mining Plan'}</td><td>${formatFiat(parseFloat(investment.amount) || 0)}</td><td>${investment.durationHours || 0} hours</td><td>${investment.planName?.toLowerCase().includes('expert') ? 50 : investment.planName?.toLowerCase().includes('exclusive') ? 40 : investment.planName?.toLowerCase().includes('advance') ? 35 : investment.planName?.toLowerCase().includes('gold') ? 20 : 12}%</td><td>${maturityDate.toLocaleDateString()}</td><td><span class="status-badge ${investment.status === 'active' ? 'success' : 'pending'}">${investment.status === 'active' ? `${hoursLeft}h left` : 'Pending'}</span></td>`;
                         tableBody.appendChild(row);
                     });
                 }
@@ -4421,11 +4426,11 @@
                 let amountDisplay;
                 if (transaction.type === 'buy' || transaction.type === 'sell') {
                     const assetAmount = parseFloat(transaction.assetAmount) || 0;
-                    amountDisplay = `<div class="${amountClass}">${amountPrefix}${formatUSD(Math.abs(usdAmount))}</div><div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;"><img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}</div>`;
+                    amountDisplay = `<div class="${amountClass}">${amountPrefix}${formatFiat(Math.abs(usdAmount))}</div><div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;"><img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}</div>`;
                 } else {
                     const exchangeRate = currentPrices[topAssets.find(a => a.symbol === assetSymbol.toLowerCase())?.id]?.usd || currentBTCPrice;
                     const assetAmount = usdAmount / exchangeRate;
-                    amountDisplay = `<div class="${amountClass}">${amountPrefix}${formatUSD(Math.abs(usdAmount))}</div><div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;"><img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}</div>`;
+                    amountDisplay = `<div class="${amountClass}">${amountPrefix}${formatFiat(Math.abs(usdAmount))}</div><div style="font-size: 0.75rem; color: var(--gray); display: flex; align-items: center; gap: 4px; margin-top: 4px;"><img src="${assetLogo}" style="width: 14px; height: 14px; border-radius: 50%;">${amountPrefix}${formatNumberWithCommas(Math.abs(assetAmount), 8)} ${formattedAssetSymbol}</div>`;
                 }
                 let network = transaction.network || assetNetworks[assetSymbol.toLowerCase()] || 'Bitcoin';
                 let detailText = transaction.description || transaction.details || (transaction.type === 'deposit' ? `Deposit of ${formattedAssetSymbol}` : transaction.type === 'withdrawal' ? `Withdrawal of ${formattedAssetSymbol}` : transaction.type === 'buy' ? `Bought ${formattedAssetSymbol}` : transaction.type === 'sell' ? `Sold ${formattedAssetSymbol}` : 'Transaction processed');
@@ -4450,8 +4455,8 @@
                     const referralData = data.data || data;
                     document.getElementById('referral-link-text').textContent = referralData.referralLink || 'Not available';
                     document.getElementById('referral-count').textContent = referralData.totalReferrals || 0;
-                    document.getElementById('referral-earnings').textContent = formatUSD(parseFloat(referralData.totalEarnings) || 0);
-                    document.getElementById('referral-pending').textContent = formatUSD(parseFloat(referralData.pendingEarnings) || 0);
+                    document.getElementById('referral-earnings').textContent = formatFiat(parseFloat(referralData.totalEarnings) || 0);
+                    document.getElementById('referral-pending').textContent = formatFiat(parseFloat(referralData.pendingEarnings) || 0);
                 }
             } catch (error) {
                 console.error('Error loading referral data:', error);
@@ -4511,7 +4516,7 @@
                 const levelText = level === 1 ? 'Direct' : level === 2 ? 'Level 2' : `Level ${level}`;
                 const earnings = member.totalEarned || 0;
                 const totalInvested = member.totalInvested || member.investmentRounds || 0;
-                row.innerHTML = `<td><div class="downline-user-info"><div class="downline-avatar">${initials}</div><div><div class="downline-username">${fullName}</div><div class="downline-email">${email}</div></div></div></td><td><span class="downline-level-badge">${levelText}</span></td><td>${formattedDate}</td><td><span class="downline-status ${statusClass}">${statusText}</span></td><td>${formatUSD(totalInvested)}</td><td class="downline-earnings">${formatUSD(earnings)}</td>`;
+                row.innerHTML = `<td><div class="downline-user-info"><div class="downline-avatar">${initials}</div><div><div class="downline-username">${fullName}</div><div class="downline-email">${email}</div></div></div></td><td><span class="downline-level-badge">${levelText}</span></td><td>${formattedDate}</td><td><span class="downline-status ${statusClass}">${statusText}</span></td><td>${formatFiat(totalInvested)}</td><td class="downline-earnings">${formatFiat(earnings)}</td>`;
                 tableBody.appendChild(row);
             });
             const totalPages = Math.ceil(downlineTotal / downlinePerPage);
@@ -4582,7 +4587,7 @@
             const eligibilityStatus = document.getElementById('loan-eligibility-status');
             const applyButton = document.getElementById('loan-application-btn');
             if (!eligibilityData) { termsDisplay.innerHTML = '<p>Loading loan information...</p>'; return; }
-            termsDisplay.innerHTML = `<div class="loan-term-item"><div class="loan-term-label">Maximum Loan Amount</div><div class="loan-term-value">${formatUSD(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div></div><div class="loan-term-item"><div class="loan-term-label">Monthly Interest Rate</div><div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div></div><div class="loan-term-item"><div class="loan-term-label">Credit Score</div><div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div></div><div class="loan-term-item"><div class="loan-term-label">Disbursement Fee</div><div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div></div>`;
+            termsDisplay.innerHTML = `<div class="loan-term-item"><div class="loan-term-label">Maximum Loan Amount</div><div class="loan-term-value">${formatFiat(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div></div><div class="loan-term-item"><div class="loan-term-label">Monthly Interest Rate</div><div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div></div><div class="loan-term-item"><div class="loan-term-label">Credit Score</div><div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div></div><div class="loan-term-item"><div class="loan-term-label">Disbursement Fee</div><div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div></div>`;
             if (eligibilityData.eligible) {
                 eligibilityStatus.innerHTML = `<div class="eligibility-item"><div class="eligibility-icon verified"><i class="fas fa-check"></i></div><div class="eligibility-text"><strong>Congratulations! You qualify for a loan.</strong></div></div>`;
                 applyButton.disabled = false;
@@ -4624,7 +4629,7 @@
                 const purpose = document.getElementById('loan-purpose').value;
                 const term = parseInt(document.getElementById('loan-term-selection').value);
                 if (!amount || amount < 1000) { showNotification('error', 'Invalid Amount', 'Minimum loan amount is $1,000'); return; }
-                if (amount > (parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)) { showNotification('error', 'Amount Exceeds Limit', `Maximum loan amount is ${formatUSD(parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)}`); return; }
+                if (amount > (parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)) { showNotification('error', 'Amount Exceeds Limit', `Maximum loan amount is ${formatFiat(parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)}`); return; }
                 document.getElementById('submit-loan-application').disabled = true;
                 document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
                 document.getElementById('loan-application-status').textContent = 'Submitting your loan application...';
@@ -4635,7 +4640,7 @@
                 if (response.ok) {
                     document.getElementById('loan-application-form').style.display = 'none';
                     document.getElementById('loan-success-message').style.display = 'block';
-                    showNotification('success', 'Application Submitted', `Your loan application for ${formatUSD(amount)} has been submitted successfully.`);
+                    showNotification('success', 'Application Submitted', `Your loan application for ${formatFiat(amount)} has been submitted successfully.`);
                     setTimeout(() => { loadBalances(); checkLoanEligibility(); }, 2000);
                 } else {
                     const errorData = await response.json();
@@ -4771,9 +4776,208 @@
             window.location.href = 'logout.html';
         }
         
+        // ========== FIAT CURRENCY SELECTOR FROM BACKEND ==========
+        async function loadFiatCurrenciesFromBackend() {
+            try {
+                const token = localStorage.getItem('jwtToken');
+                if (!token) return;
+                const response = await fetch('https://bithash-backend.onrender.com/api/fiat/currencies', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    AppState.fiatCurrencies = data.currencies || [];
+                    AppState.fiatFilteredList = [...AppState.fiatCurrencies];
+                    AppState.fiatPage = 1;
+                    AppState.fiatTotalPages = Math.ceil(AppState.fiatFilteredList.length / 5);
+                    renderFiatList();
+                    setupFiatPagination();
+                } else {
+                    console.warn('Failed to load fiat currencies');
+                }
+            } catch (error) {
+                console.error('Error loading fiat currencies:', error);
+            }
+        }
+        
+        function renderFiatList() {
+            const container = document.getElementById('fiat-list-container');
+            if (!container) return;
+            const start = (AppState.fiatPage - 1) * 5;
+            const pageCurrencies = AppState.fiatFilteredList.slice(start, start + 5);
+            container.innerHTML = '';
+            pageCurrencies.forEach(curr => {
+                const item = document.createElement('div');
+                item.className = `asset-selector-item ${curr.code === userPreferences.fiatCurrency ? 'selected' : ''}`;
+                item.innerHTML = `
+                    <div style="font-size: 1.5rem; margin-right: 8px;">${curr.flag || '🏳️'}</div>
+                    <div class="asset-selector-item-info">
+                        <div class="asset-selector-item-name">${curr.name}</div>
+                        <div class="asset-selector-item-symbol">${curr.code}</div>
+                    </div>
+                `;
+                item.onclick = () => selectFiatCurrency(curr);
+                container.appendChild(item);
+            });
+            document.getElementById('fiat-page-info').innerText = `${AppState.fiatPage}/${AppState.fiatTotalPages || 1}`;
+            const prevBtn = document.getElementById('fiat-prev-btn');
+            const nextBtn = document.getElementById('fiat-next-btn');
+            if (prevBtn) prevBtn.disabled = AppState.fiatPage === 1;
+            if (nextBtn) nextBtn.disabled = AppState.fiatPage === AppState.fiatTotalPages || AppState.fiatTotalPages === 0;
+        }
+        
+        function filterFiatList() {
+            const searchTerm = document.getElementById('fiat-search').value.toLowerCase();
+            AppState.fiatFilteredList = AppState.fiatCurrencies.filter(c => c.name.toLowerCase().includes(searchTerm) || c.code.toLowerCase().includes(searchTerm));
+            AppState.fiatPage = 1;
+            AppState.fiatTotalPages = Math.ceil(AppState.fiatFilteredList.length / 5);
+            renderFiatList();
+        }
+        
+        function setupFiatPagination() {
+            const prevBtn = document.getElementById('fiat-prev-btn');
+            const nextBtn = document.getElementById('fiat-next-btn');
+            if (prevBtn) prevBtn.onclick = () => { if (AppState.fiatPage > 1) { AppState.fiatPage--; renderFiatList(); } };
+            if (nextBtn) nextBtn.onclick = () => { if (AppState.fiatPage < AppState.fiatTotalPages) { AppState.fiatPage++; renderFiatList(); } };
+        }
+        
+        async function selectFiatCurrency(currency) {
+            userPreferences.fiatCurrency = currency.code;
+            showNotification('success', 'Currency Updated', `Display currency changed to ${currency.code}`);
+            // Refresh all displays
+            await loadBalances();
+            await loadPortfolio();
+            await loadInvestments();
+            await loadTransactions();
+            await loadReferralData();
+            try {
+                const token = localStorage.getItem('jwtToken');
+                if (token) {
+                    await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                        body: JSON.stringify({ displayAsset: userPreferences.displayAsset, fiatCurrency: currency.code })
+                    });
+                }
+            } catch (error) {
+                console.error('Error saving fiat preference:', error);
+            }
+            closeFiatModal();
+        }
+        
+        function openFiatModal() {
+            document.getElementById('fiat-currency-modal').classList.add('active');
+            if (AppState.fiatCurrencies.length === 0) loadFiatCurrenciesFromBackend();
+            else renderFiatList();
+        }
+        
+        function closeFiatModal() {
+            document.getElementById('fiat-currency-modal').classList.remove('active');
+        }
+        
+        // ========== SOCKET.IO REAL-TIME PNL & DONUT ==========
+        async function initSocketAndDonut() {
+            const token = localStorage.getItem('jwtToken');
+            if (!token) return;
+            socket = io('https://bithash-backend.onrender.com', {
+                auth: { token },
+                transports: ['websocket']
+            });
+            socket.on('connect', () => {
+                console.log('Socket connected for real-time updates');
+                socket.emit('subscribe-dashboard');
+            });
+            socket.on('money-flow-update', (data) => {
+                updateDonutChart(data.inflow || 0, data.outflow || 0);
+            });
+            socket.on('pnl-update', (pnlData) => {
+                // Update Today's PnL for main and matured wallets (active does not fluctuate)
+                if (pnlData.main) {
+                    const mainPnl = pnlData.main;
+                    const mainChangeElem = document.getElementById('main-balance-change-container');
+                    const mainChangeSpan = document.getElementById('main-balance-change');
+                    const isPositive = mainPnl.value >= 0;
+                    mainChangeElem.className = `balance-change ${isPositive ? 'positive' : 'negative'}`;
+                    mainChangeSpan.innerHTML = `${formatFiat(Math.abs(mainPnl.value))} (${isPositive ? '+' : ''}${mainPnl.percentage.toFixed(2)}%)`;
+                }
+                if (pnlData.matured) {
+                    const maturedPnl = pnlData.matured;
+                    const maturedChangeElem = document.getElementById('matured-balance-change-container');
+                    const maturedChangeSpan = document.getElementById('matured-balance-change');
+                    const isPositive = maturedPnl.value >= 0;
+                    maturedChangeElem.className = `balance-change ${isPositive ? 'positive' : 'negative'}`;
+                    maturedChangeSpan.innerHTML = `${formatFiat(Math.abs(maturedPnl.value))} (${isPositive ? '+' : ''}${maturedPnl.percentage.toFixed(2)}%)`;
+                }
+                // Also update mobile views
+                updateMobilePnl(pnlData);
+            });
+            // Initial fetch via REST for donut data
+            try {
+                const resp = await fetch('https://bithash-backend.onrender.com/api/analytics/money-flow', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) {
+                    const flow = await resp.json();
+                    updateDonutChart(flow.inflow || 0, flow.outflow || 0);
+                }
+            } catch(e) { console.warn('Failed to fetch initial money flow'); }
+        }
+        
+        function updateMobilePnl(pnlData) {
+            const mobileMainChange = document.querySelector('#mobile-main-balance .mobile-balance-change');
+            const mobileMaturedChange = document.querySelector('#mobile-matured-balance .mobile-balance-change');
+            if (mobileMainChange && pnlData.main) {
+                const isPositive = pnlData.main.value >= 0;
+                mobileMainChange.className = `mobile-balance-change ${isPositive ? 'positive' : 'negative'}`;
+                mobileMainChange.innerHTML = `<i class="fas ${isPositive ? 'fa-arrow-up' : 'fa-arrow-down'}"></i><span>${formatFiat(Math.abs(pnlData.main.value))} (${isPositive ? '+' : ''}${pnlData.main.percentage.toFixed(2)}%)</span>`;
+            }
+            if (mobileMaturedChange && pnlData.matured) {
+                const isPositive = pnlData.matured.value >= 0;
+                mobileMaturedChange.className = `mobile-balance-change ${isPositive ? 'positive' : 'negative'}`;
+                mobileMaturedChange.innerHTML = `<i class="fas ${isPositive ? 'fa-arrow-up' : 'fa-arrow-down'}"></i><span>${formatFiat(Math.abs(pnlData.matured.value))} (${isPositive ? '+' : ''}${pnlData.matured.percentage.toFixed(2)}%)</span>`;
+            }
+        }
+        
+        function updateDonutChart(inflow, outflow) {
+            const ctx = document.getElementById('moneyFlowDonut').getContext('2d');
+            if (donutChartInstance) donutChartInstance.destroy();
+            donutChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Inflow (Deposits/Buys)', 'Outflow (Withdrawals/Sells)'],
+                    datasets: [{
+                        data: [inflow, outflow],
+                        backgroundColor: ['#228B22', '#FF0000'],
+                        borderWidth: 0,
+                        hoverOffset: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    cutout: '60%',
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#B7BDC6', font: { size: 11 } } },
+                        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${formatFiat(ctx.raw)}` } }
+                    }
+                }
+            });
+            const total = inflow + outflow;
+            document.getElementById('donut-chart-legend').innerHTML = `Inflow: ${formatFiat(inflow)} | Outflow: ${formatFiat(outflow)} | Net: ${formatFiat(inflow - outflow)}`;
+        }
+        
         document.getElementById('downline-refresh').addEventListener('click', loadDownlineData);
         document.getElementById('loan-application-close').addEventListener('click', closeLoanApplicationModal);
         document.getElementById('submit-loan-application').addEventListener('click', submitLoanApplication);
+        
+        // Add fiat selector button next to global asset selector
+        const globalSelector = document.getElementById('global-asset-selector');
+        const fiatBtn = document.createElement('div');
+        fiatBtn.className = 'global-asset-selector';
+        fiatBtn.style.marginLeft = '10px';
+        fiatBtn.innerHTML = `<i class="fas fa-globe"></i><span id="fiat-selector-label">${userPreferences.fiatCurrency}</span><i class="fas fa-chevron-down"></i>`;
+        fiatBtn.onclick = openFiatModal;
+        globalSelector.parentNode.insertBefore(fiatBtn, globalSelector.nextSibling);
         
         window.addEventListener('resize', function() {
             if (window.innerWidth <= 768) document.querySelector('.mobile-logout').style.display = 'block';
