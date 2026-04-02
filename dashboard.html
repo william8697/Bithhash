@@ -3578,20 +3578,20 @@
                 initMobileMenu();
                 initHeaderScrollEffect();
                 await fetchCoinGeckoPrices();
-                await loadUserData();
-                await checkUserDefaultAsset();
-                await loadBalances();
-                await loadAssetBalances();
-                await loadPortfolio();
-                await loadAvailableAssets();
-                await loadInvestments();
-                await loadTransactions();
-                await loadFiatCurrencies();
-                await loadReferralData();
-                await loadDownlineData();
-                await checkLoanEligibility();
-                await loadUserPreferences();
-                await checkAuthState();
+await loadUserData();
+await checkUserDefaultAsset();
+await loadFiatCurrencies();  // Load fiat currencies FIRST
+await loadUserPreferences(); // Then load user preferences (which includes fiat)
+await loadBalances();        // Then load balances (will use correct fiat)
+await loadAssetBalances();
+await loadPortfolio();
+await loadAvailableAssets();
+await loadInvestments();
+await loadTransactions();
+await loadReferralData();
+await loadDownlineData();
+await checkLoanEligibility();
+// Remove the duplicate loadUserPreferences call if exists
             
                 document.getElementById('current-year').textContent = new Date().getFullYear();
                 startAnnouncementsPolling();
@@ -3795,24 +3795,24 @@
         }
         
         function formatFiat(num) {
-            const symbol = userPreferences.fiatCurrency === 'USD' ? '$' : 
-                          userPreferences.fiatCurrency === 'EUR' ? '€' : 
-                          userPreferences.fiatCurrency === 'GBP' ? '£' : 
-                          userPreferences.fiatCurrency === 'JPY' ? '¥' : 
-                          userPreferences.fiatCurrency === 'CAD' ? 'C$' : 
-                          userPreferences.fiatCurrency === 'AUD' ? 'A$' : 
-                          userPreferences.fiatCurrency === 'CNY' ? '¥' : 
-                          userPreferences.fiatCurrency === 'INR' ? '₹' : 
-                          userPreferences.fiatCurrency === 'BTC' ? '₿' : 
-                          (userPreferences.fiatCurrency || 'USD') + ' ';
-            const numericNum = parseFloat(num) || 0;
-            if (numericNum >= 1e12) return symbol + (numericNum / 1e12).toFixed(2) + 'T';
-            if (numericNum >= 1e9) return symbol + (numericNum / 1e9).toFixed(2) + 'B';
-            if (numericNum >= 1e6) return symbol + (numericNum / 1e6).toFixed(2) + 'M';
-            const parts = numericNum.toFixed(2).split('.');
-            parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-            return symbol + parts.join('.');
-        }
+    const numericNum = parseFloat(num) || 0;
+    
+    // Get the selected fiat currency and its exchange rate
+    const selectedFiat = allFiatCurrencies.find(f => f.code === userPreferences.fiatCurrency) || allFiatCurrencies[0];
+    const exchangeRate = selectedFiat?.exchangeRate || 1;
+    const symbol = selectedFiat?.symbol || '$';
+    
+    // Convert USD amount to selected fiat currency
+    const convertedAmount = numericNum * exchangeRate;
+    
+    if (convertedAmount >= 1e12) return symbol + (convertedAmount / 1e12).toFixed(2) + 'T';
+    if (convertedAmount >= 1e9) return symbol + (convertedAmount / 1e9).toFixed(2) + 'B';
+    if (convertedAmount >= 1e6) return symbol + (convertedAmount / 1e6).toFixed(2) + 'M';
+    
+    const parts = convertedAmount.toFixed(2).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return symbol + parts.join('.');
+}
         
         function formatNumberWithCommas(num, decimals = 8) {
             const numericNum = parseFloat(num) || 0;
@@ -3829,17 +3829,23 @@
             return parts[0];
         }
         
-        function updateBalanceSecondary(type, usdAmount) {
-            const asset = userPreferences.displayAsset || AppState.defaultAsset;
-            const assetData = topAssets.find(a => a.symbol === asset) || topAssets[0];
-            const price = currentPrices[assetData.id]?.usd || currentBTCPrice;
-            const amount = usdAmount / price;
-            document.getElementById(`${type}-balance-secondary`).innerHTML = `
-                <img src="${assetData.logo}" class="asset-logo-small" alt="${assetData.symbol.toUpperCase()}">
-                <span>${formatNumber(amount)} ${assetData.symbol.toUpperCase()}</span>
-            `;
-            updateMobileBalances();
-        }
+       function updateBalanceSecondary(type, usdAmount) {
+    const asset = userPreferences.displayAsset || AppState.defaultAsset;
+    const assetData = topAssets.find(a => a.symbol === asset) || topAssets[0];
+    const price = currentPrices[assetData.id]?.usd || currentBTCPrice;
+    const amount = usdAmount / price;
+    
+    // Get fiat currency info for display
+    const selectedFiat = allFiatCurrencies.find(f => f.code === userPreferences.fiatCurrency) || allFiatCurrencies[0];
+    const fiatSymbol = selectedFiat?.symbol || '$';
+    
+    document.getElementById(`${type}-balance-secondary`).innerHTML = `
+        <img src="${assetData.logo}" class="asset-logo-small" alt="${assetData.symbol.toUpperCase()}">
+        <span>${formatNumber(amount)} ${assetData.symbol.toUpperCase()}</span>
+        <span style="margin-left: 8px; color: var(--gray);">${fiatSymbol}${formatNumberWithCommas(usdAmount, 2)}</span>
+    `;
+    updateMobileBalances();
+}
         
         async function loadPortfolio() {
             try {
@@ -4367,25 +4373,28 @@
         }
         
         async function loadBalances() {
-            try {
-                const token = localStorage.getItem('jwtToken');
-                if (!token) return;
-                const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    const balances = data.data?.balances || data.balances || {};
-                    userBalances = { main: parseFloat(balances.main) || 0, active: parseFloat(balances.active) || 0, matured: parseFloat(balances.matured) || 0 };
-                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
-                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
-                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
-                    ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
-                }
-            } catch (error) {
-                console.error('Error loading balances:', error);
-            }
+    try {
+        const token = localStorage.getItem('jwtToken');
+        if (!token) return;
+        const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            const data = await response.json();
+            const balances = data.data?.balances || data.balances || {};
+            userBalances = { main: parseFloat(balances.main) || 0, active: parseFloat(balances.active) || 0, matured: parseFloat(balances.matured) || 0 };
+            
+            // Use formatFiat which now handles conversion
+            document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+            document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+            document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+            
+            ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
         }
+    } catch (error) {
+        console.error('Error loading balances:', error);
+    }
+}
         
         async function loadAssetBalances() {
             try {
@@ -4960,35 +4969,36 @@
         let filteredFiatList = [];
         let fiatPage = 1;
         const fiatPerPage = 5;
-        
         async function loadFiatCurrencies() {
-            try {
-                const response = await fetch('https://bithash-backend.onrender.com/api/fiat-currencies');
-                if (response.ok) {
-                    const data = await response.json();
-                    allFiatCurrencies = data.currencies || [
-                        { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png' },
-                        { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png' },
-                        { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png' },
-                        { code: 'JPY', name: 'Japanese Yen', symbol: '¥', flag: 'https://flagcdn.com/w40/jp.png' },
-                        { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', flag: 'https://flagcdn.com/w40/ca.png' }
-                    ];
-                } else {
-                    throw new Error('Failed to fetch');
-                }
-            } catch (error) {
-                console.warn('Using fallback fiat list', error);
-                allFiatCurrencies = [
-                    { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png' },
-                    { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png' },
-                    { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png' },
-                    { code: 'JPY', name: 'Japanese Yen', symbol: '¥', flag: 'https://flagcdn.com/w40/jp.png' },
-                    { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', flag: 'https://flagcdn.com/w40/ca.png' }
-                ];
-            }
-            filteredFiatList = [...allFiatCurrencies];
-            renderFiatList();
+    try {
+        const response = await fetch('https://bithash-backend.onrender.com/api/fiat-currencies');
+        if (response.ok) {
+            const data = await response.json();
+            allFiatCurrencies = data.currencies || [
+                { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png', exchangeRate: 1 },
+                { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png', exchangeRate: 0.92 },
+                { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png', exchangeRate: 0.79 }
+            ];
+        } else {
+            throw new Error('Failed to fetch');
         }
+    } catch (error) {
+        console.warn('Using fallback fiat list', error);
+        allFiatCurrencies = [
+            { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png', exchangeRate: 1 },
+            { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png', exchangeRate: 0.92 },
+            { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png', exchangeRate: 0.79 },
+            { code: 'JPY', name: 'Japanese Yen', symbol: '¥', flag: 'https://flagcdn.com/w40/jp.png', exchangeRate: 150.5 },
+            { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', flag: 'https://flagcdn.com/w40/ca.png', exchangeRate: 1.36 }
+        ];
+    }
+    filteredFiatList = [...allFiatCurrencies];
+    renderFiatList();
+    
+    // After loading fiat currencies, update the UI with the saved preference
+    updateFiatSelectorUI();
+    await loadBalances(); // Refresh balances with correct fiat
+}
         
         function openFiatSelectorModal() {
             document.getElementById('fiat-selector-modal').classList.add('active');
@@ -5035,27 +5045,41 @@
             document.getElementById('fiat-next').onclick = () => { if (fiatPage < totalPages) { fiatPage++; renderFiatList(); } };
         }
         
-        async function selectFiatCurrency(fiat) {
-            userPreferences.fiatCurrency = fiat.code;
-            updateFiatSelectorUI();
-            closeFiatSelectorModal();
-            // Refresh balances display
-            await loadBalances();
-            await loadPortfolio();
-            await loadTransactions();
-            try {
-                const token = localStorage.getItem('jwtToken');
-                if (token) {
-                    await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                        body: JSON.stringify({ fiatCurrency: fiat.code })
-                    });
-                }
-            } catch (error) {
-                console.error('Error saving fiat preference:', error);
-            }
+       async function selectFiatCurrency(fiat) {
+    userPreferences.fiatCurrency = fiat.code;
+    updateFiatSelectorUI();
+    closeFiatSelectorModal();
+    
+    // Refresh all displays that show fiat values
+    await loadBalances();           // Refresh balances with new fiat
+    await loadPortfolio();          // Refresh portfolio values
+    await loadTransactions();       // Refresh transaction amounts
+    await loadReferralData();       // Refresh referral earnings
+    await renderAssetsWithBalance(); // Refresh asset cards
+    
+    // Also refresh PnL displays if they exist
+    const pnlElements = document.querySelectorAll('.balance-change span');
+    if (pnlElements.length) {
+        // Force PnL refresh through socket or API
+        if (socket && socket.connected) {
+            socket.emit('refresh_pnl');
         }
+    }
+    
+    // Save preference to server
+    try {
+        const token = localStorage.getItem('jwtToken');
+        if (token) {
+            await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ fiatCurrency: fiat.code })
+            });
+        }
+    } catch (error) {
+        console.error('Error saving fiat preference:', error);
+    }
+}
         
        function updateFiatSelectorUI() {
     if (!allFiatCurrencies || allFiatCurrencies.length === 0) {
