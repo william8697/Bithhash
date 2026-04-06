@@ -5233,38 +5233,161 @@
             }
         }
         
-        // Fiat Currency Logic - ALL FIATS FROM BACKEND ENDPOINT
+              // Fiat Currency Logic - ALL FIATS FROM BACKEND ENDPOINT (NO HARDCODING)
         let allFiatCurrencies = [];
         let filteredFiatList = [];
         let fiatPage = 1;
-        const fiatPerPage = 5;
+        const fiatPerPage = 10;
+        let fiatLoadAttempts = 0;
+        const MAX_FIAT_ATTEMPTS = 3;
         
         async function loadFiatCurrencies() {
             try {
+                console.log('🌐 Loading fiat currencies from backend...');
                 const response = await fetch('https://bithash-backend.onrender.com/api/fiat-currencies');
                 if (response.ok) {
                     const data = await response.json();
-                    allFiatCurrencies = data.currencies || [
-                        { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png', exchangeRate: 1 },
-                        { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png', exchangeRate: 0.92 },
-                        { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png', exchangeRate: 0.79 }
-                    ];
+                    if (data.currencies && data.currencies.length > 0) {
+                        allFiatCurrencies = data.currencies;
+                        console.log(`✅ Loaded ${allFiatCurrencies.length} fiat currencies from backend`);
+                        filteredFiatList = [...allFiatCurrencies];
+                        renderFiatList();
+                        updateFiatSelectorUI();
+                        
+                        // After loading currencies, load saved preference
+                        await loadSavedFiatPreference();
+                        return;
+                    }
+                }
+                throw new Error('No currencies returned from API');
+            } catch (error) {
+                console.error('Error loading fiat currencies:', error);
+                fiatLoadAttempts++;
+                
+                if (fiatLoadAttempts < MAX_FIAT_ATTEMPTS) {
+                    console.log(`Retrying fiat load (attempt ${fiatLoadAttempts + 1}/${MAX_FIAT_ATTEMPTS})...`);
+                    setTimeout(loadFiatCurrencies, 3000);
                 } else {
-                    throw new Error('Failed to fetch');
+                    showNotification('error', 'Currency Load Failed', 'Unable to load currencies. Please refresh the page.');
+                }
+            }
+        }
+        
+        // Load saved fiat preference from database FIRST
+        async function loadSavedFiatPreference() {
+            try {
+                const token = localStorage.getItem('jwtToken');
+                if (!token) return;
+                
+                console.log('📀 Loading saved fiat preference from database...');
+                const response = await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.data && data.data.fiatCurrency) {
+                        const savedCurrency = data.data.fiatCurrency;
+                        const matchingFiat = allFiatCurrencies.find(f => f.code === savedCurrency);
+                        if (matchingFiat) {
+                            userPreferences.fiatCurrency = savedCurrency;
+                            updateFiatSelectorUI();
+                            
+                            // Refresh all displays
+                            document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                            document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                            document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+                            renderAssetsWithBalanceEnhanced();
+                            renderTransactionsTable();
+                            loadReferralData();
+                            
+                            console.log(`✅ Loaded saved fiat preference: ${savedCurrency}`);
+                            return;
+                        }
+                    }
+                }
+                
+                // No saved preference - check IP for NEW users only
+                await checkAndApplyIPPreferences();
+            } catch (error) {
+                console.error('Error loading saved fiat preference:', error);
+            }
+        }
+        
+        // ONLY runs for users with NO saved preferences
+        async function checkAndApplyIPPreferences() {
+            try {
+                const token = localStorage.getItem('jwtToken');
+                if (!token) return;
+                
+                console.log('🔍 No saved preference found, checking IP for new user...');
+                
+                const ipResponse = await fetch('https://ipapi.co/json/');
+                if (ipResponse.ok) {
+                    const ipData = await ipResponse.json();
+                    const countryCode = ipData.country_code || 'US';
+                    const currencyCode = ipData.currency || 'USD';
+                    
+                    // CORRECT language mapping with ROMANIAN (ro)
+                    const langMap = {
+                        'US': 'en', 'GB': 'en', 'AU': 'en', 'CA': 'en', 'NZ': 'en', 'IE': 'en',
+                        'ES': 'es', 'MX': 'es', 'AR': 'es', 'CO': 'es', 'CL': 'es', 'PE': 'es',
+                        'FR': 'fr', 'DE': 'de', 'IT': 'it', 'PT': 'pt', 'BR': 'pt',
+                        'JP': 'ja', 'CN': 'zh', 'RU': 'ru', 'KR': 'ko', 'NL': 'nl',
+                        'PL': 'pl', 'TR': 'tr', 'SE': 'sv', 'NO': 'no', 'DK': 'da',
+                        'FI': 'fi', 'GR': 'el', 'CZ': 'cs', 'HU': 'hu', 'RO': 'ro',  // ROMANIAN FIXED
+                        'BG': 'bg', 'SK': 'sk', 'HR': 'hr', 'RS': 'sr', 'SI': 'sl',
+                        'LT': 'lt', 'LV': 'lv', 'EE': 'et', 'IS': 'is', 'ZA': 'en',
+                        'IN': 'hi', 'PK': 'ur', 'BD': 'bn', 'VN': 'vi', 'TH': 'th',
+                        'ID': 'id', 'MY': 'ms', 'PH': 'tl', 'NG': 'en', 'KE': 'en',
+                        'EG': 'ar', 'SA': 'ar', 'AE': 'ar', 'IL': 'he', 'IR': 'fa'
+                    };
+                    
+                    const language = langMap[countryCode] || 'en';
+                    
+                    // Find matching fiat currency
+                    const matchingFiat = allFiatCurrencies.find(f => f.code === currencyCode);
+                    
+                    if (matchingFiat) {
+                        // Save the IP-detected preferences to database
+                        const saveResponse = await fetch('https://bithash-backend.onrender.com/api/users/preferences/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                            body: JSON.stringify({ 
+                                language: language, 
+                                fiatCurrency: currencyCode,
+                                detectedFromIP: true 
+                            })
+                        });
+                        
+                        if (saveResponse.ok) {
+                            userPreferences.fiatCurrency = currencyCode;
+                            userPreferences.language = language;
+                            updateFiatSelectorUI();
+                            
+                            // Apply language change
+                            if (language !== 'en') {
+                                document.documentElement.lang = language;
+                                document.querySelector('html').setAttribute('lang', language);
+                                if (language === 'ro') {
+                                    document.title = 'BitHash | Tablou de Bord';
+                                }
+                            }
+                            
+                            // Refresh displays
+                            document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                            document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                            document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+                            renderAssetsWithBalanceEnhanced();
+                            
+                            console.log(`✅ IP preferences set for new user: ${currencyCode} / ${language}`);
+                            showNotification('info', 'Localized Experience', `Currency set to ${currencyCode} based on your location`);
+                        }
+                    }
                 }
             } catch (error) {
-                console.warn('Using fallback fiat list', error);
-                allFiatCurrencies = [
-                    { code: 'USD', name: 'US Dollar', symbol: '$', flag: 'https://flagcdn.com/w40/us.png', exchangeRate: 1 },
-                    { code: 'EUR', name: 'Euro', symbol: '€', flag: 'https://flagcdn.com/w40/eu.png', exchangeRate: 0.92 },
-                    { code: 'GBP', name: 'British Pound', symbol: '£', flag: 'https://flagcdn.com/w40/gb.png', exchangeRate: 0.79 },
-                    { code: 'JPY', name: 'Japanese Yen', symbol: '¥', flag: 'https://flagcdn.com/w40/jp.png', exchangeRate: 150.5 },
-                    { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', flag: 'https://flagcdn.com/w40/ca.png', exchangeRate: 1.36 }
-                ];
+                console.warn('IP detection failed:', error);
             }
-            filteredFiatList = [...allFiatCurrencies];
-            renderFiatList();
-            updateFiatSelectorUI();
         }
         
         function openFiatSelectorModal() {
