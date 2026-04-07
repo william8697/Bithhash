@@ -5169,34 +5169,59 @@ socket.on('asset_balances_update', (assetsData) => {
             }
         }
         
-        async function loadAssetBalancesFallback() {
+              async function loadAssetBalancesFallback() {
             try {
                 const token = localStorage.getItem('jwtToken');
                 if (!token) return;
+                
+                console.log('🔄 Loading asset balances fallback...');
                 const response = await fetch('https://bithash-backend.onrender.com/api/users/assets', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
+                
                 if (response.ok) {
                     const assetsData = await response.json();
+                    console.log(`📊 Received ${assetsData.length} assets with balances`);
+                    
                     userAssetBalances = {};
                     assetsData.forEach(asset => {
                         userAssetBalances[asset.symbol] = asset.balance;
+                        console.log(`  - ${asset.symbol}: ${asset.balance} ($${asset.currentValue})`);
                     });
-                    userPortfolio = assetsData.map(asset => ({
-                        asset: asset.symbol,
-                        totalAmount: asset.balance,
-                        currentValue: asset.balance * (currentPrices[asset.id]?.usd || 0),
-                        averageBuyingPrice: asset.avgPrice || 0,
-                        unrealizedProfitLoss: asset.unrealizedPnl || 0,
-                        unrealizedPercentage: asset.unrealizedPnlPercent || 0,
-                        change24h: currentPrices[asset.id]?.usd_24h_change || 0,
-                        transactions: asset.transactions || []
-                    }));
+                    
+                    userPortfolio = assetsData.map(asset => {
+                        // Ensure price exists, use fallback if needed
+                        const assetPrice = currentPrices[asset.id]?.usd || 0;
+                        const currentValue = asset.balance * assetPrice;
+                        
+                        return {
+                            asset: asset.symbol,
+                            totalAmount: asset.balance,
+                            currentValue: currentValue,
+                            averageBuyingPrice: asset.avgPrice || 0,
+                            unrealizedProfitLoss: asset.unrealizedPnl || 0,
+                            unrealizedPercentage: asset.unrealizedPnlPercent || 0,
+                            change24h: currentPrices[asset.id]?.usd_24h_change || 0,
+                            transactions: asset.transactions || [],
+                            currentPrice: assetPrice
+                        };
+                    });
+                    
                     fullAssetsList = [...userPortfolio];
                     renderAssetsWithBalanceEnhanced();
+                    
+                    // If Solana balance exists but shows 0, log warning
+                    const solanaAsset = assetsData.find(a => a.symbol === 'sol');
+                    if (solanaAsset && solanaAsset.balance > 0 && solanaAsset.currentValue === 0) {
+                        console.warn('⚠️ Solana balance exists but price is 0. Checking price API...');
+                        // Force refresh prices
+                        await fetchCoinGeckoPrices();
+                    }
+                } else {
+                    console.error('Failed to load asset balances:', response.status);
                 }
             } catch (error) {
-                console.warn('Asset balances fallback failed:', error);
+                console.error('Asset balances fallback failed:', error);
             }
         }
         
@@ -5240,10 +5265,11 @@ socket.on('asset_balances_update', (assetsData) => {
         let fiatLoadAttempts = 0;
         const MAX_FIAT_ATTEMPTS = 3;
         
-        async function loadFiatCurrencies() {
+          async function loadFiatCurrencies() {
             try {
                 console.log('🌐 Loading fiat currencies from backend...');
                 const response = await fetch('https://bithash-backend.onrender.com/api/fiat-currencies');
+                
                 if (response.ok) {
                     const data = await response.json();
                     if (data.currencies && data.currencies.length > 0) {
@@ -5258,16 +5284,35 @@ socket.on('asset_balances_update', (assetsData) => {
                         return;
                     }
                 }
+                
+                // If API returns error (not just empty), throw
+                if (response.status === 503 || response.status === 500) {
+                    console.error('❌ Fiat API unavailable - service temporarily down');
+                    showNotification('error', 'Currency Service Unavailable', 
+                        'Exchange rates are temporarily unavailable. Please refresh the page in a few minutes.');
+                    return;
+                }
+                
                 throw new Error('No currencies returned from API');
+                
             } catch (error) {
-                console.error('Error loading fiat currencies:', error);
+                console.error('❌ Error loading fiat currencies:', error);
                 fiatLoadAttempts++;
                 
                 if (fiatLoadAttempts < MAX_FIAT_ATTEMPTS) {
                     console.log(`Retrying fiat load (attempt ${fiatLoadAttempts + 1}/${MAX_FIAT_ATTEMPTS})...`);
                     setTimeout(loadFiatCurrencies, 3000);
                 } else {
-                    showNotification('error', 'Currency Load Failed', 'Unable to load currencies. Please refresh the page.');
+                    // SHOW ERROR - NO HARDCODED FALLBACK
+                    showNotification('error', 'Currency Service Error', 
+                        'Unable to load exchange rates. Please check your connection and refresh.');
+                    
+                    // Display error in fiat selector
+                    const fiatBtn = document.getElementById('fiatSelectorBtn');
+                    if (fiatBtn) {
+                        fiatBtn.style.border = '1px solid #FF0000';
+                        fiatBtn.title = 'Currency service unavailable. Please refresh.';
+                    }
                 }
             }
         }
@@ -5693,9 +5738,42 @@ socket.on('asset_balances_update', (assetsData) => {
             selectedToAssetObj = null;
         }
 
-        // ENHANCEMENT: IP-based language detection and preference saving (only for new users)
+                // ENHANCEMENT: IP-based language detection (ONLY FOR NEW USERS with NO saved preferences)
         async function detectAndSetPreferencesFromIP() {
             try {
+                const token = localStorage.getItem('jwtToken');
+                if (!token) return;
+                
+                console.log('🔍 Checking if user needs IP-based preferences...');
+                
+                // CRITICAL FIX: First check if user ALREADY has saved preferences in database
+                const prefResponse = await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (prefResponse.ok) {
+                    const data = await prefResponse.json();
+                    // If user already has ANY saved preference (not default USD), skip IP detection
+                    if (data.data && data.data.fiatCurrency && data.data.fiatCurrency !== 'USD') {
+                        console.log(`✅ User already has saved preference: ${data.data.fiatCurrency}. Skipping IP detection.`);
+                        return;
+                    }
+                    if (data.data && data.data.language && data.data.language !== 'en') {
+                        console.log(`✅ User already has saved language preference. Skipping IP detection.`);
+                        return;
+                    }
+                }
+                
+                // Check local storage flag to prevent repeated detection
+                const hasRunIPDetection = localStorage.getItem('ip_detection_run');
+                if (hasRunIPDetection) {
+                    console.log('✅ IP detection already ran for this user. Skipping.');
+                    return;
+                }
+                
+                console.log('🆕 New user detected - applying IP-based preferences...');
+                
+                // Only run for NEW users with no preferences
                 const ipResponse = await fetch('https://ipapi.co/json/');
                 if (ipResponse.ok) {
                     const ipData = await ipResponse.json();
@@ -5704,23 +5782,37 @@ socket.on('asset_balances_update', (assetsData) => {
                     
                     let language = 'en';
                     const langMap = {
-                        'ES': 'es', 'MX': 'es', 'AR': 'es', 'CO': 'es',
-                        'FR': 'fr', 'DE': 'de', 'IT': 'it', 'PT': 'pt',
-                        'BR': 'pt', 'JP': 'ja', 'CN': 'zh', 'RU': 'ru'
+                        'ES': 'es', 'MX': 'es', 'AR': 'es', 'CO': 'es', 'CL': 'es', 'PE': 'es',
+                        'FR': 'fr', 'DE': 'de', 'IT': 'it', 'PT': 'pt', 'BR': 'pt',
+                        'JP': 'ja', 'CN': 'zh', 'RU': 'ru', 'KR': 'ko', 'NL': 'nl',
+                        'PL': 'pl', 'TR': 'tr', 'SE': 'sv', 'NO': 'no', 'DK': 'da',
+                        'FI': 'fi', 'GR': 'el', 'CZ': 'cs', 'HU': 'hu', 'RO': 'ro',
+                        'BG': 'bg', 'SK': 'sk', 'HR': 'hr', 'RS': 'sr', 'SI': 'sl',
+                        'LT': 'lt', 'LV': 'lv', 'EE': 'et', 'IS': 'is', 'ZA': 'en',
+                        'IN': 'hi', 'PK': 'ur', 'BD': 'bn', 'VN': 'vi', 'TH': 'th',
+                        'ID': 'id', 'MY': 'ms', 'PH': 'tl', 'NG': 'en', 'KE': 'en',
+                        'EG': 'ar', 'SA': 'ar', 'AE': 'ar', 'IL': 'he', 'IR': 'fa'
                     };
                     language = langMap[countryCode] || 'en';
                     
-                    // If Japan, change page language to Japanese
-                    if (countryCode === 'JP') {
-                        document.documentElement.lang = 'ja';
-                        document.querySelector('html').setAttribute('lang', 'ja');
-                        document.title = 'BitHash | ダッシュボード';
-                        const metaDesc = document.querySelector('meta[name="description"]');
-                        if (metaDesc) metaDesc.setAttribute('content', 'ビットコインクラウドマイニング投資を管理し、リアルタイムで収益を追跡します。');
+                    // Apply language to HTML
+                    if (language !== 'en') {
+                        document.documentElement.lang = language;
+                        document.querySelector('html').setAttribute('lang', language);
+                        if (language === 'ro') {
+                            document.title = 'BitHash | Tablou de Bord';
+                        } else if (language === 'es') {
+                            document.title = 'BitHash | Panel de Control';
+                        } else if (language === 'fr') {
+                            document.title = 'BitHash | Tableau de Bord';
+                        }
                     }
                     
-                    const token = localStorage.getItem('jwtToken');
-                    if (token) {
+                    // Find matching fiat currency
+                    const matchingFiat = allFiatCurrencies.find(f => f.code === currencyCode);
+                    
+                    if (matchingFiat) {
+                        // Save the IP-detected preferences to database (ONLY ONCE for new users)
                         const saveResponse = await fetch('https://bithash-backend.onrender.com/api/users/preferences/save', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -5732,18 +5824,26 @@ socket.on('asset_balances_update', (assetsData) => {
                         });
                         
                         if (saveResponse.ok) {
-                            console.log('Preferences saved from IP detection:', { language, currencyCode });
-                            if (allFiatCurrencies && allFiatCurrencies.length > 0) {
-                                const matchingFiat = allFiatCurrencies.find(f => f.code === currencyCode);
-                                if (matchingFiat && userPreferences.fiatCurrency !== currencyCode) {
-                                    await selectFiatCurrency(matchingFiat);
-                                }
-                            }
+                            userPreferences.fiatCurrency = currencyCode;
+                            userPreferences.language = language;
+                            updateFiatSelectorUI();
+                            
+                            // Refresh displays
+                            document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                            document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                            document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+                            renderAssetsWithBalanceEnhanced();
+                            
+                            // Set flag to prevent future detection
+                            localStorage.setItem('ip_detection_run', 'true');
+                            
+                            console.log(`✅ IP preferences set for new user: ${currencyCode} / ${language}`);
+                            showNotification('info', 'Localized Experience', `Currency set to ${currencyCode} based on your location`);
                         }
                     }
                 }
             } catch (error) {
-                console.warn('IP detection failed, using defaults:', error);
+                console.warn('IP detection failed:', error);
             }
         }
         
@@ -5771,11 +5871,30 @@ socket.on('asset_balances_update', (assetsData) => {
         // Call auth check immediately
         checkAuthAndRedirect();
         
-        setTimeout(() => {
-            if (localStorage.getItem('jwtToken')) {
-                detectAndSetPreferencesFromIP();
+        // Only run IP detection for NEW users (no saved preferences)
+setTimeout(async () => {
+    if (localStorage.getItem('jwtToken')) {
+        const token = localStorage.getItem('jwtToken');
+        try {
+            // Check if user has existing preferences
+            const prefCheck = await fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (prefCheck.ok) {
+                const data = await prefCheck.json();
+                // Only run IP detection if user has NO saved preferences
+                if (!data.data || !data.data.fiatCurrency || data.data.fiatCurrency === 'USD') {
+                    detectAndSetPreferencesFromIP();
+                } else {
+                    console.log('User has existing preferences, skipping IP detection');
+                }
             }
-        }, 500);
+        } catch (err) {
+            console.warn('Could not check preferences, skipping IP detection');
+        }
+    }
+}, 1000);
+       
     </script>
 </body>
 </html>
