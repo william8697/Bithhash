@@ -5032,51 +5032,96 @@
         let socket;
         let moneyFlowChart;
         
-        function initSocketIO() {
+               function initSocketIO() {
             const token = localStorage.getItem('jwtToken');
-            if (!token) return;
-            socket = io('https://bithash-backend.onrender.com', { 
-                transports: ['websocket'], 
+            if (!token) {
+                console.log('No token, skipping socket connection');
+                return;
+            }
+            
+            console.log('🔌 Initializing Socket.IO connection...');
+            
+            // Use the correct backend URL with proper options
+            const SOCKET_URL = 'https://bithash-backend.onrender.com';
+            
+            socket = io(SOCKET_URL, { 
+                transports: ['websocket', 'polling'],
+                auth: { token },
                 reconnection: true,
-                auth: { token }
+                reconnectionAttempts: 10,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 20000,
+                upgrade: true,
+                forceNew: true
             });
-            socket.on('connect', () => { console.log('Socket connected for dashboard'); });
             
-        socket.on('balance_update', (data) => {
-    if (data.main !== undefined) userBalances.main = parseFloat(data.main);
-    if (data.active !== undefined) userBalances.active = parseFloat(data.active);
-    if (data.matured !== undefined) userBalances.matured = parseFloat(data.matured);
-    
-    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
-    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
-    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
-    
-    ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
-    updateMobileBalances();
-});
-
-// Real-time asset balances (cryptos user has balance in) and portfolio
-socket.on('asset_balances_update', (assetsData) => {
-    userAssetBalances = {};
-    assetsData.forEach(asset => {
-        userAssetBalances[asset.symbol] = asset.balance;
-    });
-    // Update userPortfolio for My Assets section
-    userPortfolio = assetsData.map(asset => ({
-        asset: asset.symbol,
-        totalAmount: asset.balance,
-        currentValue: asset.balance * (currentPrices[asset.id]?.usd || 0),
-        averageBuyingPrice: asset.avgPrice || 0,
-        unrealizedProfitLoss: asset.unrealizedPnl || 0,
-        unrealizedPercentage: asset.unrealizedPnlPercent || 0,
-        change24h: currentPrices[asset.id]?.usd_24h_change || 0,
-        transactions: asset.transactions || []
-    }));
-    fullAssetsList = [...userPortfolio];
-    renderAssetsWithBalanceEnhanced();
-});
+            socket.on('connect', () => { 
+                console.log('✅ Socket connected successfully for dashboard');
+                console.log('Socket ID:', socket.id);
+                
+                // Send ping to keep connection alive
+                setInterval(() => {
+                    if (socket.connected) {
+                        socket.emit('ping');
+                    }
+                }, 30000);
+            });
             
-            // Real-time user preferences (fiat and display asset)
+            socket.on('disconnect', (reason) => {
+                console.warn('⚠️ Socket disconnected:', reason);
+                if (reason === 'io server disconnect') {
+                    // Reconnect manually
+                    socket.connect();
+                }
+            });
+            
+            socket.on('connect_error', (err) => { 
+                console.warn('⚠️ Socket connection error:', err.message);
+                console.log('Will retry automatically...');
+            });
+            
+            socket.on('auth_error', (data) => {
+                console.error('Authentication error:', data);
+            });
+            
+            socket.on('pong', () => {
+                console.log('💓 Socket connection healthy');
+            });
+            
+            // Rest of your existing socket event handlers...
+            socket.on('balance_update', (data) => {
+                if (data.main !== undefined) userBalances.main = parseFloat(data.main);
+                if (data.active !== undefined) userBalances.active = parseFloat(data.active);
+                if (data.matured !== undefined) userBalances.matured = parseFloat(data.matured);
+                
+                document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+                
+                ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
+                updateMobileBalances();
+            });
+            
+            socket.on('asset_balances_update', (assetsData) => {
+                userAssetBalances = {};
+                assetsData.forEach(asset => {
+                    userAssetBalances[asset.symbol] = asset.balance;
+                });
+                userPortfolio = assetsData.map(asset => ({
+                    asset: asset.symbol,
+                    totalAmount: asset.balance,
+                    currentValue: asset.balance * (currentPrices[asset.id]?.usd || 0),
+                    averageBuyingPrice: asset.avgPrice || 0,
+                    unrealizedProfitLoss: asset.unrealizedPnl || 0,
+                    unrealizedPercentage: asset.unrealizedPnlPercent || 0,
+                    change24h: currentPrices[asset.id]?.usd_24h_change || 0,
+                    transactions: asset.transactions || []
+                }));
+                fullAssetsList = [...userPortfolio];
+                renderAssetsWithBalanceEnhanced();
+            });
+            
             socket.on('preferences_update', (prefs) => {
                 if (prefs.displayAsset) {
                     userPreferences.displayAsset = prefs.displayAsset;
@@ -5090,7 +5135,6 @@ socket.on('asset_balances_update', (assetsData) => {
                     if (allFiatCurrencies && allFiatCurrencies.length > 0) {
                         updateFiatSelectorUI();
                     }
-                    // Refresh all fiat displays
                     document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
                     document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
                     document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
@@ -5098,52 +5142,50 @@ socket.on('asset_balances_update', (assetsData) => {
                     renderTransactionsTable();
                     loadReferralData();
                 }
-                if (prefs.language) {
-                    userPreferences.language = prefs.language;
-                    // Language change would require translation system - kept for future
-                }
             });
             
             socket.on('pnl_update', (data) => {
                 if (data.main) {
                     const mainPnlSpan = document.getElementById('main-pnl');
-                    const mainMobileSpan = document.getElementById('mobile-main-pnl').querySelector('span');
+                    const mainMobileSpan = document.getElementById('mobile-main-pnl')?.querySelector('span');
                     const changeClass = data.main.percentage >= 0 ? 'positive' : 'negative';
                     const sign = data.main.percentage >= 0 ? '+' : '';
                     const formattedPnl = `${formatFiat(data.main.amount)} (${sign}${data.main.percentage.toFixed(2)}%)`;
                     if (mainPnlSpan) mainPnlSpan.innerHTML = `Today's PnL ${formattedPnl}`;
                     if (mainMobileSpan) mainMobileSpan.innerHTML = `Today's PnL ${formattedPnl}`;
                     const container = document.getElementById('main-pnl-container');
-                    container.classList.remove('positive', 'negative');
-                    container.classList.add(changeClass);
+                    if (container) {
+                        container.classList.remove('positive', 'negative');
+                        container.classList.add(changeClass);
+                    }
                 }
                 if (data.matured) {
                     const maturedPnlSpan = document.getElementById('matured-pnl');
-                    const maturedMobileSpan = document.getElementById('mobile-matured-pnl').querySelector('span');
+                    const maturedMobileSpan = document.getElementById('mobile-matured-pnl')?.querySelector('span');
                     const changeClass = data.matured.percentage >= 0 ? 'positive' : 'negative';
                     const sign = data.matured.percentage >= 0 ? '+' : '';
                     const formattedPnl = `${formatFiat(data.matured.amount)} (${sign}${data.matured.percentage.toFixed(2)}%)`;
                     if (maturedPnlSpan) maturedPnlSpan.innerHTML = `Today's PnL ${formattedPnl}`;
                     if (maturedMobileSpan) maturedMobileSpan.innerHTML = `Today's PnL ${formattedPnl}`;
                     const container = document.getElementById('matured-pnl-container');
-                    container.classList.remove('positive', 'negative');
-                    container.classList.add(changeClass);
+                    if (container) {
+                        container.classList.remove('positive', 'negative');
+                        container.classList.add(changeClass);
+                    }
                 }
             });
-            socket.on('money_flow_update', (flowData) => {
-                updateDonutChart(flowData);
-            });
-            socket.on('connect_error', (err) => { console.warn('Socket connection error:', err); });
             
             // Fallback REST endpoints if WebSocket takes too long
             setTimeout(() => {
                 if (!userBalances.main && !userBalances.active && !userBalances.matured) {
+                    console.log('WebSocket timeout, using REST fallback for balances');
                     loadBalancesFallback();
                 }
                 if (Object.keys(userAssetBalances).length === 0) {
+                    console.log('WebSocket timeout, using REST fallback for assets');
                     loadAssetBalancesFallback();
                 }
-            }, 5000);
+            }, 8000);
         }
         
         async function loadBalancesFallback() {
