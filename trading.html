@@ -2792,6 +2792,63 @@
                 font-size: 0.7rem;
             }
         }
+
+        /* My Assets (Holdings) Section at the bottom */
+        .my-assets-section {
+            margin-top: 20px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid var(--border-color);
+        }
+        .my-assets-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .my-assets-title {
+            font-weight: 600;
+            font-size: 1rem;
+            color: var(--dark);
+        }
+        .my-assets-table-container {
+            overflow-x: auto;
+        }
+        .my-assets-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+        .my-assets-table th,
+        .my-assets-table td {
+            padding: 10px 8px;
+            text-align: right;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .my-assets-table th:first-child,
+        .my-assets-table td:first-child {
+            text-align: left;
+        }
+        .my-assets-table th {
+            color: var(--gray);
+            font-weight: 500;
+        }
+        .asset-positive {
+            color: var(--success);
+        }
+        .asset-negative {
+            color: var(--error);
+        }
+        .total-holdings {
+            margin-top: 16px;
+            text-align: right;
+            font-weight: 600;
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border-color);
+            padding-top: 12px;
+        }
     </style>
 </head>
 <body>
@@ -3271,6 +3328,23 @@
                     <span class="pagination-info" id="ordersPageInfo">1/5</span>
                     <button class="pagination-btn" id="ordersNextBtn" onclick="changeOrdersPage(1)"><i class="fas fa-chevron-right"></i></button>
                 </div>
+            </div>
+
+            <!-- My Assets Section (Holdings) - Fetched from /api/users/assets and WebSocket -->
+            <div class="my-assets-section" id="myAssetsSection">
+                <div class="my-assets-header">
+                    <span class="my-assets-title"><i class="fas fa-chart-line"></i> My Crypto Holdings</span>
+                    <span id="holdingsLastUpdate" style="font-size:0.7rem; color:var(--gray);">Live</span>
+                </div>
+                <div class="my-assets-table-container">
+                    <table class="my-assets-table" id="holdingsTable">
+                        <thead>
+                            <tr><th>Asset</th><th>Balance</th><th>Value (USD)</th><th>24h Change</th></tr>
+                        </thead>
+                        <tbody id="holdingsTableBody"><tr><td colspan="4" style="text-align:center;">Loading holdings...</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="total-holdings" id="totalHoldingsValue">Total Portfolio Value: $0.00</div>
             </div>
         </div>
     </div>
@@ -4151,6 +4225,7 @@
             if (data.balances) {
                 userCryptoBalances = data.balances;
                 updateBalanceDisplay();
+                renderHoldingsTable(); // Update holdings table on every WS update
             }
         }
         
@@ -4180,6 +4255,7 @@
                         });
                     }
                     updateBalanceDisplay();
+                    renderHoldingsTable();
                 }
             } catch (error) {
                 console.error('Failed to load crypto balances:', error);
@@ -5158,6 +5234,89 @@
         }
 
         // =============================================
+        // HOLDINGS TABLE (My Assets) - Fetched from /api/users/assets & WebSocket
+        // =============================================
+        async function renderHoldingsTable() {
+            const tbody = document.getElementById('holdingsTableBody');
+            if (!tbody) return;
+            
+            const token = localStorage.getItem('jwtToken');
+            if (!token || !isAuthenticated) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Login to view holdings</td></tr>';
+                document.getElementById('totalHoldingsValue').textContent = 'Total Portfolio Value: $0.00';
+                return;
+            }
+            
+            try {
+                // Fetch latest assets from REST endpoint
+                const response = await fetch(`${CONFIG.BACKEND_URL}/api/users/assets`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!response.ok) throw new Error('Failed to fetch assets');
+                const assetsData = await response.json();
+                let assetsArray = [];
+                if (assetsData.data && assetsData.data.assets) assetsArray = assetsData.data.assets;
+                else if (Array.isArray(assetsData)) assetsArray = assetsData;
+                
+                // Update local balances
+                userCryptoBalances = {};
+                assetsArray.forEach(asset => {
+                    userCryptoBalances[asset.symbol.toLowerCase()] = asset.balance;
+                });
+                
+                // Fetch current prices (BTC/USD etc) - using existing currentPrices or fetch new
+                // We'll reuse currentPrices from global or fetch for each asset
+                const symbols = assetsArray.map(a => a.symbol).join(',');
+                let priceMap = {};
+                if (symbols.length > 0) {
+                    try {
+                        const priceResp = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${symbols.toLowerCase()}&vs_currencies=usd`);
+                        if (priceResp.ok) {
+                            const priceData = await priceResp.json();
+                            priceMap = priceData;
+                        }
+                    } catch(e) { console.warn('Price fetch error', e); }
+                }
+                
+                let totalValue = 0;
+                let html = '';
+                for (const asset of assetsArray) {
+                    const symbol = asset.symbol.toUpperCase();
+                    const balance = asset.balance || 0;
+                    // Try to get price from existing currentPrices or fallback
+                    let priceUsd = 0;
+                    const coinId = symbol.toLowerCase();
+                    if (currentPrices && currentPrices[coinId] && currentPrices[coinId].usd) {
+                        priceUsd = currentPrices[coinId].usd;
+                    } else if (priceMap[coinId] && priceMap[coinId].usd) {
+                        priceUsd = priceMap[coinId].usd;
+                    } else if (symbol === 'USDT' || symbol === 'USDC') {
+                        priceUsd = 1;
+                    }
+                    const valueUsd = balance * priceUsd;
+                    totalValue += valueUsd;
+                    const change24h = (currentPrices && currentPrices[coinId] && currentPrices[coinId].usd_24h_change) ? currentPrices[coinId].usd_24h_change : 0;
+                    const changeClass = change24h >= 0 ? 'asset-positive' : 'asset-negative';
+                    const changeSign = change24h >= 0 ? '+' : '';
+                    html += `<tr>
+                        <td style="display:flex; align-items:center; gap:8px;"><img src="${ASSET_LOGOS[symbol] || ASSET_LOGOS.BTC}" width="24" style="border-radius:50%;"> ${symbol}</td>
+                        <td>${formatNumber(balance)}</td>
+                        <td>${formatUSD(valueUsd)}</td>
+                        <td class="${changeClass}">${changeSign}${change24h.toFixed(2)}%</td>
+                    </tr>`;
+                }
+                if (html === '') {
+                    html = '<tr><td colspan="4" style="text-align:center;">No assets found. Deposit to start trading.</td></tr>';
+                }
+                tbody.innerHTML = html;
+                document.getElementById('totalHoldingsValue').textContent = `Total Portfolio Value: ${formatUSD(totalValue)}`;
+            } catch (error) {
+                console.error('Failed to render holdings:', error);
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Error loading holdings. Please refresh.</td></tr>';
+            }
+        }
+
+        // =============================================
         // INITIALIZATION
         // =============================================
         document.addEventListener('DOMContentLoaded', async () => {
@@ -5212,6 +5371,9 @@
                 
                 // Update header with networks and tags
                 updateHeaderWithNetworksAndTags();
+                
+                // Initial render of holdings
+                await renderHoldingsTable();
                 
                 console.log('✅ Trading Platform Initialized');
             } catch (error) {
@@ -5784,6 +5946,7 @@
                     await loadUserOrders();
                     await loadUserBalance();
                     await loadCryptoBalancesFromRest();
+                    await renderHoldingsTable(); // refresh holdings after order
                 } else {
                     const error = await response.json();
                     showNotification('error', 'Order Failed', error.message || 'Could not place order');
@@ -5969,6 +6132,7 @@
                 if (isAuthenticated && checkRateLimit('request')) {
                     await loadUserBalance();
                     await loadCryptoBalancesFromRest();
+                    await renderHoldingsTable();
                 }
             }, 5000);
             
@@ -6656,8 +6820,8 @@
                         <td colspan="11" style="text-align: center; padding: var(--spacing-xl); color: var(--gray);">
                             <i class="fas fa-inbox" style="font-size: 2rem; margin-bottom: var(--spacing-md); display: block; opacity: 0.5;"></i>
                             No ${currentOrdersTab} found
-                        </td>
-                    </tr>
+                        </div>
+                    </div>
                 `;
                 
                 safeSetTextContent('ordersCount', `0 ${currentOrdersTab}`);
@@ -6701,7 +6865,8 @@
                         <td>${date}</td>
                         <td><span style="font-weight: 500;">${orderSymbol}</span></td>
                         <td>${orderType.charAt(0).toUpperCase() + orderType.slice(1)}</div>
-                        <td class="${sideClass}">${orderSide ? orderSide.toUpperCase() : 'BUY'}</div></td>
+
+                            <td class="${sideClass}">${orderSide ? orderSide.toUpperCase() : 'BUY'}</div></td>
                         <td>${formatUSD(orderPrice)}</div></td>
                         <td>${formatNumber(orderAmount)}</div></td>
                         <td>${formatNumber(orderFilled)}</div></td>
@@ -6752,8 +6917,8 @@
                                     </button>
                                 </div>
                             </div>
-                        </td>
-                    </tr>
+                        </div>
+                    </div>
                 `;
             }
             
