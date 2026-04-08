@@ -268,10 +268,6 @@
             border-bottom: 1px solid var(--border-color);
         }
 
-        .dropdown-pair-row:hover {
-            background-color: var(--hover-bg);
-        }
-
         .dropdown-pair-symbol {
             font-weight: 500;
             font-size: 0.85rem;
@@ -3468,9 +3464,11 @@
         let currentSymbol = '';
         let currentPrice = 0;
         let previousPrice = 0;
-        let userMainBalance = 0;      // KEPT ONLY FOR DISPLAY IN FUNDS SECTION - NOT USED FOR TRADING
-        let userMaturedBalance = 0;    // KEPT ONLY FOR DISPLAY IN FUNDS SECTION - NOT USED FOR TRADING
-        let userCryptoBalances = {};    // Crypto balances fetched from backend /api/users/assets
+        // Fiat balances (Main & Matured) are ONLY for display value, NOT for balance checking
+        let userMainBalance = 0;
+        let userMaturedBalance = 0;
+        // Crypto balances from /api/users/assets - SOURCE OF TRUTH for order placement
+        let userCryptoBalances = {};
         let isAuthenticated = false;
         let currentOrderTab = 'buy';
         let currentTradesTab = 'market';
@@ -4154,7 +4152,7 @@
             }
         }
         
-        // Load crypto balances from REST endpoint (like dashboard.html)
+        // Load crypto balances from REST endpoint (like dashboard.html) - SOURCE OF TRUTH
         async function loadCryptoBalancesFromRest() {
             if (!isAuthenticated) return;
             
@@ -4186,23 +4184,24 @@
             }
         }
         
-        // Get crypto balance for a specific asset
+        // Get crypto balance for a specific asset (Base currency like BTC, ETH)
         function getCryptoBalance(assetSymbol) {
             const symbol = assetSymbol.toLowerCase();
             return userCryptoBalances[symbol] || 0;
         }
         
         // Check if user has sufficient balance before placing order
+        // CRITICAL: For SELL orders, check crypto balance from My Assets (/api/users/assets)
+        // For BUY orders, check USDT balance from userMainBalance + userMaturedBalance
         function hasSufficientBalance(side, amount, price) {
             if (side === 'buy') {
                 const totalCost = amount * price;
-                // For BUY, we need the quote asset (USDT) balance from userCryptoBalances
-                const quoteBalance = getCryptoBalance(currentPair.quote);
-                return totalCost <= quoteBalance;
+                const availableUSDT = userMainBalance + userMaturedBalance;
+                return totalCost <= availableUSDT;
             } else {
-                // For SELL, we need the base asset balance from userCryptoBalances
-                const baseBalance = getCryptoBalance(currentPair.base);
-                return amount <= baseBalance;
+                // SELL: Check crypto balance from My Assets section
+                const cryptoBalance = getCryptoBalance(currentPair.base);
+                return amount <= cryptoBalance;
             }
         }
 
@@ -4886,18 +4885,18 @@
                 return;
             }
             
-            const quoteBalance = getCryptoBalance(currentPair.quote);
+            const totalAvailable = userMainBalance + userMaturedBalance;
             const baseBalance = getCryptoBalance(currentPair.base);
             
             if (side === 'buy') {
                 const totalCost = amount * currentPrice;
-                if (totalCost > quoteBalance) {
-                    showNotification('error', 'Insufficient Balance', `Need ${formatUSD(totalCost)} ${currentPair.quote}. Available: ${formatNumber(quoteBalance)} ${currentPair.quote}`);
+                if (totalCost > totalAvailable) {
+                    showNotification('error', 'Insufficient Balance', `Need ${formatUSD(totalCost)} ${currentPair.quote}`);
                     return;
                 }
             } else {
                 if (amount > baseBalance) {
-                    showNotification('error', 'Insufficient Balance', `Need ${formatNumber(amount)} ${currentPair.base}. Available: ${formatNumber(baseBalance)} ${currentPair.base}`);
+                    showNotification('error', 'Insufficient Balance', `Need ${formatNumber(amount)} ${currentPair.base}`);
                     return;
                 }
             }
@@ -5204,6 +5203,7 @@
                 startRateLimitInterval();
                 await loadSettings();
                 await loadChartSettings();
+                // Load crypto balances from My Assets (/api/users/assets) - CRITICAL
                 await loadCryptoBalancesFromRest();
                 
                 // Load initial tab data
@@ -5572,8 +5572,14 @@
             
             const maxBuySpan = safeGetElement('maxBuyAmount');
             if (maxBuySpan) {
-                const quoteBalance = getCryptoBalance(currentPair.quote);
-                maxBuySpan.textContent = formatNumber(quoteBalance / price);
+                const totalAvailable = userMainBalance + userMaturedBalance;
+                const maxAmount = totalAvailable / price;
+                // Fix for InfinityB: Check if price is valid and not zero
+                if (isFinite(maxAmount) && price > 0) {
+                    maxBuySpan.textContent = formatNumber(maxAmount);
+                } else {
+                    maxBuySpan.textContent = '0.00';
+                }
             }
             
             safeSetTextContent('priceUSDT', price.toFixed(2));
@@ -5605,17 +5611,18 @@
             }
 
             const price = currentPrice;
-            const quoteBalance = getCryptoBalance(currentPair.quote);
-            const baseBalance = getCryptoBalance(currentPair.base);
+            const totalAvailable = (userMainBalance + userMaturedBalance);
             
             const amountInput = safeGetElement('orderAmount');
             if (!amountInput) return;
             
             if (currentOrderTab === 'buy') {
-                const maxAmount = quoteBalance / price;
+                const maxAmount = totalAvailable / price;
                 const amount = (maxAmount * percent) / 100;
                 amountInput.value = amount.toFixed(6);
             } else {
+                // SELL: Use crypto balance from My Assets (/api/users/assets)
+                const baseBalance = getCryptoBalance(currentPair.base);
                 const amount = (baseBalance * percent) / 100;
                 amountInput.value = amount.toFixed(6);
             }
@@ -5633,7 +5640,7 @@
             const mobileAvailableSpan = safeGetElement('mobileAvailableBalance');
             const mobileAvailableAssetSpan = safeGetElement('mobileAvailableAsset');
             
-            const quoteBalance = getCryptoBalance(currentPair.quote);
+            const totalAvailableUSDT = userMainBalance + userMaturedBalance;
             const baseBalance = getCryptoBalance(currentPair.base);
             
             if (tab === 'buy') {
@@ -5649,9 +5656,9 @@
                 }
                 safeSetTextContent('amountSuffix', currentPair.base);
                 safeSetTextContent('mobileAmountSuffix', currentPair.base);
-                if (availableSpan) availableSpan.textContent = formatNumber(quoteBalance);
+                if (availableSpan) availableSpan.textContent = formatNumber(totalAvailableUSDT);
                 if (availableAssetSpan) availableAssetSpan.textContent = currentPair.quote;
-                if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(quoteBalance);
+                if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(totalAvailableUSDT);
                 if (mobileAvailableAssetSpan) mobileAvailableAssetSpan.textContent = currentPair.quote;
             } else {
                 buyTabs.forEach(btn => btn.classList.remove('active'));
@@ -5666,6 +5673,7 @@
                 }
                 safeSetTextContent('amountSuffix', currentPair.base);
                 safeSetTextContent('mobileAmountSuffix', currentPair.base);
+                // Display CRYPTO balance from My Assets (/api/users/assets) in the "Available" field for SELL tab
                 if (availableSpan) availableSpan.textContent = formatNumber(baseBalance);
                 if (availableAssetSpan) availableAssetSpan.textContent = currentPair.base;
                 if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(baseBalance);
@@ -5674,8 +5682,12 @@
             
             const maxBuySpan = safeGetElement('maxBuyAmount');
             if (maxBuySpan) {
-                const quoteBalance = getCryptoBalance(currentPair.quote);
-                maxBuySpan.textContent = formatNumber(quoteBalance / currentPrice);
+                const maxAmount = totalAvailableUSDT / currentPrice;
+                if (isFinite(maxAmount) && currentPrice > 0) {
+                    maxBuySpan.textContent = formatNumber(maxAmount);
+                } else {
+                    maxBuySpan.textContent = '0.00';
+                }
             }
         }
 
@@ -5724,11 +5736,11 @@
             // Check balances before placing order
             if (!hasSufficientBalance(currentOrderTab, amount, price)) {
                 if (currentOrderTab === 'buy') {
-                    const quoteBalance = getCryptoBalance(currentPair.quote);
-                    showNotification('error', 'Insufficient Balance', `You need ${formatUSD(total)} ${currentPair.quote} to place this order. Available: ${formatNumber(quoteBalance)} ${currentPair.quote}`);
+                    const totalAvailable = userMainBalance + userMaturedBalance;
+                    showNotification('error', 'Insufficient Balance', `You need ${formatUSD(total)} ${currentPair.quote} to place this order. Available: ${formatUSD(totalAvailable)}`);
                 } else {
-                    const baseBalance = getCryptoBalance(currentPair.base);
-                    showNotification('error', 'Insufficient Balance', `You need ${formatNumber(amount)} ${currentPair.base} to place this order. Available: ${formatNumber(baseBalance)} ${currentPair.base}`);
+                    const cryptoBalance = getCryptoBalance(currentPair.base);
+                    showNotification('error', 'Insufficient Balance', `You need ${formatNumber(amount)} ${currentPair.base} to place this order. Available: ${formatNumber(cryptoBalance)}`);
                 }
                 return;
             }
@@ -6492,7 +6504,7 @@
         }
 
         function updateBalanceDisplay() {
-            const quoteBalance = getCryptoBalance(currentPair.quote);
+            const totalAvailableUSDT = userMainBalance + userMaturedBalance;
             const baseBalance = getCryptoBalance(currentPair.base);
             
             const availableSpan = safeGetElement('availableBalance');
@@ -6502,17 +6514,28 @@
             const maxBuySpan = safeGetElement('maxBuyAmount');
             
             if (currentOrderTab === 'buy') {
-                if (availableSpan) availableSpan.textContent = formatNumber(quoteBalance);
+                if (availableSpan) availableSpan.textContent = formatNumber(totalAvailableUSDT);
                 if (availableAssetSpan) availableAssetSpan.textContent = currentPair.quote;
-                if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(quoteBalance);
+                if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(totalAvailableUSDT);
                 if (mobileAvailableAssetSpan) mobileAvailableAssetSpan.textContent = currentPair.quote;
-                if (maxBuySpan) maxBuySpan.textContent = formatNumber(quoteBalance / currentPrice);
+                if (maxBuySpan) {
+                    const maxAmount = totalAvailableUSDT / currentPrice;
+                    if (isFinite(maxAmount) && currentPrice > 0) {
+                        maxBuySpan.textContent = formatNumber(maxAmount);
+                    } else {
+                        maxBuySpan.textContent = '0.00';
+                    }
+                }
             } else {
+                // SELL: Display CRYPTO balance from My Assets (/api/users/assets)
                 if (availableSpan) availableSpan.textContent = formatNumber(baseBalance);
                 if (availableAssetSpan) availableAssetSpan.textContent = currentPair.base;
                 if (mobileAvailableSpan) mobileAvailableSpan.textContent = formatNumber(baseBalance);
                 if (mobileAvailableAssetSpan) mobileAvailableAssetSpan.textContent = currentPair.base;
-                if (maxBuySpan) maxBuySpan.textContent = formatNumber(baseBalance);
+                if (maxBuySpan) {
+                    // For sell, max buy amount is not applicable, show the crypto balance
+                    maxBuySpan.textContent = formatNumber(baseBalance);
+                }
             }
         }
 
@@ -6701,9 +6724,10 @@
 
                 html += `
                     <tr>
-                        <td>${date}</div>
-                        <td><span style="font-weight: 500;">${orderSymbol}</span></div>
+                        <td>${date}</td>
+                        <td><span style="font-weight: 500;">${orderSymbol}</span></td>
                         <td>${orderType.charAt(0).toUpperCase() + orderType.slice(1)}</div>
+
                             <td class="${sideClass}">${orderSide ? orderSide.toUpperCase() : 'BUY'}</div></td>
                         <td>${formatUSD(orderPrice)}</div></td>
                         <td>${formatNumber(orderAmount)}</div></td>
@@ -6877,8 +6901,8 @@
                         <td colspan="11" style="text-align: center; padding: var(--spacing-xl); color: var(--gray);">
                             <i class="fas fa-inbox" style="font-size: 2rem; margin-bottom: var(--spacing-md); display: block; opacity: 0.5;"></i>
                             No open positions
-                        </div>
-                    </div>
+                        </td>
+                    </tr>
                 `;
             }
         }
