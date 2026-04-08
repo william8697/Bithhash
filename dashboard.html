@@ -5033,272 +5033,271 @@
         let socket;
         let moneyFlowChart;
         
-        function initSocketIO() {
-            const token = localStorage.getItem('jwtToken');
-            if (!token) {
-                console.log('No token, skipping socket connection');
-                return;
-            }
-            
-            console.log('🔌 Initializing Socket.IO connection...');
-            
-            // Use the correct backend URL with proper options
-            const SOCKET_URL = 'https://bithash-backend.onrender.com';
-            
-            socket = io(SOCKET_URL, { 
-                transports: ['websocket', 'polling'],
-                auth: { token },
-                reconnection: true,
-                reconnectionAttempts: 10,
-                reconnectionDelay: 1000,
-                reconnectionDelayMax: 5000,
-                timeout: 20000,
-                upgrade: true,
-                forceNew: true
-            });
-            
-            socket.on('connect', () => { 
-                console.log('✅ Socket connected successfully for dashboard');
-                console.log('Socket ID:', socket.id);
-                
-                // Send ping to keep connection alive
-                setInterval(() => {
-                    if (socket.connected) {
-                        socket.emit('ping');
-                    }
-                }, 30000);
-            });
-            
-            socket.on('disconnect', (reason) => {
-                console.warn('⚠️ Socket disconnected:', reason);
-                if (reason === 'io server disconnect') {
-                    // Reconnect manually
-                    socket.connect();
-                }
-            });
-            
-            socket.on('connect_error', (err) => { 
-                console.warn('⚠️ Socket connection error:', err.message);
-                console.log('Will retry automatically...');
-            });
-            
-            socket.on('auth_error', (data) => {
-                console.error('Authentication error:', data);
-            });
-            
-            socket.on('pong', () => {
-                console.log('💓 Socket connection healthy');
-            });
-            
-            // Rest of your existing socket event handlers...
-            socket.on('balance_update', (data) => {
-                if (data.main !== undefined) userBalances.main = parseFloat(data.main);
-                if (data.active !== undefined) userBalances.active = parseFloat(data.active);
-                if (data.matured !== undefined) userBalances.matured = parseFloat(data.matured);
-                
-                document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
-                document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
-                document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
-                
-                ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
-                updateMobileBalances();
-            });
-            
-            socket.on('asset_balances_update', (assetsData) => {
-                userAssetBalances = {};
-                assetsData.forEach(asset => {
-                    userAssetBalances[asset.symbol] = asset.balance;
-                });
-                userPortfolio = assetsData.map(asset => ({
-                    asset: asset.symbol,
-                    totalAmount: asset.balance,
-                    currentValue: asset.balance * (currentPrices[asset.id]?.usd || 0),
-                    averageBuyingPrice: asset.avgPrice || 0,
-                    unrealizedProfitLoss: asset.unrealizedPnl || 0,
-                    unrealizedPercentage: asset.unrealizedPnlPercent || 0,
-                    change24h: currentPrices[asset.id]?.usd_24h_change || 0,
-                    transactions: asset.transactions || []
-                }));
-                fullAssetsList = [...userPortfolio];
-                renderAssetsWithBalanceEnhanced();
-            });
-            
-            socket.on('preferences_update', (prefs) => {
-                if (prefs.displayAsset) {
-                    userPreferences.displayAsset = prefs.displayAsset;
-                    const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
-                    document.getElementById('global-asset-logo').src = assetData.logo;
-                    document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
-                    ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
-                }
-                if (prefs.fiatCurrency) {
-                    userPreferences.fiatCurrency = prefs.fiatCurrency;
-                    if (allFiatCurrencies && allFiatCurrencies.length > 0) {
-                        updateFiatSelectorUI();
-                    }
-                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
-                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
-                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
-                    renderAssetsWithBalanceEnhanced();
-                    renderTransactionsTable();
-                    loadReferralData();
-                }
-            });
-            
-            socket.on('pnl_update', (data) => {
-                if (data.main) {
-                    const mainPnlSpan = document.getElementById('main-pnl');
-                    const mainMobileSpan = document.getElementById('mobile-main-pnl')?.querySelector('span');
-                    const changeClass = data.main.percentage >= 0 ? 'positive' : 'negative';
-                    const sign = data.main.percentage >= 0 ? '+' : '';
-                    const formattedPnl = `${formatFiat(data.main.amount)} (${sign}${data.main.percentage.toFixed(2)}%)`;
-                    if (mainPnlSpan) mainPnlSpan.innerHTML = `Today's PnL ${formattedPnl}`;
-                    if (mainMobileSpan) mainMobileSpan.innerHTML = `Today's PnL ${formattedPnl}`;
-                    const container = document.getElementById('main-pnl-container');
-                    if (container) {
-                        container.classList.remove('positive', 'negative');
-                        container.classList.add(changeClass);
-                    }
-                }
-                if (data.matured) {
-                    const maturedPnlSpan = document.getElementById('matured-pnl');
-                    const maturedMobileSpan = document.getElementById('mobile-matured-pnl')?.querySelector('span');
-                    const changeClass = data.matured.percentage >= 0 ? 'positive' : 'negative';
-                    const sign = data.matured.percentage >= 0 ? '+' : '';
-                    const formattedPnl = `${formatFiat(data.matured.amount)} (${sign}${data.matured.percentage.toFixed(2)}%)`;
-                    if (maturedPnlSpan) maturedPnlSpan.innerHTML = `Today's PnL ${formattedPnl}`;
-                    if (maturedMobileSpan) maturedMobileSpan.innerHTML = `Today's PnL ${formattedPnl}`;
-                    const container = document.getElementById('matured-pnl-container');
-                    if (container) {
-                        container.classList.remove('positive', 'negative');
-                        container.classList.add(changeClass);
-                    }
-                }
-            });
-            
-            // Fallback REST endpoints if WebSocket takes too long
-            setTimeout(() => {
-                if (!userBalances.main && !userBalances.active && !userBalances.matured) {
-                    console.log('WebSocket timeout, using REST fallback for balances');
-                    loadBalancesFallback();
-                }
-                if (Object.keys(userAssetBalances).length === 0) {
-                    console.log('WebSocket timeout, using REST fallback for assets');
-                    loadAssetBalancesFallback();
-                }
-            }, 8000);
-        }
+       
         
-        async function loadBalancesFallback() {
-            try {
-                const token = localStorage.getItem('jwtToken');
-                if (!token) return;
-                const response = await fetch('https://bithash-backend.onrender.com/api/users/balances', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    userBalances.main = parseFloat(data.main || 0);
-                    userBalances.active = parseFloat(data.active || 0);
-                    userBalances.matured = parseFloat(data.matured || 0);
-                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
-                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
-                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
-                    ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
-                    updateMobileBalances();
-                }
-            } catch (error) {
-                console.warn('Balance fallback failed:', error);
-            }
+        // FIXED: REST FIRST, WebSocket as backup
+let restDataLoaded = false;
+let wsDataReceived = false;
+
+async function loadAllDataFromREST() {
+  
+  try {
+    // Load balances from REST
+    const token = localStorage.getItem('jwtToken');
+    if (!token) return;
+    
+    const [balancesRes, assetsRes, preferencesRes] = await Promise.all([
+      fetch('https://bithash-backend.onrender.com/api/users/balances', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }),
+      fetch('https://bithash-backend.onrender.com/api/users/assets', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }),
+      fetch('https://bithash-backend.onrender.com/api/users/preferences', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+    ]);
+    
+    if (balancesRes.ok) {
+      const balances = await balancesRes.json();
+      userBalances.main = parseFloat(balances.main || 0);
+      userBalances.active = parseFloat(balances.active || 0);
+      userBalances.matured = parseFloat(balances.matured || 0);
+      
+      document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+      document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+      document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+      ['main', 'active', 'matured'].forEach(type => updateBalanceSecondary(type, userBalances[type]));
+      updateMobileBalances();
+    }
+    
+    if (assetsRes.ok) {
+      const assetsData = await assetsRes.json();
+      userAssetBalances = {};
+      assetsData.forEach(asset => {
+        userAssetBalances[asset.symbol] = asset.balance;
+      });
+      userPortfolio = assetsData.map(asset => ({
+        asset: asset.symbol,
+        totalAmount: asset.balance,
+        currentValue: asset.balance * (currentPrices[asset.id]?.usd || 0),
+        averageBuyingPrice: asset.avgPrice || 0,
+        unrealizedProfitLoss: asset.unrealizedPnl || 0,
+        unrealizedPercentage: asset.unrealizedPnlPercent || 0,
+        change24h: currentPrices[asset.id]?.usd_24h_change || 0,
+        transactions: asset.transactions || []
+      }));
+      fullAssetsList = [...userPortfolio];
+      renderAssetsWithBalanceEnhanced();
+    }
+    
+    if (preferencesRes.ok) {
+      const prefs = await preferencesRes.json();
+      if (prefs.data) {
+        if (prefs.data.fiatCurrency) {
+          userPreferences.fiatCurrency = prefs.data.fiatCurrency;
+          updateFiatSelectorUI();
         }
+        if (prefs.data.displayAsset) {
+          userPreferences.displayAsset = prefs.data.displayAsset;
+          const assetData = topAssets.find(a => a.symbol === userPreferences.displayAsset) || topAssets[0];
+          document.getElementById('global-asset-logo').src = assetData.logo;
+          document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
+        }
+      }
+    }
+    
+    restDataLoaded = true;
+    
+  } catch (error) {
+    console.error('REST data loading failed:', error);
+  }
+}
+
+// Socket.IO with REST fallback (not the other way around)
+function initSocketIO() {
+  const token = localStorage.getItem('jwtToken');
+  if (!token) return;
+  
+  // Only initialize WebSocket after REST data is loaded
+  setTimeout(() => {
+    if (!restDataLoaded) {
+    }
+    
+    const SOCKET_URL = 'https://bithash-backend.onrender.com';
+    
+    socket = io(SOCKET_URL, { 
+      transports: ['websocket'],
+      auth: { token },
+      reconnection: true,
+      reconnectionAttempts: 3,
+      timeout: 10000
+    });
+    
+    socket.on('connect', () => {
+      console.log('WebSocket connected (backup mode)');
+    });
+    
+    socket.on('balance_update', (data) => {
+      // Only update if REST hasn't already provided data or if data is newer
+      if (data.main !== undefined) {
+        userBalances.main = parseFloat(data.main);
+        document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+        updateBalanceSecondary('main', userBalances.main);
+      }
+      if (data.matured !== undefined) {
+        userBalances.matured = parseFloat(data.matured);
+        document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
+        updateBalanceSecondary('matured', userBalances.matured);
+      }
+      updateMobileBalances();
+    });
+    
+    socket.on('connect_error', (err) => {
+      console.log('WebSocket unavailable, using REST only');
+    });
+  }, 1000);
+}
+
+
+// REAL-TIME PRICE UPDATES - Every 10 seconds
+let priceUpdateInterval = null;
+
+function startRealTimePriceUpdates() {
+  if (priceUpdateInterval) clearInterval(priceUpdateInterval);
+  
+  priceUpdateInterval = setInterval(async () => {
+    const updated = await fetchCoinGeckoPrices();
+    if (updated) {
+      // Recalculate main balance values based on new prices
+      let totalMainValue = 0;
+      for (const [asset, balance] of Object.entries(userAssetBalances)) {
+        if (balance > 0) {
+          const assetData = topAssets.find(a => a.symbol === asset);
+          const price = currentPrices[assetData?.id]?.usd || 0;
+          totalMainValue += balance * price;
+        }
+      }
+      
+      // Update main balance with real-time value
+      if (Math.abs(userBalances.main - totalMainValue) > 0.01) {
+        userBalances.main = totalMainValue;
+        document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+        updateBalanceSecondary('main', userBalances.main);
+        updateMobileBalances();
+      }
+      
+      // Update asset displays
+      if (fullAssetsList.length > 0) {
+        fullAssetsList = fullAssetsList.map(asset => {
+          const assetData = topAssets.find(a => a.symbol === asset.asset);
+          const newPrice = currentPrices[assetData?.id]?.usd || 0;
+          const newValue = asset.totalAmount * newPrice;
+          return {
+            ...asset,
+            currentValue: newValue,
+            change24h: currentPrices[assetData?.id]?.usd_24h_change || 0,
+            unrealizedProfitLoss: newValue - (asset.totalSpent || 0),
+            unrealizedPercentage: (asset.totalSpent || 0) > 0 ? ((newValue - (asset.totalSpent || 0)) / (asset.totalSpent || 0)) * 100 : 0
+          };
+        });
+        renderAssetsWithBalanceEnhanced();
+      }
+    }
+  }, 10000); // Update every 10 seconds for real-time fluctuations
+}
+
         
-        async function loadAssetBalancesFallback() {
-            try {
-                const token = localStorage.getItem('jwtToken');
-                if (!token) return;
-                
-                console.log('🔄 Loading asset balances fallback...');
-                const response = await fetch('https://bithash-backend.onrender.com/api/users/assets', {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                
-                if (response.ok) {
-                    const assetsData = await response.json();
-                    console.log(`📊 Received ${assetsData.length} assets with balances`);
-                    
-                    userAssetBalances = {};
-                    assetsData.forEach(asset => {
-                        userAssetBalances[asset.symbol] = asset.balance;
-                        console.log(`  - ${asset.symbol}: ${asset.balance} ($${asset.currentValue})`);
-                    });
-                    
-                    userPortfolio = assetsData.map(asset => {
-                        // Ensure price exists, use fallback if needed
-                        const assetPrice = currentPrices[asset.id]?.usd || 0;
-                        const currentValue = asset.balance * assetPrice;
-                        
-                        return {
-                            asset: asset.symbol,
-                            totalAmount: asset.balance,
-                            currentValue: currentValue,
-                            averageBuyingPrice: asset.avgPrice || 0,
-                            unrealizedProfitLoss: asset.unrealizedPnl || 0,
-                            unrealizedPercentage: asset.unrealizedPnlPercent || 0,
-                            change24h: currentPrices[asset.id]?.usd_24h_change || 0,
-                            transactions: asset.transactions || [],
-                            currentPrice: assetPrice
-                        };
-                    });
-                    
-                    fullAssetsList = [...userPortfolio];
-                    renderAssetsWithBalanceEnhanced();
-                    
-                    // If Solana balance exists but shows 0, log warning
-                    const solanaAsset = assetsData.find(a => a.symbol === 'sol');
-                    if (solanaAsset && solanaAsset.balance > 0 && solanaAsset.currentValue === 0) {
-                        console.warn('⚠️ Solana balance exists but price is 0. Checking price API...');
-                        // Force refresh prices
-                        await fetchCoinGeckoPrices();
-                    }
-                } else {
-                    console.error('Failed to load asset balances:', response.status);
-                }
-            } catch (error) {
-                console.error('Asset balances fallback failed:', error);
-            }
-        }
+
         
-        function initDonutChart() {
-            const ctx = document.getElementById('moneyFlowDonut').getContext('2d');
-            moneyFlowChart = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Deposits', 'Withdrawals', 'Conversions', 'Investments'],
-                    datasets: [{
-                        data: [0, 0, 0, 0],
-                        backgroundColor: ['#F7A600', '#228B22', '#1A73E8', '#D4AF37'],
-                        borderWidth: 0,
-                        hoverOffset: 4
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    cutout: '65%',
-                    plugins: {
-                        legend: { position: 'bottom', labels: { color: '#B7BDC6', font: { size: 10 } } },
-                        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${formatFiat(ctx.raw)}` } }
-                    }
-                }
-            });
-        }
         
-        function updateDonutChart(data) {
-            if (moneyFlowChart) {
-                moneyFlowChart.data.datasets[0].data = [data.deposits || 0, data.withdrawals || 0, data.conversions || 0, data.investments || 0];
-                moneyFlowChart.update();
+        let moneyFlowChart = null;
+
+function initDonutChart() {
+  const canvas = document.getElementById('moneyFlowDonut');
+  if (!canvas) return;
+  
+  const ctx = canvas.getContext('2d');
+  
+  // Destroy existing chart if it exists
+  if (moneyFlowChart) {
+    moneyFlowChart.destroy();
+  }
+  
+  moneyFlowChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Deposits', 'Withdrawals', 'Conversions', 'Investments'],
+      datasets: [{
+        data: [0, 0, 0, 0],
+        backgroundColor: ['#F7A600', '#228B22', '#1A73E8', '#D4AF37'],
+        borderWidth: 0,
+        hoverOffset: 8,
+        borderRadius: 8,
+        spacing: 2
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      cutout: '65%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: '#B7BDC6',
+            font: { size: 11, family: 'Inter' },
+            padding: 12,
+            usePointStyle: true,
+            pointStyle: 'circle'
+          }
+        },
+        tooltip: {
+          backgroundColor: '#1B222C',
+          titleColor: '#FFFFFF',
+          bodyColor: '#B7BDC6',
+          borderColor: '#F7A600',
+          borderWidth: 1,
+          callbacks: {
+            label: (context) => {
+              const value = context.raw;
+              const total = context.dataset.data.reduce((a, b) => a + b, 0);
+              const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+              return `${context.label}: ${formatFiat(value)} (${percentage}%)`;
             }
+          }
         }
+      },
+      layout: {
+        padding: 10
+      }
+    }
+  });
+}
+
+async function loadMoneyFlowData() {
+  try {
+    const token = localStorage.getItem('jwtToken');
+    if (!token) return;
+    
+    const response = await fetch('https://bithash-backend.onrender.com/api/transactions/summary', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    
+    if (response.ok && moneyFlowChart) {
+      const data = await response.json();
+      moneyFlowChart.data.datasets[0].data = [
+        data.totalDeposits || 0,
+        data.totalWithdrawals || 0,
+        data.totalConversions || 0,
+        data.totalInvestments || 0
+      ];
+      moneyFlowChart.update();
+    }
+  } catch (error) {
+    console.error('Failed to load money flow data');
+  }
+}
         
         // Fiat Currency Logic - ALL FIATS FROM BACKEND ENDPOINT (NO HARDCODING)
         let allFiatCurrencies = [];
