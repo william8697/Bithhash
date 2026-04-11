@@ -1833,6 +1833,50 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* Crypto balance addition styles */
+        .crypto-select {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 15px;
+            border: 1px solid var(--gray-light);
+            border-radius: var(--border-radius);
+            background: white;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        .crypto-select:hover {
+            border-color: var(--primary);
+            transform: translateY(-2px);
+        }
+        .crypto-select.selected {
+            border-color: var(--primary);
+            background: rgba(37, 99, 235, 0.05);
+        }
+        .crypto-logo {
+            width: 32px;
+            height: 32px;
+            object-fit: contain;
+            border-radius: 50%;
+        }
+        .crypto-name {
+            font-weight: 600;
+            color: var(--dark);
+        }
+        .crypto-balance {
+            font-size: 12px;
+            color: var(--gray);
+            margin-left: auto;
+        }
+        .crypto-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -2056,10 +2100,10 @@
                     </div>
                 </div>
                 
-                <!-- REPLACED with single donut chart -->
+                <!-- REPLACED: Single Donut Chart (realtime stats) -->
                 <div class="chart-container">
-                    <h4 style="margin-bottom: 15px;">Revenue & User Distribution</h4>
-                    <canvas id="donutChart" style="max-height: 300px;"></canvas>
+                    <h4 style="margin-bottom: 15px;">Platform Asset Distribution (Realtime)</h4>
+                    <canvas id="realtimeDonutChart" style="max-height: 300px;"></canvas>
                 </div>
 
                 <div class="admin-card">
@@ -2086,7 +2130,7 @@
                                 <tbody>
                                     <!-- Activity data will be loaded here with location info -->
                                 </tbody>
-                             </table>
+                             <table>
                         </div>
                         <div class="pagination" id="activity-pagination">
                             <button id="activity-prev" disabled>Previous</button>
@@ -3454,6 +3498,47 @@
         </div>
     </div>
 
+    <!-- Crypto Add Balance Modal - NEW (Robust with logos from backend) -->
+    <div class="admin-modal" id="crypto-balance-modal">
+        <div class="admin-modal-content">
+            <div class="admin-modal-header">
+                <h3>Add Crypto Balance</h3>
+                <button class="close">&times;</button>
+            </div>
+            <div class="admin-modal-body">
+                <form id="crypto-balance-form">
+                    <input type="hidden" name="user_id" id="crypto-balance-user-id">
+                    <div class="admin-form-group">
+                        <label class="admin-form-label">Select Cryptocurrency</label>
+                        <div id="crypto-options-list" class="crypto-grid">
+                            <!-- Dynamically loaded from backend with logos -->
+                        </div>
+                        <input type="hidden" name="crypto_currency" id="selected-crypto-currency" required>
+                    </div>
+                    <div class="admin-form-group">
+                        <label class="admin-form-label">Amount (in selected crypto)</label>
+                        <input type="number" class="admin-form-control" name="crypto_amount" id="crypto-amount" step="any" min="0.00000001" required>
+                    </div>
+                    <div class="admin-form-group">
+                        <label class="admin-form-label">Wallet Type</label>
+                        <select class="admin-form-control" name="wallet_type" id="crypto-wallet-type" required>
+                            <option value="main">Main Wallet</option>
+                            <option value="matured">Matured Wallet</option>
+                        </select>
+                    </div>
+                    <div class="admin-form-group">
+                        <label class="admin-form-label">Description</label>
+                        <textarea class="admin-form-control" name="crypto_description" rows="2" placeholder="Optional note about this transaction"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="admin-modal-footer">
+                <button class="admin-btn btn-outline-primary close">Cancel</button>
+                <button class="admin-btn btn-primary" id="save-crypto-balance-btn">Add Crypto Balance</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Approve Deposit Modal -->
     <div class="admin-modal" id="approve-deposit-modal">
         <div class="admin-modal-content">
@@ -3820,7 +3905,10 @@
     let adminToken = localStorage.getItem('adminToken');
     let csrfToken = localStorage.getItem('csrfToken');
     let currentAdmin = null;
-    let donutChart = null;
+    let revenueChart = null;
+    let userDistributionChart = null;
+    let growthChart = null;
+    let realtimeDonutChart = null;
     
     // Pagination variables
     let currentPage = {
@@ -4258,6 +4346,19 @@
         // Save Balance Button
         $('#save-balance-btn').on('click', function() {
             addBalanceToUser();
+        });
+        
+        // NEW: Crypto Add Balance Button
+        $(document).on('click', '.add-crypto-balance', function() {
+            const userId = $(this).data('id');
+            $('#crypto-balance-user-id').val(userId);
+            loadSupportedCryptosForModal();
+            $('#crypto-balance-modal').addClass('show');
+        });
+        
+        // Save Crypto Balance Button
+        $('#save-crypto-balance-btn').on('click', function() {
+            addCryptoBalanceToUser();
         });
         
         // Approve Deposit Button (delegated for dynamic content)
@@ -4787,15 +4888,12 @@
                     
                     if (notifications.length === 0) {
                         tableBody.append(`
-                            <tr>
+                            32
                                 <td colspan="8" class="empty-state">
                                     <i class="fas fa-bell-slash"></i>
                                     <p>No notifications found</p>
-
-
-
-                                        </td>
-                                </tr>
+                                   </td>
+                            </tr>
                         `);
                     } else {
                         notifications.forEach(notification => {
@@ -5594,23 +5692,22 @@
                     $('#last-transaction-time').text(`${stats.lastTransactionTime} seconds ago`);
                     $('#server-uptime').text(`${stats.serverUptime}%`);
                     
-                    // NEW: Update the donut chart with real-time stats
-                    if (stats.donutChartData) {
-                        if (donutChart) {
-                            donutChart.data.datasets[0].data = stats.donutChartData.values;
-                            donutChart.data.labels = stats.donutChartData.labels;
-                            donutChart.update();
+                    // Replace the removed sections with a single donut chart (realtime stats)
+                    if (stats.realtimeDistribution) {
+                        if (realtimeDonutChart) {
+                            realtimeDonutChart.data.datasets[0].data = Object.values(stats.realtimeDistribution);
+                            realtimeDonutChart.data.labels = Object.keys(stats.realtimeDistribution);
+                            realtimeDonutChart.update();
                         } else {
-                            const ctx = document.getElementById('donutChart').getContext('2d');
-                            donutChart = new Chart(ctx, {
+                            const ctx = document.getElementById('realtimeDonutChart').getContext('2d');
+                            realtimeDonutChart = new Chart(ctx, {
                                 type: 'doughnut',
                                 data: {
-                                    labels: stats.donutChartData.labels,
+                                    labels: Object.keys(stats.realtimeDistribution),
                                     datasets: [{
-                                        data: stats.donutChartData.values,
-                                        backgroundColor: ['#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6'],
-                                        borderWidth: 0,
-                                        hoverOffset: 4
+                                        data: Object.values(stats.realtimeDistribution),
+                                        backgroundColor: ['#10b981', '#f59e0b', '#3b82f6', '#8b5cf6', '#ef4444'],
+                                        borderWidth: 0
                                     }]
                                 },
                                 options: {
@@ -5618,7 +5715,7 @@
                                     maintainAspectRatio: true,
                                     plugins: {
                                         legend: { position: 'bottom' },
-                                        tooltip: { callbacks: { label: function(context) { return `${context.label}: ${context.raw}`; } } }
+                                        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: $${ctx.raw.toLocaleString()}` } }
                                     }
                                 }
                             });
@@ -5708,12 +5805,12 @@
                                     <span class="location-badge location-tooltip" data-full-location="${fullLocation}">
                                         <i class="fas fa-map-marker-alt"></i> ${locationDisplay}
                                     </span>
-                                </td>
+                                    </td>
                                 <td><span class="admin-badge ${activity.status === 'success' ? 'badge-success' : activity.status === 'pending' ? 'badge-warning' : 'badge-danger'}">${activity.status}</span></td>
                                 <td>
                                     ${mapUrl !== '#' ? `<a href="${mapUrl}" target="_blank" class="admin-btn btn-outline-primary btn-sm"><i class="fas fa-map"></i> View on Map</a>` : 'N/A'}
-                                </td>
-                            </tr>
+                                  </td>
+                                </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -5793,22 +5890,22 @@
                                 <td colspan="8" style="text-align: center; padding: 40px;">
                                     <i class="fas fa-folder-open" style="font-size: 48px; color: var(--gray-light); margin-bottom: 15px;"></i>
                                     <p style="color: var(--gray);">No KYC submissions found</p>
-                                </td>
-                            </tr>
+                                    </td>
+                                </tr>
                         `);
                     } else {
                         submissions.forEach(submission => {
                             const user = submission.user || {};
                             const row = `
                                 <tr class="animate__animated animate__fadeIn">
-                                    <td>${user.firstName || ''} ${user.lastName || ''}</td>
-                                    <td>${user.email || 'N/A'}</td>
-                                    <td><span class="kyc-status-badge kyc-status-${submission.identity.status}">${submission.identity.status}</span></td>
-                                    <td><span class="kyc-status-badge kyc-status-${submission.address.status}">${submission.address.status}</span></td>
-                                    <td><span class="kyc-status-badge kyc-status-${submission.facial.status}">${submission.facial.status}</span></td>
-                                    <td><span class="kyc-status-badge kyc-status-${submission.overallStatus}">${submission.overallStatus}</span></td>
-                                    <td>${submission.submittedAt ? formatActivityTime(submission.submittedAt) : 'Not submitted'}</td>
-                                    <td>
+                                     <td>${user.firstName || ''} ${user.lastName || ''}</td>
+                                     <td>${user.email || 'N/A'}</td>
+                                     <td><span class="kyc-status-badge kyc-status-${submission.identity.status}">${submission.identity.status}</span></td>
+                                     <td><span class="kyc-status-badge kyc-status-${submission.address.status}">${submission.address.status}</span></td>
+                                     <td><span class="kyc-status-badge kyc-status-${submission.facial.status}">${submission.facial.status}</span></td>
+                                     <td><span class="kyc-status-badge kyc-status-${submission.overallStatus}">${submission.overallStatus}</span></td>
+                                     <td>${submission.submittedAt ? formatActivityTime(submission.submittedAt) : 'Not submitted'}</td>
+                                     <td>
                                         <div class="kyc-action-buttons">
                                             <button class="admin-btn btn-outline-primary btn-sm view-kyc-details" data-id="${submission._id}">
                                                 <i class="fas fa-eye"></i> View
@@ -5819,8 +5916,8 @@
                                                 </button>
                                             ` : ''}
                                         </div>
-                                      </td>
-                                   </tr>
+                                       </td>
+                                    </tr>
                             `;
                             tableBody.append(row);
                         });
@@ -6246,9 +6343,8 @@
                     users.forEach(user => {
                         const row = `
                             <tr class="animate__animated animate__fadeIn">
-                                                                <td>${user._id.substring(0, 8)}...
-
-                                                                    <td>${user.firstName} ${user.lastName}</td>
+                                                                <td>${user._id.substring(0, 8)}...</td>
+                                                                <td>${user.firstName} ${user.lastName}</td>
                                                                 <td>${user.email}</td>
                                                                 <td>$${parseFloat(user.balances?.active || 0).toFixed(2)}</td>
                                                                 <td>$${parseFloat(user.balances?.matured || 0).toFixed(2)}</td>
@@ -6258,9 +6354,10 @@
                                                                 <td>
                                                                     <button class="admin-btn btn-outline-primary btn-sm edit-user" data-id="${user._id}">Edit</button>
                                                                     <button class="admin-btn btn-outline-primary btn-sm add-balance" data-id="${user._id}">Add Balance</button>
+                                                                    <button class="admin-btn btn-outline-primary btn-sm add-crypto-balance" data-id="${user._id}">Add Crypto</button>
                                                                     <button class="admin-btn btn-danger btn-sm delete-user" data-id="${user._id}" data-name="${user.firstName} ${user.lastName}">Delete</button>
-                                                                 </td>
-                                                             </tr>
+                                                                </td>
+                                                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6336,8 +6433,8 @@
                                 <td>${deposit.proof ? `<a href="${deposit.proof}" target="_blank" class="admin-btn btn-outline-primary btn-sm">View Proof</a>` : 'N/A'}</td>
                                 <td>
                                     <button class="admin-btn btn-primary btn-sm approve-deposit" data-id="${deposit._id}">Approve</button>
-                                 </td>
-                             </tr>
+                                </td>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6384,7 +6481,7 @@
                                 <td>${deposit.method}</td>
                                 <td>${formatActivityTime(deposit.createdAt)}</td>
                                 <td>${deposit.approvedBy ? deposit.approvedBy.name : 'System'}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6428,7 +6525,7 @@
                                 <td>${deposit.method}</td>
                                 <td>${formatActivityTime(deposit.createdAt)}</td>
                                 <td>${deposit.rejectionReason}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6474,8 +6571,8 @@
                                 <td>${withdrawal.walletAddress || 'N/A'}</td>
                                 <td>
                                     <button class="admin-btn btn-primary btn-sm approve-withdrawal" data-id="${withdrawal._id}">Approve</button>
-                                 </td>
-                             </tr>
+                                </td>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6522,7 +6619,7 @@
                                 <td>${withdrawal.method}</td>
                                 <td>${formatActivityTime(withdrawal.createdAt)}</td>
                                 <td>${withdrawal.approvedBy ? withdrawal.approvedBy.name : 'System'}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6566,7 +6663,7 @@
                                 <td>${withdrawal.method}</td>
                                 <td>${formatActivityTime(withdrawal.createdAt)}</td>
                                 <td>${withdrawal.rejectionReason}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6613,8 +6710,8 @@
                                 <td>${card.lastUsed ? formatActivityTime(card.lastUsed) : 'Never'}</td>
                                 <td>
                                     <button class="admin-btn btn-danger btn-sm delete-card" data-id="${card._id}">Delete</button>
-                                 </td>
-                             </tr>
+                                </td>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6660,7 +6757,7 @@
                                 <td><span class="admin-badge ${transaction.status === 'completed' ? 'badge-success' : transaction.status === 'pending' ? 'badge-warning' : 'badge-danger'}">${transaction.status.charAt(0).toUpperCase() + transaction.status.slice(1)}</span></td>
                                 <td>${formatActivityTime(transaction.createdAt)}</td>
                                 <td>${transaction.description}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6705,7 +6802,7 @@
                                 <td><span class="admin-badge ${transaction.status === 'completed' ? 'badge-success' : transaction.status === 'pending' ? 'badge-warning' : 'badge-danger'}">${transaction.status.charAt(0).toUpperCase() + transaction.status.slice(1)}</span></td>
                                 <td>${formatActivityTime(transaction.createdAt)}</td>
                                 <td>${transaction.processedBy ? transaction.processedBy.name : 'System'}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6750,7 +6847,7 @@
                                 <td><span class="admin-badge ${transaction.status === 'completed' ? 'badge-success' : transaction.status === 'pending' ? 'badge-warning' : 'badge-danger'}">${transaction.status.charAt(0).toUpperCase() + transaction.status.slice(1)}</span></td>
                                 <td>${formatActivityTime(transaction.createdAt)}</td>
                                 <td>${transaction.processedBy ? transaction.processedBy.name : 'System'}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6795,7 +6892,7 @@
                                 <td><span class="admin-badge ${transaction.status === 'completed' ? 'badge-success' : transaction.status === 'pending' ? 'badge-warning' : 'badge-danger'}">${transaction.status.charAt(0).toUpperCase() + transaction.status.slice(1)}</span></td>
                                 <td>${formatActivityTime(transaction.createdAt)}</td>
                                 <td>${transaction.description}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -6879,7 +6976,9 @@
                         
                         const row = `
                             <tr class="animate__animated animate__fadeIn ${isMatured ? 'investment-matured' : ''}">
-                                                                <td>${investment._id.substring(0, 8)}...</td>
+
+
+                                                               <td>${investment._id.substring(0, 8)}... </td>
                                  <td>${investment.user.firstName} ${investment.user.lastName}</td>
                                  <td>${investment.plan.name}</td>
                                  <td>$${parseFloat(investment.amount).toFixed(2)}</td>
@@ -6979,7 +7078,7 @@
                                 <td>${formatActivityTime(investment.startDate)}</td>
                                 <td>${formatActivityTime(investment.endDate)}</td>
                                 <td>$${parseFloat(investment.totalProfit).toFixed(2)}</td>
-                             </tr>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
@@ -7020,7 +7119,8 @@
                                 <td>${plan.name}</td>
                                 <td>$${parseFloat(plan.minAmount).toFixed(2)}</td>
                                 <td>$${parseFloat(plan.maxAmount).toFixed(2)}</td>
-                                <td>${plan.duration} days</td>
+                                <td>${plan.duration} days
+                                                                <td>${plan.duration} days</td>
                                 <td>${plan.dailyProfit}%</td>
                                 <td>${plan.totalProfit}%</td>
                                 <td><span class="admin-badge ${plan.status === 'active' ? 'badge-success' : 'badge-warning'}">${plan.status.charAt(0).toUpperCase() + plan.status.slice(1)}</span></td>
@@ -7067,8 +7167,8 @@
                             <tr>
                                 <td colspan="7" style="text-align: center; padding: 20px;">
                                     No downline relationships found
-                                 </td>
-                             </tr>
+                                </td>
+                            </tr>
                         `);
                     } else {
                         relationships.forEach(relationship => {
@@ -7082,8 +7182,8 @@
                                     <td><span class="admin-badge ${relationship.remainingRounds > 0 ? 'badge-success' : 'badge-warning'}">${relationship.remainingRounds > 0 ? 'Active' : 'Completed'}</span></td>
                                     <td>
                                         <button class="admin-btn btn-danger btn-sm remove-downline" data-id="${relationship._id}">Remove</button>
-                                     </td>
-                                 </tr>
+                                    </td>
+                                </tr>
                             `;
                             tableBody.append(row);
                         });
@@ -7123,8 +7223,8 @@
                             <tr>
                                 <td colspan="7" style="text-align: center; padding: 20px;">
                                     No commission history found
-                                 </td>
-                             </tr>
+                                </td>
+                            </tr>
                         `);
                     } else {
                         commissions.forEach(commission => {
@@ -7137,7 +7237,7 @@
                                     <td>${commission.commissionPercentage}%</td>
                                     <td>$${parseFloat(commission.commissionAmount).toFixed(2)}</td>
                                     <td>${commission.roundNumber}</td>
-                                 </tr>
+                                </tr>
                             `;
                             tableBody.append(row);
                         });
@@ -7596,6 +7696,127 @@
                     toastr.error(xhr.responseJSON.message);
                 } else {
                     toastr.error('Failed to add balance. Please try again.');
+                }
+            }
+        });
+    }
+    
+    // NEW: Load supported cryptocurrencies from backend (with logos)
+    function loadSupportedCryptosForModal() {
+        showLoading('Loading cryptocurrencies...');
+        
+        $.ajax({
+            url: 'https://bithash-backend-1.onrender.com/api/admin/supported-cryptos',
+            type: 'GET',
+            headers: {
+                'Authorization': `Bearer ${adminToken}`,
+                'X-CSRF-TOKEN': csrfToken
+            },
+            success: function(response) {
+                hideLoading();
+                if (response.status === 'success') {
+                    const cryptos = response.data.cryptos;
+                    const container = $('#crypto-options-list');
+                    container.empty();
+                    
+                    if (!cryptos || cryptos.length === 0) {
+                        container.html('<div class="empty-state">No cryptocurrencies configured in backend</div>');
+                        return;
+                    }
+                    
+                    cryptos.forEach(crypto => {
+                        const cryptoDiv = `
+                            <div class="crypto-select" data-currency="${crypto.code}">
+                                <img src="${crypto.logoUrl}" class="crypto-logo" alt="${crypto.name}" onerror="this.src='https://via.placeholder.com/32?text=Crypto'">
+                                <span class="crypto-name">${crypto.name} (${crypto.code})</span>
+                                <span class="crypto-balance">Balance: ${crypto.balance || 'N/A'}</span>
+                            </div>
+                        `;
+                        container.append(cryptoDiv);
+                    });
+                    
+                    // Add click event for crypto selection
+                    $('.crypto-select').off('click').on('click', function() {
+                        $('.crypto-select').removeClass('selected');
+                        $(this).addClass('selected');
+                        $('#selected-crypto-currency').val($(this).data('currency'));
+                    });
+                } else {
+                    toastr.error('Failed to load supported cryptocurrencies');
+                }
+            },
+            error: function(xhr, status, error) {
+                hideLoading();
+                toastr.error(xhr.responseJSON?.message || 'Failed to load cryptocurrencies from backend');
+            }
+        });
+    }
+    
+    // NEW: Add crypto balance to user (main or matured wallet)
+    function addCryptoBalanceToUser() {
+        const userId = $('#crypto-balance-user-id').val();
+        const cryptoCurrency = $('#selected-crypto-currency').val();
+        const amount = parseFloat($('#crypto-amount').val());
+        const walletType = $('#crypto-wallet-type').val();
+        const description = $('#crypto-balance-form textarea[name="crypto_description"]').val();
+        
+        if (!cryptoCurrency) {
+            toastr.error('Please select a cryptocurrency');
+            return;
+        }
+        
+        if (!amount || amount <= 0) {
+            toastr.error('Please enter a valid amount greater than 0');
+            return;
+        }
+        
+        if (!walletType) {
+            toastr.error('Please select a wallet type');
+            return;
+        }
+        
+        showLoading('Adding crypto balance...');
+        
+        const requestData = {
+            currency: cryptoCurrency,
+            amount: amount,
+            walletType: walletType,
+            description: description || `Crypto balance added by admin ${currentAdmin?.name || 'Admin'}`
+        };
+        
+        $.ajax({
+            url: `https://bithash-backend-1.onrender.com/api/admin/users/${userId}/crypto-balance`,
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(requestData),
+            headers: {
+                'Authorization': `Bearer ${adminToken}`,
+                'X-CSRF-TOKEN': csrfToken
+            },
+            success: function(response) {
+                hideLoading();
+                if (response.status === 'success') {
+                    $('#crypto-balance-modal').removeClass('show');
+                    $('#crypto-balance-form')[0].reset();
+                    $('#selected-crypto-currency').val('');
+                    $('.crypto-select').removeClass('selected');
+                    loadUsers();
+                    toastr.success(`${amount} ${cryptoCurrency} added to ${walletType === 'main' ? 'Main' : 'Matured'} wallet successfully`);
+                } else {
+                    toastr.error(response.message || 'Failed to add crypto balance');
+                }
+            },
+            error: function(xhr, status, error) {
+                hideLoading();
+                if (xhr.responseJSON && xhr.responseJSON.errors) {
+                    const errors = xhr.responseJSON.errors;
+                    for (const field in errors) {
+                        toastr.error(errors[field][0]);
+                    }
+                } else if (xhr.responseJSON && xhr.responseJSON.message) {
+                    toastr.error(xhr.responseJSON.message);
+                } else {
+                    toastr.error('Failed to add crypto balance. Please try again.');
                 }
             }
         });
