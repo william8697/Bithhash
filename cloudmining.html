@@ -1231,7 +1231,7 @@
         }
         
         // =============================================
-        // FETCH USER DATA
+        // FETCH USER DATA - USING SAME ENDPOINT AS DASHBOARD ASSETS SECTION
         // =============================================
         async function fetchUserData() {
             const token = localStorage.getItem('jwtToken');
@@ -1242,7 +1242,8 @@
             }
             
             try {
-                // Fetch balances
+                // Fetch balances from the same endpoint used by dashboard assets section
+                // This is the same /api/users/balances endpoint that dashboard.html uses
                 const balanceResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/balances', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -1250,10 +1251,30 @@
                 if (!balanceResponse.ok) throw new Error('Failed to fetch balances');
                 
                 const balanceData = await balanceResponse.json();
-                AppState.userBalances.main = balanceData.data?.balances?.main || 0;
-                AppState.userBalances.matured = balanceData.data?.balances?.matured || 0;
+                // Parse balances - same structure as dashboard.html
+                AppState.userBalances.main = parseFloat(balanceData.main) || parseFloat(balanceData.data?.balances?.main) || 0;
+                AppState.userBalances.matured = parseFloat(balanceData.matured) || parseFloat(balanceData.data?.balances?.matured) || 0;
                 
-                // Fetch preferences
+                // Fetch Bitcoin balance specifically - check if user has BTC in their assets
+                // This ensures user can only invest if they have Bitcoin balance
+                const assetsResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (assetsResponse.ok) {
+                    const assetsData = await assetsResponse.json();
+                    // Find Bitcoin balance from user's assets (same as dashboard's loadAssetBalancesFromRest)
+                    const btcAsset = assetsData.find(asset => asset.symbol === 'btc' || asset.symbol === 'bitcoin');
+                    if (btcAsset) {
+                        AppState.userBitcoinBalance = parseFloat(btcAsset.balance) || 0;
+                    } else {
+                        AppState.userBitcoinBalance = 0;
+                    }
+                } else {
+                    AppState.userBitcoinBalance = 0;
+                }
+                
+                // Fetch preferences (same as dashboard)
                 await fetchUserPreferences(token);
                 
                 // Fetch current BTC price
@@ -1328,7 +1349,7 @@
             
             document.getElementById('min-max-hint').textContent = `Min: $${AppState.minAmount.toLocaleString()} | Max: $${AppState.maxAmount.toLocaleString()}`;
             
-            // Render balance options
+            // Render balance options - ONLY BITCOIN BALANCE OPTION
             renderBalanceOptions();
             
             // Setup listeners
@@ -1341,68 +1362,63 @@
             
             if (!token) return;
             
-            const asset = AppState.userPreferences.displayAsset;
-            const assetData = topAssets.find(a => a.symbol === asset) || topAssets[0];
-            const assetLogo = getAssetLogo(asset);
-            const price = AppState.currentPrices.btc || 43000;
+            // Calculate BTC balance in USD
+            const btcPrice = AppState.currentPrices.btc || 43000;
+            const bitcoinBalanceUSD = AppState.userBitcoinBalance * btcPrice;
+            const mainBalanceUSD = AppState.userBalances.main || 0;
+            const maturedBalanceUSD = AppState.userBalances.matured || 0;
             
-            const mainFiat = AppState.userBalances.main;
-            const maturedFiat = AppState.userBalances.matured;
-            const mainAsset = price > 0 ? mainFiat / price : 0;
-            const maturedAsset = price > 0 ? maturedFiat / price : 0;
+            // User can only invest if they have Bitcoin balance (bitcoin in assets)
+            const hasBitcoin = AppState.userBitcoinBalance > 0;
+            const eligibleAmount = bitcoinBalanceUSD;
+            const isEligible = hasBitcoin && eligibleAmount >= AppState.minAmount;
             
-            const mainEligible = mainFiat >= AppState.minAmount;
-            const maturedEligible = maturedFiat >= AppState.minAmount;
+            const assetLogo = 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
             
             let html = '';
             
-            // Main Balance Option
+            // Bitcoin Balance Option (only option shown - user must have BTC to invest)
             html += `
-                <div class="balance-option ${mainEligible ? '' : 'disabled'}" data-balance="main" data-amount="${mainFiat}" onclick="selectBalance('main', ${mainFiat})">
+                <div class="balance-option ${isEligible ? '' : 'disabled'}" data-balance="bitcoin" data-amount="${eligibleAmount}" onclick="selectBalance('bitcoin', ${eligibleAmount})">
                     <div class="balance-info">
-                        <span class="balance-label">Main Balance</span>
+                        <span class="balance-label">Bitcoin Balance</span>
                         <span class="balance-asset">
                             <img src="${assetLogo}" onerror="this.src='https://assets.coingecko.com/coins/images/1/large/bitcoin.png'">
-                            <span>${asset.toUpperCase()}</span>
+                            <span>BTC</span>
                         </span>
                     </div>
                     <div class="balance-amounts">
-                        <div class="balance-fiat">$${formatNumber(mainFiat)}</div>
+                        <div class="balance-fiat">$${formatNumber(eligibleAmount)}</div>
                         <div class="balance-crypto">
                             <img src="${assetLogo}" onerror="this.src='https://assets.coingecko.com/coins/images/1/large/bitcoin.png'">
-                            <span>${formatCrypto(mainAsset)}</span>
+                            <span>${formatCrypto(AppState.userBitcoinBalance)} BTC</span>
                         </div>
                     </div>
                 </div>
             `;
             
-            // Matured Balance Option
-            html += `
-                <div class="balance-option ${maturedEligible ? '' : 'disabled'}" data-balance="matured" data-amount="${maturedFiat}" onclick="selectBalance('matured', ${maturedFiat})">
-                    <div class="balance-info">
-                        <span class="balance-label">Matured Balance</span>
-                        <span class="balance-asset">
-                            <img src="${assetLogo}" onerror="this.src='https://assets.coingecko.com/coins/images/1/large/bitcoin.png'">
-                            <span>${asset.toUpperCase()}</span>
-                        </span>
+            // Show message if no Bitcoin balance
+            if (!hasBitcoin) {
+                html += `
+                    <div style="margin-top: 16px; padding: 12px; background: rgba(255, 77, 77, 0.1); border-radius: 12px; text-align: center;">
+                        <i class="fas fa-exclamation-triangle" style="color: var(--error); margin-right: 8px;"></i>
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">You need Bitcoin balance to invest. <a href="deposit.html" style="color: var(--accent);">Deposit BTC</a></span>
                     </div>
-                    <div class="balance-amounts">
-                        <div class="balance-fiat">$${formatNumber(maturedFiat)}</div>
-                        <div class="balance-crypto">
-                            <img src="${assetLogo}" onerror="this.src='https://assets.coingecko.com/coins/images/1/large/bitcoin.png'">
-                            <span>${formatCrypto(maturedAsset)}</span>
-                        </div>
+                `;
+            } else if (eligibleAmount < AppState.minAmount) {
+                html += `
+                    <div style="margin-top: 16px; padding: 12px; background: rgba(255, 184, 0, 0.1); border-radius: 12px; text-align: center;">
+                        <i class="fas fa-info-circle" style="color: var(--warning); margin-right: 8px;"></i>
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">Insufficient Bitcoin balance. Minimum required: $${AppState.minAmount.toLocaleString()}</span>
                     </div>
-                </div>
-            `;
+                `;
+            }
             
             container.innerHTML = html;
             
-            // Auto-select first eligible balance
-            if (mainEligible) {
-                selectBalance('main', mainFiat);
-            } else if (maturedEligible) {
-                selectBalance('matured', maturedFiat);
+            // Auto-select Bitcoin balance if eligible
+            if (isEligible) {
+                selectBalance('bitcoin', eligibleAmount);
             }
         }
         
@@ -1459,7 +1475,7 @@
             }
             
             if (amount > AppState.selectedBalanceAmount) {
-                errorEl.textContent = `Insufficient balance. Available: $${formatNumber(AppState.selectedBalanceAmount)}`;
+                errorEl.textContent = `Insufficient Bitcoin balance. Available: $${formatNumber(AppState.selectedBalanceAmount)}`;
                 purchaseBtn.disabled = true;
                 return false;
             }
