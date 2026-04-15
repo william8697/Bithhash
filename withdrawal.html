@@ -2008,25 +2008,25 @@
                     </div>
                     
                     <div class="table-responsive">
-                         <table>
+                        <table>
                             <thead>
-                                 <tr>
+                                <tr>
                                     <th>Date</th>
                                     <th>Method</th>
                                     <th>Amount</th>
                                     <th>Asset</th>
                                     <th>Status</th>
                                     <th>Transaction ID</th>
-                                 </tr>
+                                </tr>
                             </thead>
                             <tbody id="withdrawals-table">
-                                 <tr>
+                                <tr>
                                     <td colspan="6" style="text-align: center; padding: 30px;">
                                         Loading withdrawal history...
-                                     </td>
-                                 </tr>
+                                      </td>
+                                </tr>
                             </tbody>
-                         </table>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -2207,6 +2207,7 @@
     </footer>
 
     <!-- AOS Animation -->
+    <script src="https://unpkg.com/aos@2.3.1/dist/aos.css"></script>
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
 
     <script>
@@ -2229,7 +2230,7 @@
             userPreferences: { displayAsset: 'btc' },
             currentPrices: {},
             selectedAsset: null,
-            availableAssets: [],
+            availableAssets: [], // Assets with balance from /api/users/assets
             otpTimer: null,
             resendTimer: null,
             currentUserEmail: '',
@@ -2243,7 +2244,7 @@
             currentTempToken: null
         };
 
-        // Complete asset list
+        // Complete asset list for reference
         const topAssets = [
             { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', network: 'Bitcoin' },
             { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', network: 'Ethereum (ERC20)' },
@@ -2331,8 +2332,8 @@
                 document.getElementById('loading-overlay').classList.add('hidden');
                 await checkAuthState();
                 await checkUserPreferences();
-                await loadAvailableAssets();
-                await loadUserData();
+                await loadUserAssets(); // Load assets from /api/users/assets (same as dashboard)
+                await loadUserBalances(); // Load balances from /api/users/balances (main + matured)
                 await loadWithdrawalHistory();
                 await checkKYCStatus();
                 setupAssetConversion();
@@ -2341,15 +2342,20 @@
                 initMobileMenu();
                 initHeaderScrollEffect();
                 document.getElementById('current-year').textContent = new Date().getFullYear();
-                filteredAssets = AppState.availableAssets.length > 0 ? 
-                    topAssets.filter(a => AppState.availableAssets.some(av => av.symbol === a.symbol)) : 
-                    [...topAssets];
-                renderAssetSelectorList();
-                updateGasFeeDisplay(null);
+                
+                // Filter assets to only show those with balance > 0
+                updateAssetSelectorList();
+                
                 switchBalanceCard('main');
                 
                 // Initialize copy buttons for gas fee modal
                 setupCopyButtons();
+                
+                // Start price refresh every 60 seconds for real-time fluctuations
+                setInterval(async () => {
+                    await fetchCoinGeckoPrices();
+                    await updateBalanceDisplay();
+                }, 60000);
             }, 1000);
         });
 
@@ -2386,30 +2392,168 @@
             document.querySelector(`.balance-card[data-balance-type="${type}"]`).classList.add('active');
         }
 
-        async function loadAvailableAssets() {
+        // =============================================
+        // ASSET SECTION LOGIC - EXACT COPY FROM DASHBOARD.HTML
+        // Fetches from /api/users/assets endpoint
+        // =============================================
+        async function loadUserAssets() {
             try {
                 const token = localStorage.getItem('jwtToken');
-                const response = await fetch('https://bithash-backend-1.onrender.com/api/withdrawals/available-assets', {
+                if (!token) return;
+                
+                const response = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (response.ok) {
+                    const assetsData = await response.json();
+                    
+                    // Store assets with their balances (same structure as dashboard)
+                    AppState.availableAssets = assetsData.map(asset => ({
+                        symbol: asset.symbol,
+                        name: topAssets.find(a => a.symbol === asset.symbol)?.name || asset.symbol.toUpperCase(),
+                        logo: topAssets.find(a => a.symbol === asset.symbol)?.logo || `https://assets.coingecko.com/coins/images/1/large/bitcoin.png`,
+                        totalAmount: asset.totalAmount || 0,
+                        currentValue: asset.currentValue || 0,
+                        network: topAssets.find(a => a.symbol === asset.symbol)?.network || 'Blockchain'
+                    })).filter(asset => asset.totalAmount > 0); // Only show assets with balance > 0
+                    
+                    console.log('Assets with balance loaded:', AppState.availableAssets);
+                    
+                    // If user has assets, set default selected asset to first one with balance
+                    if (AppState.availableAssets.length > 0 && !AppState.selectedAsset) {
+                        const defaultAsset = topAssets.find(a => a.symbol === AppState.userPreferences.displayAsset);
+                        const hasPreferred = AppState.availableAssets.some(a => a.symbol === AppState.userPreferences.displayAsset);
+                        
+                        if (hasPreferred && defaultAsset) {
+                            AppState.selectedAsset = defaultAsset;
+                        } else {
+                            const firstAsset = topAssets.find(a => a.symbol === AppState.availableAssets[0].symbol);
+                            AppState.selectedAsset = firstAsset || topAssets[0];
+                            AppState.userPreferences.displayAsset = AppState.selectedAsset.symbol;
+                        }
+                        
+                        updateAssetUI(AppState.selectedAsset);
+                    } else if (AppState.availableAssets.length === 0) {
+                        showNoAssetsMessage();
+                    }
+                } else {
+                    console.warn('Failed to load user assets');
+                    AppState.availableAssets = [];
+                }
+            } catch (error) {
+                console.error('Error loading user assets:', error);
+                AppState.availableAssets = [];
+            }
+        }
+        
+        // =============================================
+        // BALANCE SECTION LOGIC - EXACT COPY FROM DASHBOARD.HTML
+        // Fetches from /api/users/balances endpoint
+        // =============================================
+        async function loadUserBalances() {
+            try {
+                const token = localStorage.getItem('jwtToken');
+                if (!token) return;
+                
+                const response = await fetch('https://bithash-backend-1.onrender.com/api/users/balances', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 
                 if (response.ok) {
                     const data = await response.json();
-                    if (data.data && data.data.availableAssets) {
-                        AppState.availableAssets = data.data.availableAssets;
-                        console.log('Available assets for withdrawal:', AppState.availableAssets);
-                        
-                        if (AppState.availableAssets.length > 0) {
-                            const availableSymbols = AppState.availableAssets.map(a => a.symbol);
-                            filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
-                        } else {
-                            showNoAssetsMessage();
-                        }
-                    }
+                    
+                    // Extract main and matured balances (same as dashboard)
+                    AppState.mainBalance = parseFloat(data.main) || 0;
+                    AppState.maturedBalance = parseFloat(data.matured) || 0;
+                    AppState.balanceAmount = AppState.mainBalance + AppState.maturedBalance;
+                    
+                    // Update UI
+                    document.getElementById('balance-amount').textContent = formatUSD(AppState.balanceAmount);
+                    
+                    await updateBalanceDisplay();
+                } else {
+                    throw new Error('Failed to load balance data');
                 }
             } catch (error) {
-                console.warn('Could not fetch available assets:', error);
+                console.error('Error loading user balances:', error);
+                showNotification('error', 'Data Error', 'Failed to load balance information. Please try again later.');
             }
+        }
+        
+        async function fetchCoinGeckoPrices() {
+            try {
+                const ids = topAssets.map(a => a.id).join(',');
+                const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
+                if (response.ok) {
+                    const data = await response.json();
+                    topAssets.forEach(asset => {
+                        if (data[asset.id]) {
+                            AppState.currentPrices[asset.id] = {
+                                usd: data[asset.id].usd || 0,
+                                usd_24h_change: data[asset.id].usd_24h_change || 0
+                            };
+                        } else {
+                            AppState.currentPrices[asset.id] = { usd: 0, usd_24h_change: 0 };
+                        }
+                    });
+                    return true;
+                }
+            } catch (error) {
+                console.warn('CoinGecko API error:', error);
+            }
+            return false;
+        }
+        
+        async function updateBalanceDisplay() {
+            await fetchCoinGeckoPrices();
+            
+            const asset = AppState.selectedAsset || topAssets[0];
+            const assetPrice = await getAssetPrice(asset.id);
+            
+            // Get BTC price for secondary display
+            const btcPrice = await getAssetPrice('bitcoin');
+            
+            // Calculate balances in BTC equivalent
+            const mainBalanceBtc = AppState.mainBalance / btcPrice;
+            const maturedBalanceBtc = AppState.maturedBalance / btcPrice;
+            const availableBalanceBtc = AppState.balanceAmount / btcPrice;
+            
+            // Update USD displays
+            document.getElementById('main-balance-card').textContent = formatUSD(AppState.mainBalance);
+            document.getElementById('matured-balance-card').textContent = formatUSD(AppState.maturedBalance);
+            document.getElementById('available-balance-card').textContent = formatUSD(AppState.balanceAmount);
+            
+            // Update BTC secondary displays
+            document.getElementById('balance-secondary-text-card').textContent = `${formatNumber(mainBalanceBtc)} BTC`;
+            document.getElementById('matured-balance-secondary-text').textContent = `${formatNumber(maturedBalanceBtc)} BTC`;
+            document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
+            
+            // Update asset-specific balance display if asset is selected
+            const assetBalance = AppState.availableAssets.find(a => a.symbol === asset.symbol);
+            if (assetBalance && assetBalance.totalAmount > 0) {
+                const assetBalanceElement = document.getElementById('asset-balance-display');
+                if (assetBalanceElement) {
+                    assetBalanceElement.innerHTML = `
+                        <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
+                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(assetBalance.totalAmount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(assetBalance.currentValue)})
+                        </div>
+                    `;
+                }
+            }
+        }
+        
+        function updateAssetSelectorList() {
+            // Only show assets that have balance > 0
+            const availableSymbols = AppState.availableAssets.map(a => a.symbol);
+            filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
+            
+            if (filteredAssets.length === 0) {
+                filteredAssets = [];
+            }
+            
+            assetPage = 1;
+            renderAssetSelectorList();
         }
         
         function showNoAssetsMessage() {
@@ -2463,69 +2607,10 @@
                 
                 document.getElementById('user-actions-section').style.display = 'block';
                 
-                await fetchUserBalances();
-                
             } catch (error) {
                 console.error('Authentication check failed:', error);
                 localStorage.removeItem('jwtToken');
                 window.location.href = 'login';
-            }
-        }
-        
-        async function fetchUserBalances() {
-            try {
-                const data = await apiCall('https://bithash-backend-1.onrender.com/api/users/balances');
-                const balances = data.data.balances;
-                
-                const mainBalance = balances.main || 0;
-                const maturedBalance = balances.matured || 0;
-                AppState.balanceAmount = mainBalance + maturedBalance;
-                AppState.mainBalance = mainBalance;
-                AppState.maturedBalance = maturedBalance;
-                
-                const formattedBalance = AppState.balanceAmount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-                document.getElementById('balance-amount').textContent = `$${formattedBalance}`;
-                
-            } catch (error) {
-                console.error('Error fetching balances:', error);
-                document.getElementById('balance-amount').textContent = '$0.00';
-            }
-        }
-        
-        async function loadUserData() {
-            try {
-                const token = localStorage.getItem('jwtToken');
-                const response = await fetch('https://bithash-backend-1.onrender.com/api/users/balances', {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
-                    }
-                });
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    const balances = data.data.balances;
-                    
-                    const mainBalance = balances.main || 0;
-                    const maturedBalance = balances.matured || 0;
-                    const availableBalance = mainBalance + maturedBalance;
-                    
-                    const formattedMain = mainBalance.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-                    const formattedMatured = maturedBalance.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-                    const formattedAvailable = availableBalance.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-                    
-                    document.getElementById('main-balance-card').textContent = `$${formattedMain}`;
-                    document.getElementById('matured-balance-card').textContent = `$${formattedMatured}`;
-                    document.getElementById('available-balance-card').textContent = `$${formattedAvailable}`;
-                    
-                    AppState.mainBalance = mainBalance;
-                    AppState.maturedBalance = maturedBalance;
-                    
-                } else {
-                    throw new Error('Failed to load balance data');
-                }
-            } catch (error) {
-                console.error('Error loading user data:', error);
-                showNotification('error', 'Data Error', 'Failed to load balance information. Please try again later.');
             }
         }
         
@@ -2546,18 +2631,6 @@
                 console.warn('Could not fetch preferences, using default BTC');
                 AppState.userPreferences.displayAsset = 'btc';
             }
-            
-            if (AppState.availableAssets.length > 0) {
-                const hasPreferred = AppState.availableAssets.some(a => a.symbol === AppState.userPreferences.displayAsset);
-                if (!hasPreferred) {
-                    AppState.userPreferences.displayAsset = AppState.availableAssets[0].symbol;
-                }
-            }
-            
-            const assetData = topAssets.find(a => a.symbol === AppState.userPreferences.displayAsset) || topAssets[0];
-            AppState.selectedAsset = assetData;
-            
-            updateAssetUI(assetData);
         }
 
         function updateAssetUI(asset) {
@@ -2578,42 +2651,6 @@
             document.getElementById('balance-secondary-logo-card').src = 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
             
             document.getElementById('withdraw-method-icon').innerHTML = `<img src="${asset.logo}" style="width: 24px; height: 24px; border-radius: 50%;">`;
-        }
-
-        async function updateBalanceDisplay() {
-            const asset = AppState.selectedAsset || topAssets[0];
-            const price = await getAssetPrice(asset.id);
-            
-            const mainBalance = AppState.mainBalance || 0;
-            const maturedBalance = AppState.maturedBalance || 0;
-            const availableBalance = mainBalance + maturedBalance;
-            
-            const btcPrice = await getAssetPrice('bitcoin');
-            
-            const mainBalanceBtc = mainBalance / btcPrice;
-            const maturedBalanceBtc = maturedBalance / btcPrice;
-            const availableBalanceBtc = availableBalance / btcPrice;
-            
-            document.getElementById('main-balance-card').textContent = formatUSD(mainBalance);
-            document.getElementById('balance-secondary-text-card').textContent = `${formatNumber(mainBalanceBtc)} BTC`;
-            
-            document.getElementById('matured-balance-card').textContent = formatUSD(maturedBalance);
-            document.getElementById('matured-balance-secondary-text').textContent = `${formatNumber(maturedBalanceBtc)} BTC`;
-            
-            document.getElementById('available-balance-card').textContent = formatUSD(availableBalance);
-            document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
-            
-            const assetBalance = AppState.availableAssets.find(a => a.symbol === asset.symbol);
-            if (assetBalance) {
-                const assetBalanceElement = document.getElementById('asset-balance-display');
-                if (assetBalanceElement) {
-                    assetBalanceElement.innerHTML = `
-                        <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
-                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(assetBalance.amount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(assetBalance.usdValue)})
-                        </div>
-                    `;
-                }
-            }
         }
 
         function formatNumber(num) {
@@ -2641,10 +2678,10 @@
             return parts[0];
         }
 
-        // Enhanced getAssetPrice with 3 real-time sources and fallbacks
+        // Enhanced getAssetPrice with multiple sources and fallbacks
         async function getAssetPrice(assetId) {
-            if (AppState.currentPrices[assetId]) {
-                return AppState.currentPrices[assetId];
+            if (AppState.currentPrices[assetId] && AppState.currentPrices[assetId].usd) {
+                return AppState.currentPrices[assetId].usd;
             }
 
             const timestamp = Date.now();
@@ -2671,7 +2708,8 @@
                     }
 
                     if (price && !isNaN(price) && price > 0) {
-                        AppState.currentPrices[assetId] = price;
+                        if (!AppState.currentPrices[assetId]) AppState.currentPrices[assetId] = {};
+                        AppState.currentPrices[assetId].usd = price;
                         return price;
                     }
                 } catch (error) {
@@ -2679,7 +2717,7 @@
                 }
             }
 
-            // Final fallback map (non-mock, based on typical ranges)
+            // Final fallback based on typical ranges
             const fallbackPrices = {
                 'bitcoin': 50000,
                 'ethereum': 3000,
@@ -2697,7 +2735,8 @@
                 'polkadot': 5
             };
             const price = fallbackPrices[assetId] || 1;
-            AppState.currentPrices[assetId] = price;
+            if (!AppState.currentPrices[assetId]) AppState.currentPrices[assetId] = {};
+            AppState.currentPrices[assetId].usd = price;
             return price;
         }
         
@@ -3070,8 +3109,7 @@
                 
                 if (response.ok) {
                     const data = await response.json();
-                    const balances = data.data.balances;
-                    const mainBalanceUsd = balances.main || 0;
+                    const mainBalanceUsd = parseFloat(data.main) || 0;
                     
                     const gasFeeInUsd = requiredGasFee * AppState.currentAssetRate;
                     
@@ -3323,8 +3361,8 @@
                         showNotification('success', 'Withdrawal Request Submitted!', 
                             `Your withdrawal request for $${usdAmount.toFixed(2)} (${assetAmount.toFixed(8)} ${asset.symbol.toUpperCase()}) has been submitted successfully! Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
-                        loadUserData();
-                        loadAvailableAssets();
+                        loadUserBalances();
+                        loadUserAssets();
                         loadWithdrawalHistory();
                         
                         document.getElementById('asset-withdraw-amount').value = '';
@@ -3383,8 +3421,8 @@
                         showNotification('success', 'Bank Withdrawal Request Submitted!', 
                             `Your bank withdrawal request for $${usdAmount.toFixed(2)} has been submitted successfully! Funds will be transferred to ${bankName} account ending in ${accountNumber.slice(-4)} within 3-5 business days. Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
-                        loadUserData();
-                        loadAvailableAssets();
+                        loadUserBalances();
+                        loadUserAssets();
                         loadWithdrawalHistory();
                         
                         document.getElementById('bank-withdraw-amount').value = '';
@@ -3477,8 +3515,8 @@
                          <tr>
                             <td colspan="6" style="text-align: center; padding: 30px;">
                                 No withdrawal history found
-                             </td>
-                         </tr>
+                              </div>
+                          </div>
                     `;
                     return;
                 }
@@ -3528,12 +3566,12 @@
                     const rateInfo = withdrawal.exchangeRate ? `<small style="display: block; font-size: 0.7rem; color: var(--text-muted);">Rate: $${withdrawal.exchangeRate.toFixed(2)}</small>` : '';
                     
                     row.innerHTML = `
-                        <td>${formattedDate}</td>
-                        <td>${methodIcon}</td>
-                        <td>$${(withdrawal.amount || 0).toFixed(2)}</td>
-                        <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol}${rateInfo}</td>
-                        <td>${statusBadge}</td>
-                        <td>${withdrawal.reference || withdrawal.txId || 'N/A'}</td>
+                        <td>${formattedDate}</div>
+                        <td>${methodIcon}</div>
+                        <td>$${(withdrawal.amount || 0).toFixed(2)}</div>
+                        <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol}${rateInfo}</div>
+                        <td>${statusBadge}</div>
+                        <td>${withdrawal.reference || withdrawal.txId || 'N/A'}</div>
                     `;
                     
                     tableBody.appendChild(row);
@@ -3545,8 +3583,8 @@
                      <tr>
                         <td colspan="6" style="text-align: center; padding: 30px; color: var(--error);">
                             Failed to load withdrawal history. Please refresh the page.
-                         </td>
-                     </tr>
+                          </div>
+                      </div>
                 `;
             }
         }
@@ -3578,35 +3616,20 @@
         }
 
         function openAssetSelectorModal() {
+            updateAssetSelectorList();
             document.getElementById('asset-selector-modal').classList.add('active');
-            
-            if (AppState.availableAssets.length > 0) {
-                const availableSymbols = AppState.availableAssets.map(a => a.symbol);
-                filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
-            } else {
-                filteredAssets = [...topAssets];
-            }
-            
-            assetPage = 1;
-            renderAssetSelectorList();
         }
         
         function searchAssets() {
             const searchTerm = document.getElementById('asset-selector-search').value.toLowerCase();
             
-            if (AppState.availableAssets.length > 0) {
-                const availableSymbols = AppState.availableAssets.map(a => a.symbol);
-                const availableTopAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
-                filteredAssets = availableTopAssets.filter(a => 
-                    a.name.toLowerCase().includes(searchTerm) || 
-                    a.symbol.toLowerCase().includes(searchTerm)
-                );
-            } else {
-                filteredAssets = topAssets.filter(a => 
-                    a.name.toLowerCase().includes(searchTerm) || 
-                    a.symbol.toLowerCase().includes(searchTerm)
-                );
-            }
+            // Filter from assets that have balance
+            const availableSymbols = AppState.availableAssets.map(a => a.symbol);
+            const availableTopAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
+            filteredAssets = availableTopAssets.filter(a => 
+                a.name.toLowerCase().includes(searchTerm) || 
+                a.symbol.toLowerCase().includes(searchTerm)
+            );
             
             assetPage = 1;
             renderAssetSelectorList();
@@ -3646,7 +3669,7 @@
             pageAssets.forEach(asset => {
                 const assetBalance = AppState.availableAssets.find(a => a.symbol === asset.symbol);
                 const balanceInfo = assetBalance ? 
-                    `<div style="font-size: 0.7rem; color: var(--accent);">Balance: ${formatNumberWithCommas(assetBalance.amount, 6)} ${asset.symbol.toUpperCase()}</div>` : '';
+                    `<div style="font-size: 0.7rem; color: var(--accent);">Balance: ${formatNumberWithCommas(assetBalance.totalAmount, 6)} ${asset.symbol.toUpperCase()}</div>` : '';
                 
                 const item = document.createElement('div');
                 item.className = `asset-selector-item ${asset.symbol === AppState.userPreferences.displayAsset ? 'selected' : ''}`;
