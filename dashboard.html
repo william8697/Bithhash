@@ -4634,6 +4634,142 @@
                 console.error('Error loading investments:', error);
             }
         }
+
+
+
+
+
+
+
+
+// === ASSET FILTER SCRIPT ===
+// This script ensures ONLY cryptocurrencies appear in the "My Assets" section.
+// It blocks USD and any other fiat currencies (EUR, GBP, JPY, etc.).
+
+(function() {
+    // List of fiat symbols to exclude (case-insensitive)
+    const FIAT_SYMBOLS = new Set([
+        'usd', 'eur', 'gbp', 'jpy', 'cad', 'aud', 'chf', 'cny', 'hkd',
+        'nzd', 'sek', 'nok', 'dkk', 'zar', 'inr', 'brl', 'rub', 'krw',
+        'sgd', 'try', 'mxn', 'idr', 'ils', 'sar', 'pln', 'thb', 'myr'
+    ]);
+
+    // Function to check if an asset symbol is fiat
+    function isFiat(symbol) {
+        if (!symbol) return true;
+        return FIAT_SYMBOLS.has(symbol.toLowerCase());
+    }
+
+    // Filter the fullAssetsList array to remove fiat assets
+    function filterFiatFromAssets(assetsList) {
+        if (!Array.isArray(assetsList)) return [];
+        return assetsList.filter(asset => {
+            const assetSymbol = (asset.asset || '').toLowerCase();
+            return !isFiat(assetSymbol);
+        });
+    }
+
+    // Override the renderAssetsWithBalanceEnhanced function to filter assets first
+    const originalRenderAssets = window.renderAssetsWithBalanceEnhanced;
+    if (originalRenderAssets) {
+        window.renderAssetsWithBalanceEnhanced = function() {
+            // Filter out fiat before rendering
+            if (fullAssetsList && fullAssetsList.length) {
+                fullAssetsList = filterFiatFromAssets(fullAssetsList);
+            }
+            // Call original function with filtered data
+            originalRenderAssets();
+        };
+    }
+
+    // Also override renderAssetsWithBalance to ensure filtering
+    const originalRenderAssetsSimple = window.renderAssetsWithBalance;
+    if (originalRenderAssetsSimple) {
+        window.renderAssetsWithBalance = function() {
+            if (fullAssetsList && fullAssetsList.length) {
+                fullAssetsList = filterFiatFromAssets(fullAssetsList);
+            }
+            originalRenderAssetsSimple();
+        };
+    }
+
+    // Hook into loadAssetBalancesFromRest to filter after data loads
+    const originalLoadAssets = window.loadAssetBalancesFromRest;
+    if (originalLoadAssets) {
+        window.loadAssetBalancesFromRest = async function() {
+            await originalLoadAssets();
+            // Filter after loading
+            if (fullAssetsList && fullAssetsList.length) {
+                fullAssetsList = filterFiatFromAssets(fullAssetsList);
+                if (window.renderAssetsWithBalanceEnhanced) {
+                    window.renderAssetsWithBalanceEnhanced();
+                }
+            }
+        };
+    }
+
+    // Listen for socket updates to filter incoming asset data
+    if (window.socket) {
+        window.socket.on('asset_balances_update', (assetsData) => {
+            // Filter out fiat from socket data
+            const filteredData = assetsData.filter(asset => {
+                return !isFiat(asset.symbol);
+            });
+            // Reprocess filtered data
+            window.userAssetBalances = {};
+            filteredData.forEach(asset => {
+                window.userAssetBalances[asset.symbol] = asset.balance;
+            });
+            window.userPortfolio = filteredData.map(asset => ({
+                asset: asset.symbol,
+                totalAmount: asset.balance,
+                currentValue: asset.balance * (window.currentPrices?.[asset.id]?.usd || 0),
+                averageBuyingPrice: asset.avgPrice || 0,
+                unrealizedProfitLoss: asset.unrealizedPnl || 0,
+                unrealizedPercentage: asset.unrealizedPnlPercent || 0,
+                change24h: window.currentPrices?.[asset.id]?.usd_24h_change || 0,
+                transactions: asset.transactions || []
+            }));
+            window.fullAssetsList = [...window.userPortfolio];
+            if (window.renderAssetsWithBalanceEnhanced) {
+                window.renderAssetsWithBalanceEnhanced();
+            }
+        });
+    }
+
+    // Apply filter immediately if data already exists
+    if (typeof fullAssetsList !== 'undefined' && fullAssetsList && fullAssetsList.length) {
+        const filtered = filterFiatFromAssets(fullAssetsList);
+        if (filtered.length !== fullAssetsList.length) {
+            fullAssetsList = filtered;
+            if (window.renderAssetsWithBalanceEnhanced) {
+                window.renderAssetsWithBalanceEnhanced();
+            }
+        }
+    }
+
+    // Optional: Add a style to hide any USD elements that might slip through
+    const style = document.createElement('style');
+    style.textContent = `
+        /* Hide any USD/fiat entries in assets section as fallback */
+        .asset-balance-card:has(.asset-balance-symbol:contains("USD")),
+        .asset-balance-card:has(.asset-balance-symbol:contains("EUR")),
+        .asset-balance-card:has(.asset-balance-symbol:contains("GBP")),
+        .assets-list-view tr:has(td:contains("USD")),
+        .assets-list-view tr:has(td:contains("EUR")) {
+            display: none !important;
+        }
+    `;
+    document.head.appendChild(style);
+})();
+
+
+
+
+
+
+
+
         
         async function loadTransactions() {
             try {
