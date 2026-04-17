@@ -481,6 +481,47 @@
             margin-top: var(--space-lg);
         }
         
+        /* Wallet Toggle Styles */
+        .wallet-toggle {
+            display: flex;
+            gap: var(--space-sm);
+            margin-bottom: var(--space-lg);
+            background: rgba(0, 0, 0, 0.2);
+            padding: var(--space-xs);
+            border-radius: 60px;
+        }
+        
+        .wallet-option {
+            flex: 1;
+            text-align: center;
+            padding: var(--space-sm) var(--space-md);
+            border-radius: 60px;
+            cursor: pointer;
+            transition: var(--transition);
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+        
+        .wallet-option i {
+            margin-right: var(--space-xs);
+            font-size: 0.9rem;
+        }
+        
+        .wallet-option.active {
+            background: var(--accent);
+            color: #000000;
+        }
+        
+        .wallet-option.active i {
+            color: #000000;
+        }
+        
+        .wallet-option:not(.active):hover {
+            background: rgba(247, 166, 0, 0.1);
+            color: var(--accent);
+        }
+        
         .balance-option {
             display: flex;
             align-items: center;
@@ -962,6 +1003,16 @@
             .btn-large {
                 padding: var(--space-sm);
             }
+            
+            .wallet-toggle {
+                flex-direction: column;
+                border-radius: var(--border-radius-lg);
+                gap: var(--space-xs);
+            }
+            
+            .wallet-option {
+                border-radius: var(--border-radius);
+            }
         }
         
         @media (max-width: 480px) {
@@ -1084,10 +1135,20 @@
                         </div>
                     </div>
                     
-                    <!-- Right Column - Investment Panel (BTC Only) -->
+                    <!-- Right Column - Investment Panel (BTC Only with Wallet Selection) -->
                     <div>
                         <div class="investment-section">
                             <h2 style="margin-bottom: var(--space-lg);"><i class="fas fa-wallet icon-md" style="margin-right: var(--space-sm);"></i> Purchase with Bitcoin</h2>
+                            
+                            <!-- Wallet Toggle - Main vs Matured -->
+                            <div class="wallet-toggle" id="wallet-toggle">
+                                <div class="wallet-option active" data-wallet="main">
+                                    <i class="fas fa-database"></i> Main Wallet
+                                </div>
+                                <div class="wallet-option" data-wallet="matured">
+                                    <i class="fas fa-chart-line"></i> Matured Wallet
+                                </div>
+                            </div>
                             
                             <!-- Balance Selection - BTC Only -->
                             <div id="balance-options"></div>
@@ -1177,8 +1238,8 @@
     <script>
         // =============================================
         // PRODUCTION READY IMPLEMENTATION - BTC ONLY
-        // Fetches BTC balance from SAME endpoint as investment route: /api/users/me
-        // The investment endpoint uses: user.balances.main.get('btc')
+        // Allows users to choose between Main Wallet and Matured Wallet
+        // Investment endpoint uses balanceType: 'main' or 'matured'
         // =============================================
         
         // Global state
@@ -1190,8 +1251,10 @@
             percentage: 0,
             duration: 0,
             selectedBalanceAmount: 0,
-            userBitcoinBalance: 0,      // BTC balance from main wallet (matches investment endpoint)
-            btcPrice: 43000,             // Current BTC price
+            selectedBalanceType: 'main',      // 'main' or 'matured'
+            mainWalletBTC: 0,                 // BTC in main wallet
+            maturedWalletBTC: 0,              // BTC in matured wallet
+            btcPrice: 43000,                  // Current BTC price
             processingLock: false,
             sessionId: null,
             ref: null,
@@ -1273,11 +1336,9 @@
         }
         
         // =============================================
-        // FETCH BTC BALANCE - SAME AS INVESTMENT ENDPOINT
-        // Investment endpoint uses: user.balances.main.get('btc')
-        // This fetches from /api/users/me which contains the exact balances Map structure
+        // FETCH BTC BALANCES - Main and Matured wallets
         // =============================================
-        async function fetchBitcoinBalance() {
+        async function fetchBitcoinBalances() {
             const token = localStorage.getItem('jwtToken');
             if (!token) {
                 showNotification('error', 'Authentication Required', 'Please login to continue');
@@ -1286,11 +1347,10 @@
             }
             
             try {
-                // 1. Fetch BTC price for conversion
+                // Fetch BTC price
                 await fetchBTCPrice();
                 
-                // 2. Fetch user data from /api/users/me (same source investment endpoint uses for balance checking)
-                // The investment endpoint reads user.balances.main.get('btc') directly from the user object
+                // Fetch user data from /api/users/me
                 const userResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/me', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -1300,57 +1360,43 @@
                 const userData = await userResponse.json();
                 console.log('User data from /api/users/me:', userData);
                 
-                // Extract BTC balance from the balances object
-                // The investment endpoint uses: user.balances.main.get('btc')
-                // So we need to extract the same value from the API response
-                let btcBalance = 0;
+                // Extract BTC balances from main and matured wallets
+                let mainBTC = 0;
+                let maturedBTC = 0;
                 
-                if (userData.balances && userData.balances.main) {
-                    // Check if main is a Map (as in MongoDB) or an object
-                    if (typeof userData.balances.main === 'object') {
-                        // For object format: { btc: 0.5, usd: 50000 }
-                        btcBalance = parseFloat(userData.balances.main.btc) || 0;
+                // Check different possible response structures
+                if (userData.balances) {
+                    // Structure: { balances: { main: { btc: 0.5 }, matured: { btc: 0.3 } } }
+                    if (userData.balances.main && typeof userData.balances.main === 'object') {
+                        mainBTC = parseFloat(userData.balances.main.btc) || 0;
+                    }
+                    if (userData.balances.matured && typeof userData.balances.matured === 'object') {
+                        maturedBTC = parseFloat(userData.balances.matured.btc) || 0;
                     }
                 }
                 
-                // Also check data.user.balances structure (API might return nested)
-                if (!btcBalance && userData.data && userData.data.user && userData.data.user.balances) {
+                // Alternative structure: { data: { user: { balances: {...} } } }
+                if ((mainBTC === 0 && maturedBTC === 0) && userData.data && userData.data.user && userData.data.user.balances) {
                     const userBalances = userData.data.user.balances;
                     if (userBalances.main && typeof userBalances.main === 'object') {
-                        btcBalance = parseFloat(userBalances.main.btc) || 0;
+                        mainBTC = parseFloat(userBalances.main.btc) || 0;
+                    }
+                    if (userBalances.matured && typeof userBalances.matured === 'object') {
+                        maturedBTC = parseFloat(userBalances.matured.btc) || 0;
                     }
                 }
                 
-                AppState.userBitcoinBalance = btcBalance;
+                AppState.mainWalletBTC = mainBTC;
+                AppState.maturedWalletBTC = maturedBTC;
                 
-                console.log(`BTC Balance from /api/users/me: ${AppState.userBitcoinBalance} BTC ($${AppState.userBitcoinBalance * AppState.btcPrice})`);
-                
-                // If balance is 0, try fallback to /api/users/assets (but note this includes matured wallet too)
-                if (AppState.userBitcoinBalance === 0) {
-                    console.log('BTC balance from main wallet is 0, checking assets endpoint for informational purposes');
-                    try {
-                        const assetsResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (assetsResponse.ok) {
-                            const assetsData = await assetsResponse.json();
-                            const btcAsset = assetsData.find(asset => 
-                                asset.symbol === 'btc' || asset.symbol === 'bitcoin' || asset.symbol?.toLowerCase() === 'btc'
-                            );
-                            if (btcAsset && btcAsset.balance > 0) {
-                                console.log(`Note: Assets endpoint shows ${btcAsset.balance} BTC total (includes matured wallet). Investment requires MAIN wallet BTC only.`);
-                            }
-                        }
-                    } catch (e) {
-                        // Ignore fallback errors
-                    }
-                }
+                console.log(`BTC Balances - Main: ${AppState.mainWalletBTC} BTC, Matured: ${AppState.maturedWalletBTC} BTC`);
+                console.log(`USD Values - Main: $${(AppState.mainWalletBTC * AppState.btcPrice).toLocaleString()}, Matured: $${(AppState.maturedWalletBTC * AppState.btcPrice).toLocaleString()}`);
                 
                 return true;
                 
             } catch (error) {
-                console.error('Error fetching Bitcoin balance:', error);
-                showNotification('error', 'Connection Error', 'Failed to load Bitcoin balance');
+                console.error('Error fetching BTC balances:', error);
+                showNotification('error', 'Connection Error', 'Failed to load Bitcoin balances');
                 return false;
             }
         }
@@ -1368,6 +1414,32 @@
                 console.error('Error fetching BTC price:', error);
                 AppState.btcPrice = 43000;
             }
+        }
+        
+        // =============================================
+        // WALLET TOGGLE HANDLER
+        // =============================================
+        function initWalletToggle() {
+            const mainOption = document.querySelector('.wallet-option[data-wallet="main"]');
+            const maturedOption = document.querySelector('.wallet-option[data-wallet="matured"]');
+            
+            mainOption.addEventListener('click', () => {
+                if (AppState.selectedBalanceType === 'main') return;
+                AppState.selectedBalanceType = 'main';
+                mainOption.classList.add('active');
+                maturedOption.classList.remove('active');
+                renderBTCBalanceOption();
+                updateAmountConstraints();
+            });
+            
+            maturedOption.addEventListener('click', () => {
+                if (AppState.selectedBalanceType === 'matured') return;
+                AppState.selectedBalanceType = 'matured';
+                maturedOption.classList.add('active');
+                mainOption.classList.remove('active');
+                renderBTCBalanceOption();
+                updateAmountConstraints();
+            });
         }
         
         // =============================================
@@ -1400,11 +1472,26 @@
             
             document.getElementById('min-max-hint').textContent = `Min: $${AppState.minAmount.toLocaleString()} | Max: $${AppState.maxAmount.toLocaleString()}`;
             
-            // Render BTC balance option only
+            // Initialize wallet toggle
+            initWalletToggle();
+            
+            // Render BTC balance option
             renderBTCBalanceOption();
             
             // Setup listeners
             setupEventListeners();
+        }
+        
+        function getCurrentWalletBalance() {
+            if (AppState.selectedBalanceType === 'main') {
+                return AppState.mainWalletBTC;
+            } else {
+                return AppState.maturedWalletBTC;
+            }
+        }
+        
+        function getCurrentWalletBalanceUSD() {
+            return getCurrentWalletBalance() * AppState.btcPrice;
         }
         
         function renderBTCBalanceOption() {
@@ -1413,46 +1500,51 @@
             
             if (!token) return;
             
-            // Calculate USD value of Bitcoin balance from MAIN wallet only (matches investment endpoint)
-            const bitcoinBalanceUSD = AppState.userBitcoinBalance * AppState.btcPrice;
-            const isEligible = AppState.userBitcoinBalance > 0 && bitcoinBalanceUSD >= AppState.minAmount;
+            const currentBTCBalance = getCurrentWalletBalance();
+            const currentBalanceUSD = currentBTCBalance * AppState.btcPrice;
+            const walletName = AppState.selectedBalanceType === 'main' ? 'Main Wallet' : 'Matured Wallet';
+            const isEligible = currentBTCBalance > 0 && currentBalanceUSD >= AppState.minAmount;
             
             let html = '';
             
-            // BTC Balance Option - ONLY option shown (users can only invest BTC)
+            // BTC Balance Option
             html += `
-                <div class="balance-option ${isEligible ? '' : 'disabled'}" data-balance="bitcoin" data-amount="${bitcoinBalanceUSD}" onclick="selectBalance(${bitcoinBalanceUSD})">
+                <div class="balance-option ${isEligible ? '' : 'disabled'}" data-balance="${AppState.selectedBalanceType}" data-amount="${currentBalanceUSD}" onclick="selectBalance(${currentBalanceUSD})">
                     <div class="balance-info">
-                        <span class="balance-label">Your Bitcoin Balance (Main Wallet)</span>
+                        <span class="balance-label">Your ${walletName} Bitcoin Balance</span>
                         <span class="balance-asset">
                             <img src="${BTC_LOGO}" onerror="this.src='${BTC_LOGO}'">
                             <span>BTC</span>
                         </span>
                     </div>
                     <div class="balance-amounts">
-                        <div class="balance-fiat">$${formatNumber(bitcoinBalanceUSD)}</div>
+                        <div class="balance-fiat">$${formatNumber(currentBalanceUSD)}</div>
                         <div class="balance-crypto">
                             <img src="${BTC_LOGO}" onerror="this.src='${BTC_LOGO}'">
-                            <span>${formatCrypto(AppState.userBitcoinBalance)} BTC</span>
+                            <span>${formatCrypto(currentBTCBalance)} BTC</span>
                         </div>
                     </div>
                 </div>
             `;
             
-            // Show helpful message if no BTC balance in MAIN wallet
-            if (AppState.userBitcoinBalance === 0) {
+            // Show helpful message if no BTC balance in selected wallet
+            if (currentBTCBalance === 0) {
                 html += `
                     <div style="margin-top: 16px; padding: 14px; background: rgba(247, 166, 0, 0.08); border-radius: 16px; text-align: center; border: 1px solid rgba(247, 166, 0, 0.15);">
                         <i class="fab fa-bitcoin" style="color: var(--accent); font-size: 1.2rem; margin-bottom: 8px; display: block;"></i>
-                        <span style="font-size: 0.85rem; color: var(--text-secondary);">You need Bitcoin in your Main Wallet to purchase hashpower.</span>
-                        <a href="deposit.html" style="display: inline-block; margin-top: 10px; color: var(--accent); text-decoration: none; font-weight: 500;">Deposit BTC →</a>
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">You need Bitcoin in your ${walletName} to purchase hashpower.</span>
+                        <div style="margin-top: 12px; display: flex; gap: 12px; justify-content: center;">
+                            <a href="deposit.html" style="color: var(--accent); text-decoration: none; font-size: 0.8rem;">Deposit BTC →</a>
+                            <span style="color: var(--text-muted);">|</span>
+                            <span onclick="switchToOtherWallet()" style="color: var(--accent); text-decoration: none; font-size: 0.8rem; cursor: pointer;">Try ${AppState.selectedBalanceType === 'main' ? 'Matured' : 'Main'} Wallet →</span>
+                        </div>
                     </div>
                 `;
-            } else if (bitcoinBalanceUSD < AppState.minAmount) {
+            } else if (currentBalanceUSD < AppState.minAmount) {
                 html += `
                     <div style="margin-top: 16px; padding: 12px; background: rgba(255, 184, 0, 0.1); border-radius: 12px; text-align: center;">
                         <i class="fas fa-info-circle" style="color: var(--warning); margin-right: 8px;"></i>
-                        <span style="font-size: 0.85rem; color: var(--text-secondary);">Insufficient Bitcoin balance. Minimum required: $${AppState.minAmount.toLocaleString()}</span>
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">Insufficient Bitcoin balance in ${walletName}. Minimum required: $${AppState.minAmount.toLocaleString()}</span>
                     </div>
                 `;
                 // Show Convert and Deposit buttons
@@ -1466,7 +1558,17 @@
             
             // Auto-select if eligible
             if (isEligible) {
-                selectBalance(bitcoinBalanceUSD);
+                selectBalance(currentBalanceUSD);
+            } else if (currentBTCBalance > 0 && currentBalanceUSD >= AppState.minAmount) {
+                selectBalance(currentBalanceUSD);
+            }
+        }
+        
+        function switchToOtherWallet() {
+            const otherWallet = AppState.selectedBalanceType === 'main' ? 'matured' : 'main';
+            const option = document.querySelector(`.wallet-option[data-wallet="${otherWallet}"]`);
+            if (option) {
+                option.click();
             }
         }
         
@@ -1484,22 +1586,26 @@
             if (selected && !selected.classList.contains('disabled')) {
                 selected.classList.add('selected');
                 AppState.selectedBalanceAmount = amountUSD;
-                
-                // Update input constraints
-                const input = document.getElementById('investment-amount');
-                input.min = AppState.minAmount;
-                input.max = Math.min(AppState.maxAmount, amountUSD);
-                input.value = AppState.minAmount;
-                
-                document.getElementById('min-max-hint').textContent = `Min: $${AppState.minAmount.toLocaleString()} | Max: $${Math.min(AppState.maxAmount, amountUSD).toLocaleString()}`;
-                document.getElementById('available-balance-hint').innerHTML = `Available: $${formatNumber(amountUSD)} <span style="color: var(--accent);">(${formatCrypto(amountUSD / AppState.btcPrice)} BTC)</span>`;
-                
-                // Update return calculation
-                calculateReturn(AppState.minAmount);
-                
-                // Enable/disable purchase button
-                validateAmount(AppState.minAmount);
+                updateAmountConstraints();
             }
+        }
+        
+        function updateAmountConstraints() {
+            const maxAllowed = Math.min(AppState.maxAmount, AppState.selectedBalanceAmount);
+            const input = document.getElementById('investment-amount');
+            input.min = AppState.minAmount;
+            input.max = maxAllowed;
+            input.value = Math.min(AppState.minAmount, maxAllowed);
+            
+            document.getElementById('min-max-hint').textContent = `Min: $${AppState.minAmount.toLocaleString()} | Max: $${maxAllowed.toLocaleString()}`;
+            const walletName = AppState.selectedBalanceType === 'main' ? 'Main Wallet' : 'Matured Wallet';
+            document.getElementById('available-balance-hint').innerHTML = `Available in ${walletName}: $${formatNumber(AppState.selectedBalanceAmount)} <span style="color: var(--accent);">(${formatCrypto(AppState.selectedBalanceAmount / AppState.btcPrice)} BTC)</span>`;
+            
+            // Update return calculation
+            calculateReturn(input.value);
+            
+            // Validate amount
+            validateAmount(parseFloat(input.value));
         }
         
         // =============================================
@@ -1522,7 +1628,7 @@
             }
             
             if (amount > AppState.selectedBalanceAmount) {
-                errorEl.textContent = `Insufficient Bitcoin balance. Available: ${formatCrypto(AppState.selectedBalanceAmount / AppState.btcPrice)} BTC ($${formatNumber(AppState.selectedBalanceAmount)})`;
+                errorEl.textContent = `Insufficient Bitcoin balance in ${AppState.selectedBalanceType === 'main' ? 'Main' : 'Matured'} Wallet. Available: ${formatCrypto(AppState.selectedBalanceAmount / AppState.btcPrice)} BTC ($${formatNumber(AppState.selectedBalanceAmount)})`;
                 purchaseBtn.disabled = true;
                 return false;
             }
@@ -1581,7 +1687,7 @@
                     body: JSON.stringify({
                         planId: AppState.planId,
                         amount: amount,
-                        balanceType: 'main',
+                        balanceType: AppState.selectedBalanceType,  // 'main' or 'matured'
                         sessionId: AppState.sessionId,
                         ref: AppState.ref,
                         timestamp: AppState.timestamp
@@ -1596,8 +1702,9 @@
                 }
                 
                 if (response.ok) {
+                    const walletName = AppState.selectedBalanceType === 'main' ? 'Main Wallet' : 'Matured Wallet';
                     showNotification('success', 'Purchase Successful', 
-                        `Your hashpower contract for $${formatNumber(amount)} has been activated`);
+                        `Your hashpower contract for $${formatNumber(amount)} has been activated using ${walletName} Bitcoin.`);
                     setTimeout(() => {
                         window.location.href = 'index';
                     }, 2000);
@@ -1676,7 +1783,7 @@
             
             document.getElementById('purchase-button').addEventListener('click', executePurchase);
             
-            // NEW: Convert and Deposit button handlers
+            // Convert and Deposit button handlers
             const convertBtn = document.getElementById('convert-action');
             const depositBtn = document.getElementById('deposit-action');
             
@@ -1699,14 +1806,14 @@
         window.addEventListener('load', async function() {
             if (!initFromUrl()) return;
             
-            const success = await fetchBitcoinBalance();
+            const success = await fetchBitcoinBalances();
             
             if (success) {
                 renderPage();
             } else {
                 document.getElementById('loading-state').innerHTML = `
                     <i class="fas fa-exclamation-triangle" style="font-size: 2.2rem; color: var(--error);"></i>
-                    <p><i class="fas fa-lock"></i> Failed to load Bitcoin balance. Please try again.</p>
+                    <p><i class="fas fa-lock"></i> Failed to load Bitcoin balances. Please try again.</p>
                     <button class="btn btn-outline" onclick="window.location.reload()" style="margin-top: var(--space-md);">Retry</button>
                 `;
             }
