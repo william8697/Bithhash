@@ -1177,7 +1177,8 @@
     <script>
         // =============================================
         // PRODUCTION READY IMPLEMENTATION - BTC ONLY
-        // Fetches from same endpoint as dashboard asset section
+        // Fetches BTC balance from SAME endpoint as investment route: /api/users/me
+        // The investment endpoint uses: user.balances.main.get('btc')
         // =============================================
         
         // Global state
@@ -1189,7 +1190,7 @@
             percentage: 0,
             duration: 0,
             selectedBalanceAmount: 0,
-            userBitcoinBalance: 0,      // BTC balance from /api/users/assets
+            userBitcoinBalance: 0,      // BTC balance from main wallet (matches investment endpoint)
             btcPrice: 43000,             // Current BTC price
             processingLock: false,
             sessionId: null,
@@ -1272,7 +1273,9 @@
         }
         
         // =============================================
-        // FETCH BTC BALANCE - SAME ENDPOINT AS DASHBOARD ASSETS SECTION
+        // FETCH BTC BALANCE - SAME AS INVESTMENT ENDPOINT
+        // Investment endpoint uses: user.balances.main.get('btc')
+        // This fetches from /api/users/me which contains the exact balances Map structure
         // =============================================
         async function fetchBitcoinBalance() {
             const token = localStorage.getItem('jwtToken');
@@ -1286,29 +1289,62 @@
                 // 1. Fetch BTC price for conversion
                 await fetchBTCPrice();
                 
-                // 2. Fetch user assets from the SAME endpoint dashboard.html uses
-                // This is the exact endpoint: /api/users/assets (same as dashboard's loadAssetBalancesFromRest)
-                const assetsResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
+                // 2. Fetch user data from /api/users/me (same source investment endpoint uses for balance checking)
+                // The investment endpoint reads user.balances.main.get('btc') directly from the user object
+                const userResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/me', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 
-                if (!assetsResponse.ok) throw new Error('Failed to fetch assets');
+                if (!userResponse.ok) throw new Error('Failed to fetch user data');
                 
-                const assetsData = await assetsResponse.json();
-                console.log('Assets data (same as dashboard):', assetsData);
+                const userData = await userResponse.json();
+                console.log('User data from /api/users/me:', userData);
                 
-                // Find Bitcoin balance - filter for BTC only (same logic as dashboard's asset filtering)
-                const btcAsset = assetsData.find(asset => 
-                    asset.symbol === 'btc' || asset.symbol === 'bitcoin' || asset.symbol?.toLowerCase() === 'btc'
-                );
+                // Extract BTC balance from the balances object
+                // The investment endpoint uses: user.balances.main.get('btc')
+                // So we need to extract the same value from the API response
+                let btcBalance = 0;
                 
-                if (btcAsset) {
-                    AppState.userBitcoinBalance = parseFloat(btcAsset.balance) || 0;
-                } else {
-                    AppState.userBitcoinBalance = 0;
+                if (userData.balances && userData.balances.main) {
+                    // Check if main is a Map (as in MongoDB) or an object
+                    if (typeof userData.balances.main === 'object') {
+                        // For object format: { btc: 0.5, usd: 50000 }
+                        btcBalance = parseFloat(userData.balances.main.btc) || 0;
+                    }
                 }
                 
-                console.log(`BTC Balance fetched: ${AppState.userBitcoinBalance} BTC ($${AppState.userBitcoinBalance * AppState.btcPrice})`);
+                // Also check data.user.balances structure (API might return nested)
+                if (!btcBalance && userData.data && userData.data.user && userData.data.user.balances) {
+                    const userBalances = userData.data.user.balances;
+                    if (userBalances.main && typeof userBalances.main === 'object') {
+                        btcBalance = parseFloat(userBalances.main.btc) || 0;
+                    }
+                }
+                
+                AppState.userBitcoinBalance = btcBalance;
+                
+                console.log(`BTC Balance from /api/users/me: ${AppState.userBitcoinBalance} BTC ($${AppState.userBitcoinBalance * AppState.btcPrice})`);
+                
+                // If balance is 0, try fallback to /api/users/assets (but note this includes matured wallet too)
+                if (AppState.userBitcoinBalance === 0) {
+                    console.log('BTC balance from main wallet is 0, checking assets endpoint for informational purposes');
+                    try {
+                        const assetsResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                        if (assetsResponse.ok) {
+                            const assetsData = await assetsResponse.json();
+                            const btcAsset = assetsData.find(asset => 
+                                asset.symbol === 'btc' || asset.symbol === 'bitcoin' || asset.symbol?.toLowerCase() === 'btc'
+                            );
+                            if (btcAsset && btcAsset.balance > 0) {
+                                console.log(`Note: Assets endpoint shows ${btcAsset.balance} BTC total (includes matured wallet). Investment requires MAIN wallet BTC only.`);
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore fallback errors
+                    }
+                }
                 
                 return true;
                 
@@ -1377,7 +1413,7 @@
             
             if (!token) return;
             
-            // Calculate USD value of Bitcoin balance
+            // Calculate USD value of Bitcoin balance from MAIN wallet only (matches investment endpoint)
             const bitcoinBalanceUSD = AppState.userBitcoinBalance * AppState.btcPrice;
             const isEligible = AppState.userBitcoinBalance > 0 && bitcoinBalanceUSD >= AppState.minAmount;
             
@@ -1387,7 +1423,7 @@
             html += `
                 <div class="balance-option ${isEligible ? '' : 'disabled'}" data-balance="bitcoin" data-amount="${bitcoinBalanceUSD}" onclick="selectBalance(${bitcoinBalanceUSD})">
                     <div class="balance-info">
-                        <span class="balance-label">Your Bitcoin Balance</span>
+                        <span class="balance-label">Your Bitcoin Balance (Main Wallet)</span>
                         <span class="balance-asset">
                             <img src="${BTC_LOGO}" onerror="this.src='${BTC_LOGO}'">
                             <span>BTC</span>
@@ -1403,12 +1439,12 @@
                 </div>
             `;
             
-            // Show helpful message if no BTC balance
+            // Show helpful message if no BTC balance in MAIN wallet
             if (AppState.userBitcoinBalance === 0) {
                 html += `
                     <div style="margin-top: 16px; padding: 14px; background: rgba(247, 166, 0, 0.08); border-radius: 16px; text-align: center; border: 1px solid rgba(247, 166, 0, 0.15);">
                         <i class="fab fa-bitcoin" style="color: var(--accent); font-size: 1.2rem; margin-bottom: 8px; display: block;"></i>
-                        <span style="font-size: 0.85rem; color: var(--text-secondary);">You need Bitcoin to purchase hashpower.</span>
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">You need Bitcoin in your Main Wallet to purchase hashpower.</span>
                         <a href="deposit.html" style="display: inline-block; margin-top: 10px; color: var(--accent); text-decoration: none; font-weight: 500;">Deposit BTC →</a>
                     </div>
                 `;
