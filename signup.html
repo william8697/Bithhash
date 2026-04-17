@@ -2175,39 +2175,122 @@
             } catch (error) { console.error('Auth check failed:', error); }
         }
         
-        let lastGoogleSignIn = 0;
-        function handleGoogleSignIn(response) {
-            const now = Date.now();
-            if (now - lastGoogleSignIn < SIGNUP_COOLDOWN) {
-                document.getElementById('signup-warning').style.display = 'block';
-                return;
-            }
-            lastGoogleSignIn = now;
-            const buttonText = document.getElementById('signup-button-text');
-            const spinner = document.getElementById('signup-spinner');
-            buttonText.style.display = 'none'; spinner.style.display = 'inline-block';
-            const accountType = document.querySelector('.account-type-card.selected').getAttribute('data-account-type');
-            const referralCode = localStorage.getItem('referralCode');
-            fetch('https://bithash-backend-1.onrender.com/api/auth/google', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ credential: response.credential,  isSignup: true, accountType, referralCode: referralCode || null })
-            }).then(res => res.json()).then(data => {
-                if (data.status === 'success') {
-                    if (data.needsOtp && data.tempToken) showTwoStepModal(data.data?.user?.email || '', data.tempToken);
-                    else if (data.token) { localStorage.setItem('jwtToken', data.token); window.location.href = 'dashboard'; }
-                    buttonText.style.display = 'inline-block'; spinner.style.display = 'none';
-                } else {
-                    document.getElementById('signup-error').textContent = data.message || 'Google sign-in failed.';
-                    document.getElementById('signup-error').style.display = 'block';
-                    buttonText.style.display = 'inline-block'; spinner.style.display = 'none';
-                }
-            }).catch(error => {
-                document.getElementById('signup-error').textContent = 'Network error.';
-                document.getElementById('signup-error').style.display = 'block';
-                buttonText.style.display = 'inline-block'; spinner.style.display = 'none';
-            });
+       let lastGoogleSignIn = 0;
+const GOOGLE_SIGNIN_COOLDOWN = 5000;
+
+function handleGoogleSignIn(response) {
+    const now = Date.now();
+    if (now - lastGoogleSignIn < GOOGLE_SIGNIN_COOLDOWN) {
+        // Use the appropriate status div for the page
+        const warningDiv = document.getElementById('signup-warning') || document.getElementById('login-warning');
+        if (warningDiv) {
+            warningDiv.textContent = 'Please wait a few seconds before trying Google sign-in again.';
+            warningDiv.style.display = 'block';
         }
-        
+        return;
+    }
+    
+    lastGoogleSignIn = now;
+    
+    // Get the correct UI elements based on the page
+    const isSignupPage = window.location.pathname.includes('signup');
+    const buttonText = document.getElementById(isSignupPage ? 'signup-button-text' : 'login-button-text');
+    const spinner = document.getElementById(isSignupPage ? 'signup-spinner' : 'login-spinner');
+    const successDiv = document.getElementById(isSignupPage ? 'signup-success' : 'login-success');
+    const errorDiv = document.getElementById(isSignupPage ? 'signup-error' : 'login-error');
+    const warningDiv = document.getElementById(isSignupPage ? 'signup-warning' : 'login-warning');
+    
+    if (buttonText && spinner) {
+        buttonText.style.display = 'none';
+        spinner.style.display = 'inline-block';
+    }
+    
+    if (successDiv) successDiv.style.display = 'none';
+    if (errorDiv) errorDiv.style.display = 'none';
+    if (warningDiv) warningDiv.style.display = 'none';
+    
+    // Determine the account type selected on the page
+    const selectedCard = document.querySelector('.account-type-card.selected');
+    const accountType = selectedCard ? selectedCard.getAttribute('data-account-type') : 'individual';
+    
+    // Set the isSignup flag based on which page we are on
+    const isSignup = window.location.pathname.includes('signup');
+    
+    fetch('https://bithash-backend-1.onrender.com/api/auth/google', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+            credential: response.credential,
+            accountType: accountType,
+            isSignup: isSignup // CRITICAL: This flag tells the backend the intent
+        })
+    })
+    .then(response => response.json().then(data => ({ status: response.status, body: data })))
+    .then(({ status, body: data }) => {
+        if (buttonText && spinner) {
+            buttonText.style.display = 'inline-block';
+            spinner.style.display = 'none';
+        }
+
+        // Handle the response based on HTTP status code
+        if (status === 200 && data.status === 'success') {
+            // Success: Show OTP modal or redirect
+            if (data.needsOtp && data.tempToken) {
+                const userEmail = data.data?.user?.email;
+                if (typeof showTwoStepModal === 'function') {
+                    showTwoStepModal(userEmail, data.tempToken);
+                } else {
+                    console.error('OTP modal function not found');
+                    if (errorDiv) {
+                        errorDiv.textContent = 'Verification system error. Please try logging in with email and password.';
+                        errorDiv.style.display = 'block';
+                    }
+                }
+            } else if (data.token) {
+                localStorage.setItem('jwtToken', data.token);
+                window.location.href = 'dashboard';
+            } else if (successDiv) {
+                successDiv.textContent = data.message || 'Authentication successful! Redirecting...';
+                successDiv.style.display = 'block';
+                setTimeout(() => window.location.href = 'dashboard', 1500);
+            }
+        } 
+        else if (status === 404 && data.message) {
+            // Account not found during login attempt
+            if (errorDiv) {
+                errorDiv.textContent = data.message;
+                errorDiv.style.display = 'block';
+            }
+        } 
+        else if (status === 409 && data.message) {
+            // Account already exists during signup attempt
+            if (errorDiv) {
+                errorDiv.textContent = data.message;
+                errorDiv.style.display = 'block';
+            }
+        }
+        else {
+            // Generic error for other status codes (400, 500, etc.)
+            if (errorDiv) {
+                errorDiv.textContent = data.message || 'Google sign-in failed. Please try again or use email login.';
+                errorDiv.style.display = 'block';
+            }
+        }
+    })
+    .catch(error => {
+        console.error('Google sign-in network error:', error);
+        if (buttonText && spinner) {
+            buttonText.style.display = 'inline-block';
+            spinner.style.display = 'none';
+        }
+        if (errorDiv) {
+            errorDiv.textContent = 'Network error. Please check your internet connection and try again.';
+            errorDiv.style.display = 'block';
+        }
+    });
+}
         function initNewsletter() {
             const newsletterBtn = document.getElementById('newsletter-btn');
             const newsletterEmail = document.getElementById('newsletter-email');
