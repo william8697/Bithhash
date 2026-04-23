@@ -1147,6 +1147,38 @@
             animation: pulse 2s infinite;
         }
 
+
+
+
+
+
+/* Countdown timer styling */
+.investment-countdown {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    color: var(--primary);
+    background: rgba(37, 99, 235, 0.1);
+    padding: 4px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    font-size: 13px;
+    letter-spacing: 1px;
+}
+
+.investment-matured {
+    background-color: rgba(16, 185, 129, 0.05) !important;
+}
+
+.time-remaining-cell {
+    min-width: 100px;
+}
+
+
+
+
+
+        
+
         /* Enhanced Activity Table */
         .activity-table {
             width: 100%;
@@ -7183,67 +7215,170 @@
         });
     }
     
-    // Load active investments with countdown timers
-    function loadActiveInvestments() {
-        showLoading('Loading active investments...');
-        
-        $.ajax({
-            url: `https://bithash-backend-1.onrender.com/api/admin/investments/active?page=${currentPage.activeInvestments}&limit=10`,
-            type: 'GET',
-            headers: {
-                'Authorization': `Bearer ${adminToken}`,
-                'X-CSRF-TOKEN': csrfToken
-            },
-            success: function(response) {
-                hideLoading();
-                if (response.status === 'success') {
-                    const investments = response.data.investments;
-                    const tableBody = $('#active-investments-table tbody');
-                    tableBody.empty();
-                    
+   // =============================================
+// LOAD ACTIVE INVESTMENTS - Uses backend calculations
+// =============================================
+function loadActiveInvestments() {
+    showLoading('Loading active investments...');
+    
+    $.ajax({
+        url: `https://bithash-backend-1.onrender.com/api/admin/investments/active?page=${currentPage.activeInvestments}&limit=10`,
+        type: 'GET',
+        headers: {
+            'Authorization': `Bearer ${adminToken}`,
+            'X-CSRF-TOKEN': csrfToken
+        },
+        success: function(response) {
+            hideLoading();
+            if (response.status === 'success') {
+                const investments = response.data.investments;
+                const tableBody = $('#active-investments-table tbody');
+                tableBody.empty();
+                
+                if (investments.length === 0) {
+                    tableBody.append(`
+                        <tr>
+                            <td colspan="9" style="text-align: center; padding: 40px;">
+                                <i class="fas fa-chart-line" style="font-size: 48px; color: var(--gray-light); margin-bottom: 15px;"></i>
+                                <p style="color: var(--gray);">No active investments found</p>
+                            </td>
+                        </tr>
+                    `);
+                } else {
                     investments.forEach(investment => {
-                        const remainingTime = calculateRemainingTime(investment.startDate, investment.plan.name);
-                        const isMatured = remainingTime === 'Matured';
-                        
+                        const isMatured = investment.timeRemaining.isMatured;
                         const row = `
-                            <tr class="animate__animated animate__fadeIn ${isMatured ? 'investment-matured' : ''}">
-
-
-                                                               <td>${investment._id.substring(0, 8)}... </td>
-                                 <td>${investment.user.firstName} ${investment.user.lastName}</td>
-                                 <td>${investment.plan.name}</td>
-                                 <td>$${parseFloat(investment.amount).toFixed(2)}</td>
-                                 <td>${formatActivityTime(investment.startDate)}</td>
-                                 <td>
+                            <tr class="animate__animated animate__fadeIn ${isMatured ? 'investment-matured' : ''}" data-investment-id="${investment._id}">
+                                <td>${investment._id.substring(0, 8)}...</td>
+                                <td>${investment.user.firstName} ${investment.user.lastName}</td>
+                                <td>${investment.plan.name}</td>
+                                <td>$${parseFloat(investment.amount).toFixed(2)}</td>
+                                <td>${formatActivityTime(investment.startDate)}</td>
+                                <td class="time-remaining-cell" data-end="${investment.timeRemaining.milliseconds}" data-investment-id="${investment._id}">
                                     ${isMatured ? 
                                         '<span class="admin-badge badge-success">Matured</span>' : 
-                                        `<span class="investment-countdown" data-start="${investment.startDate}" data-plan="${investment.plan.name}">${remainingTime}</span>`
+                                        `<span class="investment-countdown" data-milliseconds="${investment.timeRemaining.milliseconds}" data-start-display="${investment.timeRemaining.countdown}">${investment.timeRemaining.countdown}</span>`
                                     }
-                                  </td>
-                                 <td>$${parseFloat(investment.dailyProfit).toFixed(2)}</td>
-                                 <td>$${parseFloat(investment.totalProfit).toFixed(2)}</td>
-                                 <td>
-                                    <button class="admin-btn btn-danger btn-sm cancel-investment" data-id="${investment._id}">Cancel</button>
-                                  </td>
-                              </tr>
+                                </td>
+                                <td>$${parseFloat(investment.dailyProfit).toFixed(2)}</td>
+                                <td>$${parseFloat(investment.totalProfit).toFixed(2)}</td>
+                                <td>
+                                    ${!isMatured ? 
+                                        `<button class="admin-btn btn-danger btn-sm cancel-investment" data-id="${investment._id}">Cancel</button>` : 
+                                        '<span class="admin-badge badge-success">Completed</span>'
+                                    }
+                                </td>
+                            </tr>
                         `;
                         tableBody.append(row);
                     });
-                    
-                    totalPages.activeInvestments = response.data.totalPages;
-                    updatePaginationUI('active-investments');
-                    
-                    if (investments.some(inv => calculateRemainingTime(inv.startDate, inv.plan.name) !== 'Matured')) {
-                        startCountdownTimer();
-                    }
                 }
-            },
-            error: function(xhr, status, error) {
-                hideLoading();
-                toastr.error('Failed to load active investments');
+                
+                totalPages.activeInvestments = response.data.pagination.totalPages;
+                updatePaginationUI('active-investments');
+                
+                // Start countdown timers for non-matured investments
+                startGlobalCountdownTimer();
             }
-        });
+        },
+        error: function(xhr, status, error) {
+            hideLoading();
+            toastr.error('Failed to load active investments');
+        }
+    });
+}
+
+// =============================================
+// GLOBAL COUNTDOWN TIMER - Updates all timers every second
+// =============================================
+let globalCountdownInterval = null;
+
+function startGlobalCountdownTimer() {
+    if (globalCountdownInterval) {
+        clearInterval(globalCountdownInterval);
     }
+    
+    globalCountdownInterval = setInterval(function() {
+        updateAllCountdowns();
+    }, 1000);
+}
+
+function updateAllCountdowns() {
+    $('.investment-countdown').each(function() {
+        const $element = $(this);
+        const currentMs = parseInt($element.data('milliseconds'));
+        
+        if (isNaN(currentMs) || currentMs <= 0) {
+            // Investment has matured
+            const $row = $element.closest('tr');
+            $row.addClass('investment-matured');
+            $element.html('<span class="admin-badge badge-success">Matured</span>');
+            $element.removeClass('investment-countdown');
+            
+            // Update actions column
+            const $actionsCell = $row.find('td:last-child');
+            $actionsCell.html('<span class="admin-badge badge-success">Completed</span>');
+            return;
+        }
+        
+        // Decrease by 1 second
+        const newMs = currentMs - 1000;
+        $element.data('milliseconds', newMs);
+        
+        // Calculate new display
+        const hours = Math.floor(newMs / (1000 * 60 * 60));
+        const minutes = Math.floor((newMs % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((newMs % (1000 * 60)) / 1000);
+        
+        const countdownDisplay = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        $element.text(countdownDisplay);
+        
+        // Also update human-readable if needed elsewhere
+        $element.attr('data-display', countdownDisplay);
+    });
+}
+
+// =============================================
+// ALTERNATIVE: Function that recalculates from startDate (if you prefer)
+// This works with ANY plan name because it uses duration from backend
+// =============================================
+function calculateRemainingTimeFromBackend(startDate, planDurationHours) {
+    const startTime = new Date(startDate).getTime();
+    const durationMs = planDurationHours * 60 * 60 * 1000;
+    const endTime = startTime + durationMs;
+    const now = new Date().getTime();
+    const remaining = endTime - now;
+    
+    if (remaining <= 0) {
+        return { isMatured: true, display: 'Matured', countdown: '00:00:00' };
+    }
+    
+    const hours = Math.floor(remaining / (1000 * 60 * 60));
+    const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+    const days = Math.floor(hours / 24);
+    const remainingHours = hours % 24;
+    
+    return {
+        isMatured: false,
+        display: days > 0 ? `${days}d ${remainingHours}h ${minutes}m` : `${hours}h ${minutes}m`,
+        countdown: `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`,
+        hours: hours,
+        minutes: minutes,
+        seconds: seconds,
+        days: days,
+        milliseconds: remaining
+    };
+}
+
+// Refresh investments periodically (every 60 seconds)
+setInterval(function() {
+    if ($('#active-investments-tab').is(':visible')) {
+        loadActiveInvestments();
+    }
+}, 60000);
+
+
     
     let countdownInterval = null;
     
