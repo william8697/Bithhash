@@ -3107,7 +3107,7 @@
                                 </td>
                             </tr>
                         </tbody>
-                    </table>
+                    追赶
                 </div>
             </div>
 
@@ -3262,8 +3262,6 @@
         // PRODUCTION TRADING PLATFORM - REAL DATA ONLY
         // NO STATIC/DEMO/MOCK DATA
         // All balances come from /asset/balance endpoint only
-        // Market data from Binance API with multiple fallbacks
-        // All user data fetched from backend
         // =============================================
         
         // Lightweight Charts™ instance
@@ -3287,10 +3285,6 @@
         
         const CONFIG = {
             BACKEND_URL: 'https://bithash-backend-1.onrender.com',
-            BINANCE_API_URL: 'https://api.binance.com/api/v3',
-            BINANCE_WS_URL: 'wss://stream.binance.com:9443/ws',
-            COINGECKO_API_URL: 'https://api.coingecko.com/api/v3',
-            ALTERNATIVE_API_URL: 'https://api.alternative.me/v2',
             BUY_ENDPOINT: '/api/trading/orders/buy',
             SELL_ENDPOINT: '/api/trading/orders/sell',
             CANCEL_ORDER_ENDPOINT: '/api/trading/orders/cancel',
@@ -3333,7 +3327,6 @@
         let currentOrderType = 'limit';
         let currentOrderBookTab = 'orderbook';
         let wsConnection = null;
-        let binanceWSConnection = null;
         let orderBook = { bids: [], asks: [], lastUpdateId: 0 };
         let marketPairs = [];
         let filteredPairs = [];
@@ -3428,17 +3421,6 @@
             tradeMarker: 'both'
         };
 
-        // Binance API endpoints for price and pair data
-        const BINANCE_SYMBOLS_URL = 'https://api.binance.com/api/v3/exchangeInfo';
-        const BINANCE_TICKER_URL = 'https://api.binance.com/api/v3/ticker/24hr';
-        const BINANCE_BOOK_URL = 'https://api.binance.com/api/v3/depth';
-        const BINANCE_TRADES_URL = 'https://api.binance.com/api/v3/trades';
-        const BINANCE_KLINE_URL = 'https://api.binance.com/api/v3/klines';
-
-        // Fallback API endpoints
-        const COINGECKO_SIMPLE_PRICE_URL = 'https://api.coingecko.com/api/v3/simple/price';
-        const ALTERNATIVE_TICKER_URL = 'https://api.alternative.me/v2/ticker/';
-
         // Safe element getter with null check
         function safeGetElement(id) {
             const element = document.getElementById(id);
@@ -3492,293 +3474,9 @@
         }
 
         // =============================================
-        // FETCH BINANCE PAIRS FOR QUOTE AND TRADING
-        // =============================================
-        async function fetchBinancePairs() {
-            try {
-                const response = await fetch(BINANCE_SYMBOLS_URL);
-                if (response.ok) {
-                    const data = await response.json();
-                    const binancePairs = data.symbols
-                        .filter(s => s.status === 'TRADING')
-                        .map(s => ({
-                            base: s.baseAsset,
-                            quote: s.quoteAsset,
-                            symbol: s.symbol
-                        }));
-                    
-                    // Group by quote asset
-                    const quotes = new Set();
-                    binancePairs.forEach(pair => quotes.add(pair.quote));
-                    availableQuoteAssets = Array.from(quotes).sort();
-                    
-                    allAvailablePairs = binancePairs;
-                    return true;
-                }
-            } catch (error) {
-                console.error('Failed to fetch Binance pairs:', error);
-            }
-            return false;
-        }
-
-        // =============================================
-        // FETCH BINANCE PRICE WITH FALLBACKS
-        // =============================================
-        async function fetchBinancePrice(pairSymbol) {
-            const baseAsset = currentPair.base;
-            const quoteAsset = currentPair.quote;
-            const binanceSymbol = `${baseAsset}${quoteAsset}`;
-            
-            try {
-                const response = await fetch(`${BINANCE_TICKER_URL}?symbol=${binanceSymbol}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return {
-                        price: parseFloat(data.lastPrice),
-                        bidPrice: parseFloat(data.bidPrice),
-                        askPrice: parseFloat(data.askPrice),
-                        high24h: parseFloat(data.highPrice),
-                        low24h: parseFloat(data.lowPrice),
-                        volume24h: parseFloat(data.volume),
-                        quoteVolume24h: parseFloat(data.quoteVolume),
-                        change24h: parseFloat(data.priceChangePercent)
-                    };
-                }
-            } catch (error) {
-                console.error('Binance price fetch failed:', error);
-            }
-            
-            // Fallback to CoinGecko
-            try {
-                const geckoResponse = await fetch(`${COINGECKO_SIMPLE_PRICE_URL}?ids=${baseAsset.toLowerCase()}&vs_currencies=${quoteAsset.toLowerCase()}&include_24hr_change=true`);
-                if (geckoResponse.ok) {
-                    const data = await geckoResponse.json();
-                    const priceData = data[baseAsset.toLowerCase()];
-                    if (priceData) {
-                        return {
-                            price: priceData[`${quoteAsset.toLowerCase()}`] || 0,
-                            change24h: priceData[`${quoteAsset.toLowerCase()}_24h_change`] || 0,
-                            bidPrice: 0,
-                            askPrice: 0,
-                            high24h: 0,
-                            low24h: 0,
-                            volume24h: 0,
-                            quoteVolume24h: 0
-                        };
-                    }
-                }
-            } catch (error) {
-                console.error('CoinGecko fallback failed:', error);
-            }
-            
-            // Fallback to Alternative.me
-            try {
-                const altResponse = await fetch(`${ALTERNATIVE_TICKER_URL}${baseAsset.toLowerCase()}/`);
-                if (altResponse.ok) {
-                    const data = await altResponse.json();
-                    const ticker = data.data?.[baseAsset.toLowerCase()];
-                    if (ticker && ticker.quotes?.USD) {
-                        return {
-                            price: ticker.quotes.USD.price,
-                            change24h: ticker.quotes.USD.percent_change_24h || 0,
-                            bidPrice: 0,
-                            askPrice: 0,
-                            high24h: ticker.quotes.USD.percent_change_24h ? 0 : 0,
-                            low24h: 0,
-                            volume24h: ticker.quotes.USD.volume_24h || 0,
-                            quoteVolume24h: 0
-                        };
-                    }
-                }
-            } catch (error) {
-                console.error('Alternative.me fallback failed:', error);
-            }
-            
-            return null;
-        }
-
-        // =============================================
-        // FETCH BINANCE ORDER BOOK WITH FALLBACKS
-        // =============================================
-        async function fetchBinanceOrderBook(pairSymbol, limit = 100) {
-            const binanceSymbol = `${currentPair.base}${currentPair.quote}`;
-            
-            try {
-                const response = await fetch(`${BINANCE_BOOK_URL}?symbol=${binanceSymbol}&limit=${limit}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return {
-                        bids: data.bids.map(b => [parseFloat(b[0]), parseFloat(b[1])]),
-                        asks: data.asks.map(a => [parseFloat(a[0]), parseFloat(a[1])])
-                    };
-                }
-            } catch (error) {
-                console.error('Binance orderbook fetch failed:', error);
-            }
-            
-            // Fallback to backend if available
-            try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/market/orderbook?symbol=${currentPair.symbol}&limit=${limit}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return {
-                        bids: data.bids || [],
-                        asks: data.asks || []
-                    };
-                }
-            } catch (error) {
-                console.error('Backend orderbook fallback failed:', error);
-            }
-            
-            return null;
-        }
-
-        // =============================================
-        // FETCH BINANCE RECENT TRADES WITH FALLBACKS
-        // =============================================
-        async function fetchBinanceTrades(pairSymbol, limit = 50) {
-            const binanceSymbol = `${currentPair.base}${currentPair.quote}`;
-            
-            try {
-                const response = await fetch(`${BINANCE_TRADES_URL}?symbol=${binanceSymbol}&limit=${limit}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return data.map(t => ({
-                        price: parseFloat(t.price),
-                        amount: parseFloat(t.qty),
-                        time: t.time,
-                        isBuyerMaker: t.isBuyerMaker
-                    }));
-                }
-            } catch (error) {
-                console.error('Binance trades fetch failed:', error);
-            }
-            
-            // Fallback to backend
-            try {
-                const response = await fetch(`${CONFIG.BACKEND_URL}/api/market/trades?symbol=${currentPair.symbol}&limit=${limit}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return data;
-                }
-            } catch (error) {
-                console.error('Backend trades fallback failed:', error);
-            }
-            
-            return [];
-        }
-
-        // =============================================
-        // FETCH BINANCE CANDLES/KLINES
-        // =============================================
-        async function fetchBinanceCandles(pairSymbol, interval = '15m', limit = 200) {
-            const binanceSymbol = `${currentPair.base}${currentPair.quote}`;
-            const binanceInterval = interval === '1h' ? '1h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : '15m';
-            
-            try {
-                const response = await fetch(`${BINANCE_KLINE_URL}?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${limit}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    return data.map(candle => ({
-                        openTime: new Date(candle[0]),
-                        open: parseFloat(candle[1]),
-                        high: parseFloat(candle[2]),
-                        low: parseFloat(candle[3]),
-                        close: parseFloat(candle[4]),
-                        volume: parseFloat(candle[5]),
-                        closeTime: new Date(candle[6])
-                    }));
-                }
-            } catch (error) {
-                console.error('Binance candles fetch failed:', error);
-            }
-            
-            return [];
-        }
-
-        // =============================================
-        // INITIALIZE BINANCE WEBSOCKET FOR REAL-TIME DATA
-        // =============================================
-        function initializeBinanceWebSocket() {
-            if (binanceWSConnection) {
-                binanceWSConnection.close();
-            }
-            
-            const binanceSymbol = `${currentPair.base}${currentPair.quote}`.toLowerCase();
-            const wsUrl = `${CONFIG.BINANCE_WS_URL}/${binanceSymbol}@ticker/${binanceSymbol}@depth20/${binanceSymbol}@trade`;
-            
-            try {
-                binanceWSConnection = new WebSocket(wsUrl);
-                
-                binanceWSConnection.onopen = () => {
-                    console.log(`Binance WebSocket connected for ${binanceSymbol}`);
-                };
-                
-                binanceWSConnection.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        if (data.e === '24hrTicker') {
-                            // Ticker update
-                            const priceData = {
-                                price: parseFloat(data.c),
-                                bidPrice: parseFloat(data.b),
-                                askPrice: parseFloat(data.a),
-                                high24h: parseFloat(data.h),
-                                low24h: parseFloat(data.l),
-                                volume24h: parseFloat(data.v),
-                                quoteVolume24h: parseFloat(data.q),
-                                change24h: parseFloat(data.P)
-                            };
-                            handleTickerUpdate(priceData);
-                        } else if (data.e === 'depthUpdate') {
-                            // Order book update
-                            const bookUpdate = {
-                                bids: data.b.map(b => [parseFloat(b[0]), parseFloat(b[1])]),
-                                asks: data.a.map(a => [parseFloat(a[0]), parseFloat(a[1])])
-                            };
-                            handleDepthUpdate(bookUpdate);
-                        } else if (data.e === 'trade') {
-                            // Trade update
-                            const trade = {
-                                price: parseFloat(data.p),
-                                amount: parseFloat(data.q),
-                                time: data.T,
-                                isBuyerMaker: data.m
-                            };
-                            handleNewTrade(trade);
-                        }
-                    } catch (error) {
-                        console.error('Binance WebSocket message error:', error);
-                    }
-                };
-                
-                binanceWSConnection.onerror = (error) => {
-                    console.error('Binance WebSocket error:', error);
-                    // Fallback to backend WebSocket
-                    initializeWebSocket();
-                };
-                
-                binanceWSConnection.onclose = () => {
-                    console.log('Binance WebSocket disconnected, reconnecting...');
-                    setTimeout(initializeBinanceWebSocket, 5000);
-                };
-            } catch (error) {
-                console.error('Binance WebSocket initialization failed:', error);
-                initializeWebSocket();
-            }
-        }
-
-        // =============================================
         // FETCH ALL PAIRS FROM BACKEND - NO HARDCODING
         // =============================================
         async function fetchAllPairsFromBackend() {
-            // Try Binance first
-            const binanceSuccess = await fetchBinancePairs();
-            if (binanceSuccess && allAvailablePairs.length > 0) {
-                return true;
-            }
-            
-            // Fallback to backend
             try {
                 const response = await fetch(`${CONFIG.BACKEND_URL}${CONFIG.ALL_PAIRS_ENDPOINT}`);
                 if (response.ok) {
@@ -4102,26 +3800,17 @@
         async function loadChartData() {
             if (!checkRateLimit('request')) return;
             
-            const candles = await fetchBinanceCandles(currentPair.symbol, chartTimeframe, 200);
-            if (candles && candles.length > 0) {
-                chartCandles = candles;
-                if (chartCandles.length > 0 && chart) {
-                    updateChartData(chartCandles);
-                }
-            } else {
-                // Fallback to backend
-                try {
-                    const response = await fetch(`${CONFIG.BACKEND_URL}/api/market/candles?symbol=${currentPair.symbol}&interval=${chartTimeframe}&limit=200`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        chartCandles = data.candles || [];
-                        if (chartCandles.length > 0 && chart) {
-                            updateChartData(chartCandles);
-                        }
+            try {
+                const response = await fetch(`${CONFIG.BACKEND_URL}/api/market/candles?symbol=${currentPair.symbol}&interval=${chartTimeframe}&limit=200`);
+                if (response.ok) {
+                    const data = await response.json();
+                    chartCandles = data.candles || [];
+                    if (chartCandles.length > 0 && chart) {
+                        updateChartData(chartCandles);
                     }
-                } catch (error) {
-                    console.error('Failed to load chart data:', error);
                 }
+            } catch (error) {
+                console.error('Failed to load chart data:', error);
             }
         }
         
@@ -4843,7 +4532,7 @@
         }
 
         function loadDropdownPairs() {
-            // Use dynamically fetched quote assets from Binance
+            // Use dynamically fetched quote assets
             const quotesHtml = (availableQuoteAssets.length > 0 ? availableQuoteAssets : ['USDT']).map(quote => `
                 <button class="quote-tab ${quote === currentQuoteFilter ? 'active' : ''}" onclick="switchQuoteFilter('${quote}')">${quote}</button>
             `).join('');
@@ -4868,7 +4557,7 @@
         function filterDropdownPairs() {
             const searchTerm = safeGetElement('dropdownPairSearch')?.value.toLowerCase() || '';
             
-            // Use dynamically fetched pairs from Binance
+            // Use dynamically fetched pairs
             let allPairs = allAvailablePairs
                 .filter(pair => pair.quote === currentQuoteFilter)
                 .map(pair => ({
@@ -5178,9 +4867,6 @@
                     await loadCryptoBalancesFromRest();
                     await loadOrderMarkersFromBackend();
                     await updateMaxAmountDisplay();
-                    
-                    // Also update the chart to reflect the order
-                    await loadOrderMarkersFromBackend();
                 } else {
                     const error = await response.json();
                     showNotification('error', 'Order Failed', error.message || 'Could not execute order');
@@ -5269,33 +4955,40 @@
 
         async function loadTickerData() {
             try {
-                const tickerDataList = await fetchBinancePrice(currentPair.symbol);
-                if (tickerDataList) {
-                    const topPairs = allAvailablePairs.slice(0, 20).map(pair => ({
-                        symbol: `${pair.base}${pair.quote}`,
-                        pair: `${pair.base}/${pair.quote}`,
-                        base: pair.base
-                    }));
+                const response = await fetch(`${CONFIG.BACKEND_URL}/api/market/ticker/24hr`);
+                if (response.ok) {
+                    const data = await response.json();
                     
-                    tickerData = [];
-                    
-                    for (const pair of topPairs) {
-                        const priceData = await fetchBinancePrice(pair.symbol);
-                        if (priceData && priceData.price) {
-                            tickerData.push({
-                                symbol: pair.pair,
-                                price: priceData.price,
-                                change24h: priceData.change24h || 0
-                            });
+                    if (data && (Array.isArray(data) ? data.length > 0 : data.symbol)) {
+                        const topPairs = allAvailablePairs.slice(0, 20).map(pair => ({
+                            symbol: `${pair.base}${pair.quote}`,
+                            pair: `${pair.base}/${pair.quote}`,
+                            base: pair.base
+                        }));
+                        
+                        tickerData = [];
+                        const tickerArray = Array.isArray(data) ? data : [data];
+                        
+                        for (const pair of topPairs) {
+                            const ticker = tickerArray.find(t => t.symbol === pair.symbol);
+                            if (ticker && ticker.lastPrice) {
+                                tickerData.push({
+                                    symbol: pair.pair,
+                                    price: parseFloat(ticker.lastPrice),
+                                    change24h: parseFloat(ticker.priceChangePercent || 0)
+                                });
+                            }
+                        }
+                        
+                        if (tickerData.length === 0) {
+                            console.warn('No ticker data received from backend');
+                        } else {
+                            renderTicker();
+                            initializeTickerWebSocket();
                         }
                     }
-                    
-                    if (tickerData.length === 0) {
-                        console.warn('No ticker data received from Binance');
-                    } else {
-                        renderTicker();
-                        initializeTickerWebSocket();
-                    }
+                } else {
+                    console.error('Failed to load ticker data:', response.status);
                 }
             } catch (error) {
                 console.error('Failed to load ticker data:', error);
@@ -5397,10 +5090,10 @@
         }
 
         document.addEventListener('DOMContentLoaded', async () => {
-            console.log('Initializing BitHash Trading Platform with Binance API and Lightweight Charts™...');
+            console.log('Initializing BitHash Trading Platform with Lightweight Charts™...');
             
             try {
-                // Fetch all pairs from Binance first - NO HARDCODING
+                // Fetch all pairs from backend first - NO HARDCODING
                 await fetchAllPairsFromBackend();
                 
                 const urlParams = new URLSearchParams(window.location.search);
@@ -5434,8 +5127,7 @@
                 await loadMarketPairs();
                 await loadTickerData();
                 await fetchPairLimitsFromBackend();
-                // Initialize Binance WebSocket for real-time market data
-                initializeBinanceWebSocket();
+                initializeWebSocket();
                 startPollingIntervals();
                 startPNLTracking();
                 await loadInitialData();
@@ -5460,7 +5152,7 @@
                 
                 updateHeaderWithNetworksAndTags();
                 
-                console.log('Trading Platform Initialized - All data from Binance API, user data from backend');
+                console.log('Trading Platform Initialized - All data from backend, no hardcoded pairs');
             } catch (error) {
                 console.error('Initialization error:', error);
                 showNotification('error', 'Initialization Error', 'Failed to load trading platform. Please refresh.');
@@ -6171,37 +5863,22 @@
         function startPollingIntervals() {
             if (orderBookInterval) clearInterval(orderBookInterval);
             orderBookInterval = setInterval(async () => {
-                if (!binanceWSConnection || binanceWSConnection.readyState !== WebSocket.OPEN) {
-                    const bookData = await fetchBinanceOrderBook(currentPair.symbol);
-                    if (bookData) {
-                        handleDepthUpdate(bookData);
-                    } else if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-                        await fetchOrderBookFromBackend();
-                    }
+                if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+                    await fetchOrderBookFromBackend();
                 }
             }, 1000);
 
             if (priceInterval) clearInterval(priceInterval);
             priceInterval = setInterval(async () => {
-                if (!binanceWSConnection || binanceWSConnection.readyState !== WebSocket.OPEN) {
-                    const priceData = await fetchBinancePrice(currentPair.symbol);
-                    if (priceData) {
-                        handleTickerUpdate(priceData);
-                    } else if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-                        await fetch24hrStatsFromBackend();
-                    }
+                if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+                    await fetch24hrStatsFromBackend();
                 }
             }, 2000);
 
             if (tradesInterval) clearInterval(tradesInterval);
             tradesInterval = setInterval(async () => {
-                if (!binanceWSConnection || binanceWSConnection.readyState !== WebSocket.OPEN) {
-                    const tradesData = await fetchBinanceTrades(currentPair.symbol);
-                    if (tradesData && tradesData.length > 0) {
-                        tradesData.forEach(trade => handleNewTrade(trade));
-                    } else if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-                        await fetchRecentTradesFromBackend();
-                    }
+                if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+                    await fetchRecentTradesFromBackend();
                 }
             }, 3000);
             
@@ -6357,23 +6034,6 @@
         }
 
         async function loadInitialData() {
-            // Try Binance first for initial data
-            const priceData = await fetchBinancePrice(currentPair.symbol);
-            if (priceData) {
-                handleTickerUpdate(priceData);
-            }
-            
-            const bookData = await fetchBinanceOrderBook(currentPair.symbol);
-            if (bookData) {
-                handleDepthUpdate(bookData);
-            }
-            
-            const tradesData = await fetchBinanceTrades(currentPair.symbol);
-            if (tradesData && tradesData.length > 0) {
-                tradesData.forEach(trade => handleNewTrade(trade));
-            }
-            
-            // Fallback to backend
             await Promise.all([
                 fetchOrderBookFromBackend(),
                 fetch24hrStatsFromBackend(),
@@ -6949,7 +6609,7 @@
                         
 
 
-                        </table>
+                        </td>
                     </tr>
                 `;
                 
@@ -7005,7 +6665,7 @@
                             ${showCancel ? 
                                 `<button class="cancel-order-btn" onclick="cancelOrder('${order.id || order._id}')">Cancel</button>` : 
                                 '-'}
-                        </td>
+                         </td>
                     </tr>
                 `;
             });
@@ -7132,8 +6792,8 @@
                         <td colspan="11" style="text-align: center; padding: var(--spacing-xl); color: var(--gray);">
                             <i class="fas fa-inbox" style="font-size: 2rem; margin-bottom: var(--spacing-md); display: block; opacity: 0.5;"></i>
                             No open positions
-                        </td>
-                    </tr>
+                         </td>
+                     </tr>
                 `;
             }
         }
@@ -7185,8 +6845,9 @@
                 
                 html += `
                     <tr>
-                        <td><span style="font-weight: 600;">${pos.symbol || currentPair.symbol}</span></td>
-                        <td class="${sideClass}">${side}</td>
+                        <td><span style="font-weight: 600;">${pos.symbol || currentPair.symbol}</span>
+
+                                                <td class="${sideClass}">${side}</td>
                         <td>${formatNumber(pos.size || 0)}</td>
                         <td>${formatUSD(pos.entryPrice || 0)}</td>
                         <td>${formatUSD(markPrice)}</td>
@@ -7366,9 +7027,6 @@
         window.addEventListener('beforeunload', () => {
             if (wsConnection) {
                 wsConnection.close();
-            }
-            if (binanceWSConnection) {
-                binanceWSConnection.close();
             }
             if (tickerWSConnection) {
                 tickerWSConnection.close();
