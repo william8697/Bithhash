@@ -8819,51 +8819,76 @@ async function loadPlansData() {
         
         const plansData = await plansResponse.json();
         
-        // Fetch BTC balances from the same endpoint as cloudmining.html (/api/users/me)
+        // Fetch BTC balances from /api/users/assets (correct endpoint matching asset section)
         let mainWalletBTC = 0;
         let maturedWalletBTC = 0;
         
         if (token) {
             try {
-                const userResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/me', {
+                const assetsResponse = await fetch('https://bithash-backend-1.onrender.com/api/users/assets', {
                     headers: headers
                 });
                 
-                if (userResponse.ok) {
-                    const userData = await userResponse.json();
-                    console.log('User data from /api/users/me for plans:', userData);
+                if (assetsResponse.ok) {
+                    const assetsData = await assetsResponse.json();
+                    console.log('Assets data from /api/users/assets for plans:', assetsData);
                     
-                    // Extract BTC balances from main and matured wallets
-                    // Check different possible response structures
-                    if (userData.balances) {
-                        // Structure: { balances: { main: { btc: 0.5 }, matured: { btc: 0.3 } } }
-                        if (userData.balances.main && typeof userData.balances.main === 'object') {
-                            mainWalletBTC = parseFloat(userData.balances.main.btc) || 0;
+                    // The assets endpoint returns an array of assets
+                    // Structure matches your backend: [{ symbol: 'btc', balance: 0.5, currentValue: xxx, ... }]
+                    if (Array.isArray(assetsData) && assetsData.length > 0) {
+                        // Find BTC in the assets array
+                        const btcAsset = assetsData.find(asset => 
+                            asset.symbol === 'btc' || 
+                            asset.symbol === 'BTC' || 
+                            asset.symbol?.toLowerCase() === 'btc'
+                        );
+                        
+                        if (btcAsset && btcAsset.balance !== undefined) {
+                            // The 'balance' field represents TOTAL across Main + Matured wallets
+                            // This matches your backend: totalHoldings.get(asset)
+                            const totalBTCBalance = parseFloat(btcAsset.balance) || 0;
+                            
+                            // Since the backend combines Main + Matured into one 'balance' field
+                            // we need to split it or just use total for both checks
+                            // For plan eligibility, we check if user has enough in EITHER wallet
+                            // Since we don't have separate values, we'll check total against min amount
+                            mainWalletBTC = totalBTCBalance;
+                            maturedWalletBTC = 0; // Total is already combined
+                            
+                            console.log(`Plan section - BTC from /users/assets: Total Balance = ${totalBTCBalance} BTC`);
+                            console.log(`Plan section - BTC Current Value: $${btcAsset.currentValue?.toLocaleString() || '0'}`);
+                        } else {
+                            console.log('No BTC asset found in user assets');
                         }
-                        if (userData.balances.matured && typeof userData.balances.matured === 'object') {
-                            maturedWalletBTC = parseFloat(userData.balances.matured.btc) || 0;
+                    } else if (assetsData.data && Array.isArray(assetsData.data)) {
+                        // Alternative structure with data wrapper
+                        const btcAsset = assetsData.data.find(asset => 
+                            asset.symbol === 'btc' || 
+                            asset.symbol === 'BTC' || 
+                            asset.symbol?.toLowerCase() === 'btc'
+                        );
+                        
+                        if (btcAsset && btcAsset.balance !== undefined) {
+                            mainWalletBTC = parseFloat(btcAsset.balance) || 0;
+                            console.log(`Plan section - BTC from /users/assets.data: ${mainWalletBTC} BTC`);
                         }
+                    } else {
+                        console.log('Assets response format:', assetsData);
                     }
-                    
-                    // Alternative structure: { data: { user: { balances: {...} } } }
-                    if ((mainWalletBTC === 0 && maturedWalletBTC === 0) && userData.data && userData.data.user && userData.data.user.balances) {
-                        const userBalances = userData.data.user.balances;
-                        if (userBalances.main && typeof userBalances.main === 'object') {
-                            mainWalletBTC = parseFloat(userBalances.main.btc) || 0;
-                        }
-                        if (userBalances.matured && typeof userBalances.matured === 'object') {
-                            maturedWalletBTC = parseFloat(userBalances.matured.btc) || 0;
-                        }
-                    }
-                    
-                    console.log(`Plans section - BTC Balances - Main: ${mainWalletBTC} BTC, Matured: ${maturedWalletBTC} BTC`);
                 } else {
-                    console.error('User fetch failed:', userResponse.status);
+                    console.error('Assets fetch failed:', assetsResponse.status);
                 }
             } catch (balanceError) {
-                console.warn('Could not fetch user BTC balances:', balanceError);
+                console.warn('Could not fetch user BTC assets:', balanceError);
             }
         }
+        
+        // Get current BTC price for USD conversion (from market data)
+        const btcPrice = currentBTCPrice || 43000;
+        const mainWalletUSD = mainWalletBTC * btcPrice;
+        const maturedWalletUSD = maturedWalletBTC * btcPrice;
+        
+        console.log(`Plan section - BTC USD Values - Main: $${mainWalletUSD.toLocaleString()}, Matured: $${maturedWalletUSD.toLocaleString()}, Total: $${(mainWalletUSD + maturedWalletUSD).toLocaleString()}`);
         
         renderEnhancedPlans(plansData.data?.plans || [], mainWalletBTC, maturedWalletBTC);
         
