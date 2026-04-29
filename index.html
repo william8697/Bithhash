@@ -7083,8 +7083,12 @@
     let currentModalAsset = null;
     let currentOrderTab = 'buy';
 
+    // Auto-fetch flag to stop fallback once backend responds
+    let backendIsResponding = false;
+    let fallbackInterval = null;
+
     // =============================================
-    // PRICES BY MARKET CAP SECTION - FETCH FROM BACKEND ONLY
+    // PRICES BY MARKET CAP SECTION - FETCH FROM BACKEND ONLY WITH AUTO FALLBACK
     // =============================================
     async function fetchMarketDataFromBackend() {
         try {
@@ -7093,6 +7097,14 @@
             if (response.ok) {
                 const data = await response.json();
                 if (data && data.data && Array.isArray(data.data) && data.data.length > 0) {
+                    // Backend is responding - stop fallback if active
+                    if (fallbackInterval) {
+                        clearInterval(fallbackInterval);
+                        fallbackInterval = null;
+                        console.log('Backend is responding - stopped fallback fetching');
+                    }
+                    backendIsResponding = true;
+                    
                     allMarketAssets = data.data.map(asset => ({
                         ...asset,
                         image: asset.image || getAssetLogo(asset.symbol) || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png'
@@ -7111,7 +7123,7 @@
                     document.getElementById('market-table').style.display = 'table';
                     document.getElementById('market-pagination').style.display = 'flex';
                     
-                    // Start polling
+                    // Start polling with backend data
                     if (marketDataInterval) clearInterval(marketDataInterval);
                     marketDataInterval = setInterval(() => fetchMarketDataFromBackend(), 30000);
                     return;
@@ -7124,9 +7136,15 @@
             
         } catch (error) {
             console.error('Error fetching market data from backend:', error);
+            backendIsResponding = false;
             
             // Show empty state with "data is refreshing soon" message
             showEmptyMarketState();
+            
+            // Start fallback fetching if not already running
+            if (!fallbackInterval) {
+                startFallbackFetching();
+            }
             
             if (apiRetryCount < MAX_RETRIES) {
                 apiRetryCount++;
@@ -7136,6 +7154,51 @@
                 console.warn('Max retries reached for market data');
             }
         }
+    }
+
+    function startFallbackFetching() {
+        if (fallbackInterval) clearInterval(fallbackInterval);
+        fallbackInterval = setInterval(async () => {
+            // Only fetch fallback if backend is not responding
+            if (!backendIsResponding) {
+                console.log('Backend still not responding, fetching fallback data...');
+                const fallbackData = await fetchFallbackMarketData();
+                if (fallbackData && fallbackData.length > 0) {
+                    allMarketAssets = fallbackData;
+                    filteredMarketAssets = [...allMarketAssets];
+                    applyMarketSearch();
+                    document.getElementById('market-empty-state').style.display = 'none';
+                    document.getElementById('market-table').style.display = 'table';
+                    document.getElementById('market-pagination').style.display = 'flex';
+                }
+            }
+        }, 15000);
+    }
+
+    async function fetchFallbackMarketData() {
+        // Try CoinGecko API as fallback (public API, no backend)
+        try {
+            const response = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=true&price_change_percentage=1h,24h,7d');
+            if (response.ok) {
+                const data = await response.json();
+                return data.map(asset => ({
+                    ...asset,
+                    image: asset.image,
+                    symbol: asset.symbol,
+                    name: asset.name,
+                    current_price: asset.current_price,
+                    price_change_percentage_1h_in_currency: asset.price_change_percentage_1h_in_currency,
+                    price_change_percentage_24h: asset.price_change_percentage_24h,
+                    price_change_percentage_7d_in_currency: asset.price_change_percentage_7d_in_currency,
+                    total_volume: asset.total_volume,
+                    market_cap: asset.market_cap,
+                    sparkline_in_7d: asset.sparkline_in_7d
+                }));
+            }
+        } catch (e) {
+            console.warn('CoinGecko fallback failed:', e);
+        }
+        return [];
     }
 
     function applyMarketSearch() {
@@ -7212,7 +7275,7 @@
     function renderMarketTable() {
         if (!filteredMarketAssets || filteredMarketAssets.length === 0) {
             const tbody = document.getElementById('market-table-body');
-            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:40px;">No assets found</div></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:40px;">No assets found</td></tr>';
             document.getElementById('market-page-info').textContent = `0/0`;
             document.getElementById('market-prev').disabled = true;
             document.getElementById('market-next').disabled = true;
@@ -7258,35 +7321,35 @@
             const sign7d = change7d >= 0 ? '+' : '';
             
             row.innerHTML = `
-                            <td>${globalIndex}</div>
-                            <td>
+                <td>${globalIndex}</td>
+                <td>
                     <div class="coin-cell">
                         <img src="${logo}" class="coin-logo" alt="${symbol}" onerror="this.src='https://assets.coingecko.com/coins/images/1/large/bitcoin.png'">
                         <span class="coin-name">${name}</span>
                         <span class="coin-symbol">${symbol.toUpperCase()}</span>
                     </div>
-                            </div>
-                            <td>${formatUSD(price)}</div>
+                </td>
+                <td>${formatUSD(price)}</td>
                 <td class="${change1h >= 0 ? 'price-positive' : 'price-negative'}">
                     <span class="price-change-indicator">${change1h >= 0 ? arrowUp : arrowDown}<span class="${change1h >= 0 ? 'price-positive' : 'price-negative'}">${sign1h}${change1h.toFixed(2)}%</span></span>
-                            </div>
+                </td>
                 <td class="${change24h >= 0 ? 'price-positive' : 'price-negative'}">
                     <span class="price-change-indicator">${change24h >= 0 ? arrowUp : arrowDown}<span class="${change24h >= 0 ? 'price-positive' : 'price-negative'}">${sign24h}${change24h.toFixed(2)}%</span></span>
-                            </div>
+                </td>
                 <td class="${change7d >= 0 ? 'price-positive' : 'price-negative'}">
                     <span class="price-change-indicator">${change7d >= 0 ? arrowUp : arrowDown}<span class="${change7d >= 0 ? 'price-positive' : 'price-negative'}">${sign7d}${change7d.toFixed(2)}%</span></span>
-                            </div>
-                            <td>${formatUSD(volume)}</div>
-                            <td>${formatUSD(marketCap)}</div>
+                </td>
+                <td>${formatUSD(volume)}</td>
+                <td>${formatUSD(marketCap)}</td>
                 <td class="sparkline-cell">
                     <div class="trend-chart" id="chart-${asset.id || index}"></div>
-                            </div>
-                            <td>
+                </td>
+                <td>
                     <div class="action-buttons">
                         <button class="btn-buy" onclick="event.stopPropagation(); openBuyModal('${symbol}')">Buy</button>
                         <button class="btn-sell" onclick="event.stopPropagation(); openSellModal('${symbol}')">Sell</button>
                     </div>
-                            </div>
+                </td>
             `;
             tbody.appendChild(row);
             
@@ -8198,7 +8261,7 @@ window.getCurrentInvestorCount = () => currentInvestorCount;
             // Load fiat currencies first for balance display
             await loadFiatCurrencies();
             
-            // Load market data (Prices by Market Cap) - from BACKEND ONLY
+            // Load market data (Prices by Market Cap) - from BACKEND ONLY with fallback
             await fetchMarketDataFromBackend();
             
             // Load loan balances if logged in
@@ -8206,7 +8269,7 @@ window.getCurrentInvestorCount = () => currentInvestorCount;
                 await loadLoanBalances();
             }
             
-            // Initialize Trending/Top Movers carousel
+            // Initialize Trending/Top Movers carousel with fallback
             initTrendingMovers();
             
             // Initialize video autoplay
@@ -8274,6 +8337,7 @@ window.getCurrentInvestorCount = () => currentInvestorCount;
     // Clean up intervals on page unload
     window.addEventListener('beforeunload', function() {
         if (marketDataInterval) clearInterval(marketDataInterval);
+        if (fallbackInterval) clearInterval(fallbackInterval);
         stopRealTimeUpdates();
     });
 
@@ -9792,12 +9856,14 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
     }
     
     // =============================================
-    // TRENDING / TOP MOVERS CAROUSEL IMPLEMENTATION - 5 PER PAGE
+    // TRENDING / TOP MOVERS CAROUSEL IMPLEMENTATION - 5 PER PAGE WITH FALLBACK
     // =============================================
     let currentTrendingData = [];
     let activeTab = 'trending';
     let swiperInstance = null;
     let updateInterval = null;
+    let trendingBackendIsResponding = false;
+    let trendingFallbackInterval = null;
 
     async function fetchTrendingData() {
         try {
@@ -9806,6 +9872,13 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
             if (response.ok) {
                 const data = await response.json();
                 if (data && data.data && Array.isArray(data.data)) {
+                    // Backend is responding - stop fallback if active
+                    if (trendingFallbackInterval) {
+                        clearInterval(trendingFallbackInterval);
+                        trendingFallbackInterval = null;
+                        console.log('Trending: Backend responding - stopped fallback fetching');
+                    }
+                    trendingBackendIsResponding = true;
                     return data.data.slice(0, 50); // fetch up to 50 for pagination
                 } else {
                     throw new Error('No trending data from backend');
@@ -9815,9 +9888,35 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
             }
         } catch (error) {
             console.error('Error fetching trending data from backend', error);
-            // Show empty state or no data - no fallback mock data
+            trendingBackendIsResponding = false;
+            // If fallback not running, start it
+            if (!trendingFallbackInterval) {
+                startTrendingFallbackFetching();
+            }
+            // Return empty array to trigger fallback
             return [];
         }
+    }
+
+    function startTrendingFallbackFetching() {
+        if (trendingFallbackInterval) clearInterval(trendingFallbackInterval);
+        trendingFallbackInterval = setInterval(async () => {
+            if (!trendingBackendIsResponding) {
+                console.log('Trending: Backend still not responding, fetching fallback data...');
+                const fallbackData = await fetchFallbackMarketData();
+                if (fallbackData && fallbackData.length > 0) {
+                    allTrendingAssets = fallbackData.slice(0, 50);
+                    filteredTrendingAssets = [...allTrendingAssets];
+                    trendingPage = 1;
+                    if (allTrendingAssets && allTrendingAssets.length > 0) {
+                        renderTrendingCarousel(filteredTrendingAssets);
+                    } else {
+                        const wrapper = document.getElementById('swiper-wrapper');
+                        if (wrapper) wrapper.innerHTML = '<div class="empty-market-message" style="padding:40px; text-align:center;">Data is refreshing soon</div>';
+                    }
+                }
+            }
+        }, 15000);
     }
 
     let trendingPage = 1;
@@ -9834,7 +9933,7 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
         if (allTrendingAssets && allTrendingAssets.length > 0) {
             renderTrendingCarousel(filteredTrendingAssets);
         } else {
-            // Show empty state in carousel
+            // Show empty state in carousel, fallback will try to fetch
             const wrapper = document.getElementById('swiper-wrapper');
             if (wrapper) wrapper.innerHTML = '<div class="empty-market-message" style="padding:40px; text-align:center;">Data is refreshing soon</div>';
         }
@@ -9923,11 +10022,14 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
         const totalPages = Math.ceil(itemsToShow.length / trendingPerPage);
         let paginationDiv = document.getElementById('trending-pagination');
         if (!paginationDiv) {
-            paginationDiv = document.createElement('div');
+
+
+                paginationDiv = document.createElement('div');
             paginationDiv.id = 'trending-pagination';
             paginationDiv.className = 'crypto-pagination-below';
             paginationDiv.style.marginTop = '20px';
-            document.querySelector('#trending-movers .container').appendChild(paginationDiv);
+            const container = document.querySelector('#trending-movers .container');
+            if (container) container.appendChild(paginationDiv);
         }
         paginationDiv.innerHTML = `
             <button class="pagination-btn" id="trending-prev" ${trendingPage === 1 ? 'disabled' : ''}><i class="fas fa-chevron-left"></i></button>
@@ -9938,23 +10040,32 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
             </div>
         `;
         
-        document.getElementById('trending-prev')?.addEventListener('click', () => {
-            if (trendingPage > 1) {
-                trendingPage--;
-                renderTrendingCarousel(filteredTrendingAssets);
-            }
-        });
-        document.getElementById('trending-next')?.addEventListener('click', () => {
-            const items = activeTab === 'trending' ? filteredTrendingAssets : getTopMovers(filteredTrendingAssets);
-            const total = Math.ceil(items.length / trendingPerPage);
-            if (trendingPage < total) {
-                trendingPage++;
-                renderTrendingCarousel(filteredTrendingAssets);
-            }
-        });
+        const prevBtnTrending = document.getElementById('trending-prev');
+        const nextBtnTrending = document.getElementById('trending-next');
+        if (prevBtnTrending) {
+            prevBtnTrending.addEventListener('click', () => {
+                if (trendingPage > 1) {
+                    trendingPage--;
+                    renderTrendingCarousel(filteredTrendingAssets);
+                }
+            });
+        }
+        if (nextBtnTrending) {
+            nextBtnTrending.addEventListener('click', () => {
+                const items = activeTab === 'trending' ? filteredTrendingAssets : getTopMovers(filteredTrendingAssets);
+                const total = Math.ceil(items.length / trendingPerPage);
+                if (trendingPage < total) {
+                    trendingPage++;
+                    renderTrendingCarousel(filteredTrendingAssets);
+                }
+            });
+        }
         const searchInputTrending = document.getElementById('trending-search');
         if (searchInputTrending) {
-            searchInputTrending.addEventListener('input', (e) => {
+            // Remove existing listener to avoid duplicates
+            const newSearchInput = searchInputTrending.cloneNode(true);
+            searchInputTrending.parentNode.replaceChild(newSearchInput, searchInputTrending);
+            newSearchInput.addEventListener('input', (e) => {
                 trendingSearchTerm = e.target.value;
                 applyTrendingSearch();
             });
@@ -9970,14 +10081,17 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
         });
         // attach click handlers for Buy button and card redirect
         document.querySelectorAll('.card').forEach(cardEl => {
-            cardEl.addEventListener('click', (e) => {
+            // Remove existing listeners to avoid duplicates
+            const newCardEl = cardEl.cloneNode(true);
+            cardEl.parentNode.replaceChild(newCardEl, cardEl);
+            newCardEl.addEventListener('click', (e) => {
                 if (e.target.classList.contains('btn-buy-small')) {
                     e.stopPropagation();
-                    const symbol = cardEl.getAttribute('data-symbol');
+                    const symbol = newCardEl.getAttribute('data-symbol');
                     if (symbol) openBuyModal(symbol);
                     return;
                 }
-                const symbol = cardEl.getAttribute('data-symbol');
+                const symbol = newCardEl.getAttribute('data-symbol');
                 if (symbol) {
                     const sessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
                     window.location.href = `trading.html?symbol=${symbol}&session=${sessionId}&t=${Date.now()}`;
@@ -10009,22 +10123,29 @@ const totalBTCUSD = mainWalletUSD + maturedWalletUSD;
         ctx.fill();
     }
 
-    document.getElementById('trendingTabBtn')?.addEventListener('click', () => {
-        activeTab = 'trending';
-        trendingPage = 1;
-        document.getElementById('trendingTabBtn').classList.add('active');
-        document.getElementById('topMoversTabBtn').classList.remove('active');
-        if (filteredTrendingAssets.length) renderTrendingCarousel(filteredTrendingAssets);
-        else initTrendingMovers();
-    });
-    document.getElementById('topMoversTabBtn')?.addEventListener('click', () => {
-        activeTab = 'movers';
-        trendingPage = 1;
-        document.getElementById('topMoversTabBtn').classList.add('active');
-        document.getElementById('trendingTabBtn').classList.remove('active');
-        if (filteredTrendingAssets.length) renderTrendingCarousel(filteredTrendingAssets);
-        else initTrendingMovers();
-    });
+    // Tab switching for Trending/Top Movers
+    const trendingTabBtn = document.getElementById('trendingTabBtn');
+    const topMoversTabBtn = document.getElementById('topMoversTabBtn');
+    if (trendingTabBtn) {
+        trendingTabBtn.addEventListener('click', () => {
+            activeTab = 'trending';
+            trendingPage = 1;
+            trendingTabBtn.classList.add('active');
+            if (topMoversTabBtn) topMoversTabBtn.classList.remove('active');
+            if (filteredTrendingAssets.length) renderTrendingCarousel(filteredTrendingAssets);
+            else initTrendingMovers();
+        });
+    }
+    if (topMoversTabBtn) {
+        topMoversTabBtn.addEventListener('click', () => {
+            activeTab = 'movers';
+            trendingPage = 1;
+            topMoversTabBtn.classList.add('active');
+            if (trendingTabBtn) trendingTabBtn.classList.remove('active');
+            if (filteredTrendingAssets.length) renderTrendingCarousel(filteredTrendingAssets);
+            else initTrendingMovers();
+        });
+    }
 
     window.showNotification = showNotification;
     
