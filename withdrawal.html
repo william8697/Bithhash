@@ -2023,7 +2023,7 @@
                                 <tr>
                                     <td colspan="6" style="text-align: center; padding: 30px;">
                                         Loading withdrawal history...
-                                    </table>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -2228,10 +2228,12 @@
             balanceAmount: 0,
             mainBalance: 0,
             maturedBalance: 0,
+            activeBalance: 0,
             userPreferences: { displayAsset: 'btc' },
             currentPrices: {},
             selectedAsset: null,
-            cryptoAssets: [], // From /api/users/assets (crypto with balances)
+            userAssetBalances: {}, // From /api/users/assets
+            userPortfolio: [], // Full portfolio from /api/users/assets
             otpTimer: null,
             resendTimer: null,
             currentUserEmail: '',
@@ -2269,7 +2271,7 @@
         const assetsPerPage = 5;
 
         // =============================================
-        // ENHANCED NOTIFICATION FUNCTION (Copied from cloudmining.html)
+        // ENHANCED NOTIFICATION FUNCTION (Identical to dashboard.html)
         // =============================================
         function showNotification(type, title, message) {
             Swal.fire({
@@ -2340,13 +2342,13 @@
                 await checkUserPreferences();
                 
                 // =============================================
-                // 1. ASSET SECTION - Copy from dashboard.html
-                // Fetches from /api/users/assets (crypto assets with balances)
+                // 1. ASSET SECTION - EXACT SAME AS DASHBOARD
+                // Fetches from /api/users/assets (same as dashboard)
                 // =============================================
-                await loadCryptoAssets();
+                await loadAssetBalancesFromRest();
                 
                 // =============================================
-                // 2. BALANCE SECTION - Copy from dashboard.html
+                // 2. BALANCE SECTION - EXACT SAME AS DASHBOARD
                 // Fetches from /api/users/balances (main + matured in USD)
                 // =============================================
                 await loadUserBalances();
@@ -2403,75 +2405,66 @@
             document.querySelector(`.balance-card[data-balance-type="${type}"]`).classList.add('active');
         }
 
-        async function loadCryptoAssets() {
+        // =============================================
+        // ASSET BALANCES - EXACT SAME AS DASHBOARD
+        // Fetches from /api/users/assets endpoint
+        // =============================================
+        async function loadAssetBalancesFromRest() {
             try {
                 const token = localStorage.getItem('jwtToken');
                 if (!token) return;
                 
-                // Use the new endpoint
-                const response = await fetch('https://bithash-backend-kg7j.onrender.com/api/withdrawal/available-cryptos', {
+                const response = await fetch('https://bithash-backend-kg7j.onrender.com/api/users/assets', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 
                 if (response.ok) {
-                    const result = await response.json();
-                    const cryptos = result.data?.cryptos || [];
+                    const assetsData = await response.json();
                     
-                    console.log('Cryptos with balance:', cryptos);
-                    
-                    if (cryptos.length === 0) {
-                        console.log('No cryptos with balance found');
-                        showNoAssetsMessage();
-                        return;
-                    }
-                    
-                    // Store in AppState
-                    AppState.cryptoAssets = cryptos.map(crypto => ({
-                        symbol: crypto.code.toLowerCase(),
-                        name: crypto.name,
-                        logo: crypto.logoUrl,
-                        totalAmount: crypto.balance,
-                        currentValue: crypto.usdValue,
-                        network: crypto.network,
-                        mainBalance: crypto.mainBalance,
-                        maturedBalance: crypto.maturedBalance,
-                        activeBalance: crypto.activeBalance,
-                        currentPrice: crypto.currentPrice
-                    }));
-                    
-                    // Update topAssets with balance info
-                    topAssets.forEach(asset => {
-                        const cryptoAsset = AppState.cryptoAssets.find(c => c.symbol === asset.symbol);
-                        if (cryptoAsset) {
-                            asset.hasBalance = true;
-                            asset.balance = cryptoAsset.totalAmount;
-                            asset.usdValue = cryptoAsset.currentValue;
-                        } else {
-                            asset.hasBalance = false;
-                            asset.balance = 0;
-                        }
+                    // Store in AppState (same structure as dashboard)
+                    AppState.userAssetBalances = {};
+                    assetsData.forEach(asset => {
+                        AppState.userAssetBalances[asset.symbol] = asset.balance;
                     });
                     
-                    // Set default selected asset (first one with balance)
-                    if (AppState.cryptoAssets.length > 0) {
-                        const firstAsset = topAssets.find(a => a.symbol === AppState.cryptoAssets[0].symbol);
-                        AppState.selectedAsset = firstAsset || topAssets[0];
-                        updateAssetUI(AppState.selectedAsset);
-                    }
+                    // Build portfolio (same as dashboard)
+                    AppState.userPortfolio = assetsData.map(asset => {
+                        const assetId = topAssets.find(a => a.symbol === asset.symbol)?.id;
+                        const assetPrice = AppState.currentPrices[assetId]?.usd || 0;
+                        const currentValue = asset.balance * assetPrice;
+                        
+                        return {
+                            asset: asset.symbol,
+                            totalAmount: asset.balance,
+                            currentValue: currentValue,
+                            averageBuyingPrice: asset.avgPrice || 0,
+                            unrealizedProfitLoss: asset.unrealizedPnl || 0,
+                            unrealizedPercentage: asset.unrealizedPnlPercent || 0,
+                            change24h: AppState.currentPrices[assetId]?.usd_24h_change || 0,
+                            transactions: asset.transactions || [],
+                            currentPrice: assetPrice
+                        };
+                    });
                     
-                    // Update asset selector list
+                    // Update asset selector list with actual crypto balances
                     updateAssetSelectorList();
                     
-                    // Update balance display
+                    // Set default selected asset (first one with balance)
+                    if (AppState.userPortfolio.length > 0) {
+                        const firstAssetSymbol = AppState.userPortfolio[0].asset;
+                        const selectedAsset = topAssets.find(a => a.symbol === firstAssetSymbol) || topAssets[0];
+                        AppState.selectedAsset = selectedAsset;
+                        updateAssetUI(selectedAsset);
+                    }
+                    
+                    // Update balance display to show crypto balances
                     await updateBalanceDisplay();
                     
                 } else {
-                    console.error('Failed to load cryptos:', response.status);
-                    AppState.cryptoAssets = [];
+                    console.error('Failed to load assets:', response.status);
                 }
             } catch (error) {
-                console.error('Error loading crypto assets:', error);
-                AppState.cryptoAssets = [];
+                console.error('Error loading asset balances:', error);
             }
         }
         
@@ -2503,16 +2496,26 @@
             return logos[symbol] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
         }
 
-        // Update asset selector list - ONLY shows assets from /api/users/assets
+        // Update asset selector list - shows assets with actual balances from /api/users/assets
         function updateAssetSelectorList() {
-            // Build filteredAssets from AppState.cryptoAssets (same as dashboard)
-            filteredAssets = AppState.cryptoAssets.map(asset => ({
-                id: asset.symbol,
-                symbol: asset.symbol,
-                name: asset.name,
-                logo: asset.logo,
-                balance: asset.totalAmount
-            }));
+            // Build filteredAssets from userPortfolio (actual crypto balances from /api/users/assets)
+            filteredAssets = AppState.userPortfolio.map(asset => {
+                const assetInfo = topAssets.find(a => a.symbol === asset.asset) || {
+                    id: asset.asset,
+                    symbol: asset.asset,
+                    name: asset.asset.toUpperCase(),
+                    logo: getAssetLogo(asset.asset),
+                    network: 'Blockchain'
+                };
+                return {
+                    id: assetInfo.id,
+                    symbol: asset.asset,
+                    name: assetInfo.name,
+                    logo: assetInfo.logo,
+                    balance: asset.totalAmount,
+                    network: assetInfo.network
+                };
+            });
             
             assetPage = 1;
             renderAssetSelectorList();
@@ -2532,9 +2535,6 @@
             }
             
             pageAssets.forEach(asset => {
-                // Find the full asset data from cryptoAssets for balance info
-                const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
-                
                 const item = document.createElement('div');
                 item.className = `asset-selector-item ${asset.symbol === AppState.userPreferences.displayAsset ? 'selected' : ''}`;
                 item.onclick = () => selectWithdrawalAsset(asset);
@@ -2543,7 +2543,8 @@
                     <div class="asset-selector-item-info">
                         <div class="asset-selector-item-name">${asset.name}</div>
                         <div class="asset-selector-item-symbol">${asset.symbol.toUpperCase()}</div>
-                        ${cryptoAsset ? `<div style="font-size: 0.75rem; color: var(--accent);">Balance: ${cryptoAsset.totalAmount.toFixed(6)} ${asset.symbol.toUpperCase()}</div>` : ''}
+                        <div style="font-size: 0.75rem; color: var(--accent);">Balance: ${asset.balance.toFixed(6)} ${asset.symbol.toUpperCase()}</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">Network: ${asset.network}</div>
                     </div>
                 `;
                 list.appendChild(item);
@@ -2564,7 +2565,7 @@
                 symbol: asset.symbol,
                 name: asset.name,
                 logo: asset.logo,
-                network: 'Blockchain'
+                network: asset.network || 'Blockchain'
             };
             
             AppState.selectedAsset = fullAsset;
@@ -2591,9 +2592,8 @@
             closeModal('asset-selector-modal');
         }
 
-        
         // =============================================
-        // BALANCE SECTION - EXACT COPY FROM DASHBOARD.HTML
+        // BALANCE SECTION - EXACT SAME AS DASHBOARD
         // Fetches from /api/users/balances endpoint
         // =============================================
         async function loadUserBalances() {
@@ -2611,6 +2611,7 @@
                     // Extract main and matured balances (same as dashboard)
                     AppState.mainBalance = parseFloat(data.main) || 0;
                     AppState.maturedBalance = parseFloat(data.matured) || 0;
+                    AppState.activeBalance = parseFloat(data.active) || 0;
                     AppState.balanceAmount = AppState.mainBalance + AppState.maturedBalance;
                     
                     // Update UI
@@ -2654,12 +2655,11 @@
             await fetchCoinGeckoPrices();
             
             const asset = AppState.selectedAsset || topAssets[0];
-            const assetPrice = await getAssetPrice(asset.id);
             
             // Get BTC price for secondary display
             const btcPrice = await getAssetPrice('bitcoin');
             
-            // Calculate balances in BTC equivalent (fluctuates in real-time)
+            // Calculate balances in BTC equivalent (fluctuates in real-time - same as dashboard)
             const mainBalanceBtc = AppState.mainBalance / btcPrice;
             const maturedBalanceBtc = AppState.maturedBalance / btcPrice;
             const availableBalanceBtc = AppState.balanceAmount / btcPrice;
@@ -2669,19 +2669,28 @@
             document.getElementById('matured-balance-card').textContent = formatUSD(AppState.maturedBalance);
             document.getElementById('available-balance-card').textContent = formatUSD(AppState.balanceAmount);
             
-            // Update BTC secondary displays (fluctuates)
+            // Update BTC secondary displays (fluctuates - same as dashboard)
             document.getElementById('balance-secondary-text-card').textContent = `${formatNumber(mainBalanceBtc)} BTC`;
             document.getElementById('matured-balance-secondary-text').textContent = `${formatNumber(maturedBalanceBtc)} BTC`;
             document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
             
-            // Update asset-specific balance display
-            const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
-            if (cryptoAsset && cryptoAsset.totalAmount > 0) {
+            // Update asset-specific balance display using ACTUAL crypto balance from /api/users/assets
+            const userAsset = AppState.userPortfolio.find(a => a.asset === asset.symbol);
+            if (userAsset && userAsset.totalAmount > 0) {
                 const assetBalanceElement = document.getElementById('asset-balance-display');
                 if (assetBalanceElement) {
                     assetBalanceElement.innerHTML = `
                         <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
-                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(cryptoAsset.totalAmount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(cryptoAsset.currentValue)})
+                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(userAsset.totalAmount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(userAsset.currentValue)})
+                        </div>
+                    `;
+                }
+            } else {
+                const assetBalanceElement = document.getElementById('asset-balance-display');
+                if (assetBalanceElement) {
+                    assetBalanceElement.innerHTML = `
+                        <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
+                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> 0.00000000 ${asset.symbol.toUpperCase()} ($0.00)
                         </div>
                     `;
                 }
@@ -3469,7 +3478,6 @@
                 routingNumber: null
             };
             
-            // API endpoint changed from 'asset' to 'spot'
             fetch('https://bithash-backend-kg7j.onrender.com/api/withdrawals/spot', {
                 method: 'POST',
                 headers: {
@@ -3486,7 +3494,7 @@
                             `Your withdrawal request for $${usdAmount.toFixed(2)} (${assetAmount.toFixed(8)} ${asset.symbol.toUpperCase()}) has been submitted successfully! Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
                         loadUserBalances();
-                        loadCryptoAssets();
+                        loadAssetBalancesFromRest();
                         loadWithdrawalHistory();
                         
                         document.getElementById('asset-withdraw-amount').value = '';
@@ -3546,7 +3554,7 @@
                             `Your bank withdrawal request for $${usdAmount.toFixed(2)} has been submitted successfully! Funds will be transferred to ${bankName} account ending in ${accountNumber.slice(-4)} within 3-5 business days. Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
                         loadUserBalances();
-                        loadCryptoAssets();
+                        loadAssetBalancesFromRest();
                         loadWithdrawalHistory();
                         
                         document.getElementById('bank-withdraw-amount').value = '';
@@ -3640,7 +3648,7 @@
                             <td colspan="6" style="text-align: center; padding: 30px;">
                                 No withdrawal history found
                                                         </td>
-                          </td>
+                          </tr>
                     `;
                     return;
                 }
@@ -3746,12 +3754,26 @@
         function searchAssets() {
             const searchTerm = document.getElementById('asset-selector-search').value.toLowerCase();
             
-            // Filter from assets that have balance (from /api/users/assets)
-            const availableSymbols = AppState.cryptoAssets.map(a => a.symbol);
-            const availableTopAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
-            filteredAssets = availableTopAssets.filter(a => 
-                a.name.toLowerCase().includes(searchTerm) || 
-                a.symbol.toLowerCase().includes(searchTerm)
+            // Filter from assets that have balance (from userPortfolio)
+            filteredAssets = AppState.userPortfolio.map(asset => {
+                const assetInfo = topAssets.find(a => a.symbol === asset.asset) || {
+                    id: asset.asset,
+                    symbol: asset.asset,
+                    name: asset.asset.toUpperCase(),
+                    logo: getAssetLogo(asset.asset),
+                    network: 'Blockchain'
+                };
+                return {
+                    id: assetInfo.id,
+                    symbol: asset.asset,
+                    name: assetInfo.name,
+                    logo: assetInfo.logo,
+                    balance: asset.totalAmount,
+                    network: assetInfo.network
+                };
+            }).filter(asset => 
+                asset.name.toLowerCase().includes(searchTerm) || 
+                asset.symbol.toLowerCase().includes(searchTerm)
             );
             
             assetPage = 1;
