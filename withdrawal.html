@@ -26,6 +26,9 @@
     <!-- SweetAlert2 for neat popups -->
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    
     <style>
         /* ============================================= */
         /* BYBIT / CRYPTO.COM INSPIRED COLOR THEME */
@@ -832,7 +835,7 @@
             color: var(--text-secondary);
         }
 
-        /* Asset Selector Modal - Updated */
+        /* Asset Selector Modal */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -987,7 +990,7 @@
             border-radius: 12px;
         }
 
-        /* Two-Step Verification Modal - Updated */
+        /* Two-Step Verification Modal */
         .two-step-modal {
             position: fixed;
             top: 0;
@@ -1303,7 +1306,7 @@
             border-color: var(--accent);
         }
 
-        /* Processing Modal - Updated */
+        /* Processing Modal */
         .processing-content {
             text-align: center;
             padding: 30px 20px;
@@ -2218,22 +2221,19 @@
         });
         
         // =============================================
-        // GLOBAL STATE
+        // GLOBAL STATE - Same as dashboard
         // =============================================
         const AppState = {
             userData: null,
             currentAssetRate: 0,
             currentAssetRateChange: 0,
             MIN_WITHDRAWAL: 100,
-            balanceAmount: 0,
-            mainBalance: 0,
-            maturedBalance: 0,
-            activeBalance: 0,
             userPreferences: { displayAsset: 'btc' },
             currentPrices: {},
             selectedAsset: null,
-            userAssetBalances: {}, // From /api/users/assets
-            userPortfolio: [], // Full portfolio from /api/users/assets
+            cryptoAssets: [], // From /api/users/assets (crypto with balances)
+            userBalances: { main: 0, active: 0, matured: 0 },
+            socket: null,
             otpTimer: null,
             resendTimer: null,
             currentUserEmail: '',
@@ -2247,7 +2247,7 @@
             currentTempToken: null
         };
 
-        // Complete asset list for reference
+        // Complete asset list for reference - Same as dashboard
         const topAssets = [
             { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', network: 'Bitcoin' },
             { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', network: 'Ethereum (ERC20)' },
@@ -2271,7 +2271,7 @@
         const assetsPerPage = 5;
 
         // =============================================
-        // ENHANCED NOTIFICATION FUNCTION (Identical to dashboard.html)
+        // ENHANCED NOTIFICATION FUNCTION - Same as dashboard
         // =============================================
         function showNotification(type, title, message) {
             Swal.fire({
@@ -2339,18 +2339,16 @@
             setTimeout(async function() {
                 document.getElementById('loading-overlay').classList.add('hidden');
                 await checkAuthState();
+                
+                // Initialize Socket.IO - Same as dashboard
+                initSocketIO();
+                
                 await checkUserPreferences();
                 
-                // =============================================
-                // 1. ASSET SECTION - EXACT SAME AS DASHBOARD
-                // Fetches from /api/users/assets (same as dashboard)
-                // =============================================
-                await loadAssetBalancesFromRest();
+                // Load crypto assets from /api/users/assets - Same as dashboard
+                await loadCryptoAssets();
                 
-                // =============================================
-                // 2. BALANCE SECTION - EXACT SAME AS DASHBOARD
-                // Fetches from /api/users/balances (main + matured in USD)
-                // =============================================
+                // Load user balances from /api/users/balances - Same as dashboard
                 await loadUserBalances();
                 
                 await loadWithdrawalHistory();
@@ -2362,7 +2360,7 @@
                 initHeaderScrollEffect();
                 document.getElementById('current-year').textContent = new Date().getFullYear();
                 
-                // Start price refresh every 60 seconds for real-time fluctuations
+                // Start price refresh every 60 seconds - Same as dashboard
                 setInterval(async () => {
                     await fetchCoinGeckoPrices();
                     await updateBalanceDisplay();
@@ -2406,10 +2404,10 @@
         }
 
         // =============================================
-        // ASSET BALANCES - EXACT SAME AS DASHBOARD
+        // LOAD CRYPTO ASSETS - SAME AS DASHBOARD
         // Fetches from /api/users/assets endpoint
         // =============================================
-        async function loadAssetBalancesFromRest() {
+        async function loadCryptoAssets() {
             try {
                 const token = localStorage.getItem('jwtToken');
                 if (!token) return;
@@ -2421,54 +2419,62 @@
                 if (response.ok) {
                     const assetsData = await response.json();
                     
-                    // Store in AppState (same structure as dashboard)
-                    AppState.userAssetBalances = {};
-                    assetsData.forEach(asset => {
-                        AppState.userAssetBalances[asset.symbol] = asset.balance;
+                    console.log('Assets data from /api/users/assets:', assetsData);
+                    
+                    // Store in AppState - Same structure as dashboard
+                    AppState.cryptoAssets = assetsData.map(asset => ({
+                        symbol: asset.symbol,
+                        name: getAssetName(asset.symbol),
+                        logo: getAssetLogo(asset.symbol),
+                        totalAmount: asset.balance,
+                        currentValue: asset.balance * (AppState.currentPrices[getAssetId(asset.symbol)]?.usd || 0),
+                        network: assetNetworks[asset.symbol] || 'Blockchain',
+                        mainBalance: asset.mainBalance || 0,
+                        maturedBalance: asset.maturedBalance || 0,
+                        activeBalance: asset.activeBalance || 0,
+                        currentPrice: AppState.currentPrices[getAssetId(asset.symbol)]?.usd || 0
+                    }));
+                    
+                    // Update topAssets with balance info
+                    topAssets.forEach(asset => {
+                        const cryptoAsset = AppState.cryptoAssets.find(c => c.symbol === asset.symbol);
+                        if (cryptoAsset) {
+                            asset.hasBalance = true;
+                            asset.balance = cryptoAsset.totalAmount;
+                            asset.usdValue = cryptoAsset.currentValue;
+                        } else {
+                            asset.hasBalance = false;
+                            asset.balance = 0;
+                        }
                     });
                     
-                    // Build portfolio (same as dashboard)
-                    AppState.userPortfolio = assetsData.map(asset => {
-                        const assetId = topAssets.find(a => a.symbol === asset.symbol)?.id;
-                        const assetPrice = AppState.currentPrices[assetId]?.usd || 0;
-                        const currentValue = asset.balance * assetPrice;
-                        
-                        return {
-                            asset: asset.symbol,
-                            totalAmount: asset.balance,
-                            currentValue: currentValue,
-                            averageBuyingPrice: asset.avgPrice || 0,
-                            unrealizedProfitLoss: asset.unrealizedPnl || 0,
-                            unrealizedPercentage: asset.unrealizedPnlPercent || 0,
-                            change24h: AppState.currentPrices[assetId]?.usd_24h_change || 0,
-                            transactions: asset.transactions || [],
-                            currentPrice: assetPrice
-                        };
-                    });
-                    
-                    // Update asset selector list with actual crypto balances
-                    updateAssetSelectorList();
-                    
-                    // Set default selected asset (first one with balance)
-                    if (AppState.userPortfolio.length > 0) {
-                        const firstAssetSymbol = AppState.userPortfolio[0].asset;
-                        const selectedAsset = topAssets.find(a => a.symbol === firstAssetSymbol) || topAssets[0];
-                        AppState.selectedAsset = selectedAsset;
-                        updateAssetUI(selectedAsset);
+                    // Set default selected asset (first one with balance or BTC)
+                    if (AppState.cryptoAssets.length > 0) {
+                        const firstAsset = topAssets.find(a => a.symbol === AppState.cryptoAssets[0].symbol);
+                        AppState.selectedAsset = firstAsset || topAssets[0];
+                        updateAssetUI(AppState.selectedAsset);
+                    } else {
+                        AppState.selectedAsset = topAssets[0];
+                        updateAssetUI(topAssets[0]);
                     }
                     
-                    // Update balance display to show crypto balances
+                    // Update asset selector list
+                    updateAssetSelectorList();
+                    
+                    // Update balance display
                     await updateBalanceDisplay();
                     
                 } else {
-                    console.error('Failed to load assets:', response.status);
+                    console.error('Failed to load crypto assets:', response.status);
+                    AppState.cryptoAssets = [];
                 }
             } catch (error) {
-                console.error('Error loading asset balances:', error);
+                console.error('Error loading crypto assets:', error);
+                AppState.cryptoAssets = [];
             }
         }
         
-        // Helper to get asset name (same as dashboard)
+        // Helper functions - Same as dashboard
         function getAssetName(symbol) {
             const names = {
                 'btc': 'Bitcoin', 'eth': 'Ethereum', 'usdt': 'Tether', 'bnb': 'BNB',
@@ -2478,8 +2484,7 @@
             };
             return names[symbol] || symbol.toUpperCase();
         }
-
-        // Helper to get asset logo (same as dashboard)
+        
         function getAssetLogo(symbol) {
             const logos = {
                 'btc': 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png',
@@ -2495,32 +2500,37 @@
             };
             return logos[symbol] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
         }
-
-        // Update asset selector list - shows assets with actual balances from /api/users/assets
+        
+        function getAssetId(symbol) {
+            const mapping = {
+                'btc': 'bitcoin', 'eth': 'ethereum', 'usdt': 'tether', 'bnb': 'binancecoin',
+                'sol': 'solana', 'usdc': 'usd-coin', 'xrp': 'xrp', 'doge': 'dogecoin',
+                'ada': 'cardano', 'shib': 'shiba-inu', 'avax': 'avalanche-2', 'dot': 'polkadot',
+                'trx': 'tron', 'ltc': 'litecoin'
+            };
+            return mapping[symbol] || symbol;
+        }
+        
+        const assetNetworks = {
+            'btc': 'Bitcoin', 'eth': 'Ethereum', 'usdt': 'Tron (TRC-20)', 'bnb': 'BNB Smart Chain',
+            'sol': 'Solana', 'usdc': 'Ethereum (ERC-20)', 'xrp': 'XRP Ledger', 'doge': 'Dogecoin',
+            'ada': 'Cardano', 'shib': 'Ethereum (ERC-20)', 'avax': 'Avalanche C-Chain', 'dot': 'Polkadot',
+            'trx': 'TRON', 'link': 'Ethereum (ERC-20)', 'matic': 'Polygon', 'ltc': 'Litecoin'
+        };
+        
+        // Update asset selector list - Only shows assets from /api/users/assets
         function updateAssetSelectorList() {
-            // Build filteredAssets from userPortfolio (actual crypto balances from /api/users/assets)
-            filteredAssets = AppState.userPortfolio.map(asset => {
-                const assetInfo = topAssets.find(a => a.symbol === asset.asset) || {
-                    id: asset.asset,
-                    symbol: asset.asset,
-                    name: asset.asset.toUpperCase(),
-                    logo: getAssetLogo(asset.asset),
-                    network: 'Blockchain'
-                };
-                return {
-                    id: assetInfo.id,
-                    symbol: asset.asset,
-                    name: assetInfo.name,
-                    logo: assetInfo.logo,
-                    balance: asset.totalAmount,
-                    network: assetInfo.network
-                };
-            });
+            const availableSymbols = AppState.cryptoAssets.map(a => a.symbol);
+            filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
+            
+            if (filteredAssets.length === 0) {
+                filteredAssets = [...topAssets];
+            }
             
             assetPage = 1;
             renderAssetSelectorList();
         }
-
+        
         function renderAssetSelectorList() {
             const start = (assetPage - 1) * assetsPerPage;
             const end = start + assetsPerPage;
@@ -2530,21 +2540,22 @@
             list.innerHTML = '';
             
             if (pageAssets.length === 0) {
-                list.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">No crypto assets with balance</div>';
+                list.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">No crypto assets found</div>';
                 return;
             }
             
             pageAssets.forEach(asset => {
+                const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
+                
                 const item = document.createElement('div');
-                item.className = `asset-selector-item ${asset.symbol === AppState.userPreferences.displayAsset ? 'selected' : ''}`;
+                item.className = `asset-selector-item ${asset.symbol === AppState.selectedAsset?.symbol ? 'selected' : ''}`;
                 item.onclick = () => selectWithdrawalAsset(asset);
                 item.innerHTML = `
                     <img src="${asset.logo}" alt="${asset.symbol}">
                     <div class="asset-selector-item-info">
                         <div class="asset-selector-item-name">${asset.name}</div>
                         <div class="asset-selector-item-symbol">${asset.symbol.toUpperCase()}</div>
-                        <div style="font-size: 0.75rem; color: var(--accent);">Balance: ${asset.balance.toFixed(6)} ${asset.symbol.toUpperCase()}</div>
-                        <div style="font-size: 0.7rem; color: var(--text-muted);">Network: ${asset.network}</div>
+                        ${cryptoAsset ? `<div style="font-size: 0.75rem; color: var(--accent);">Balance: ${cryptoAsset.totalAmount.toFixed(6)} ${asset.symbol.toUpperCase()}</div>` : ''}
                     </div>
                 `;
                 list.appendChild(item);
@@ -2555,22 +2566,17 @@
             document.getElementById('asset-selector-prev').disabled = assetPage === 1;
             document.getElementById('asset-selector-next').disabled = assetPage === totalPages || totalPages === 0;
         }
-
+        
         async function selectWithdrawalAsset(asset) {
-            AppState.userPreferences.displayAsset = asset.symbol;
-            
-            // Find the full asset data
-            const fullAsset = topAssets.find(a => a.symbol === asset.symbol) || {
-                id: asset.symbol,
-                symbol: asset.symbol,
-                name: asset.name,
-                logo: asset.logo,
-                network: asset.network || 'Blockchain'
-            };
-            
-            AppState.selectedAsset = fullAsset;
-            
-            // Save preference
+            AppState.selectedAsset = asset;
+            await updateUserPreferences(asset.symbol);
+            updateAssetUI(asset);
+            await updateBalanceDisplay();
+            updateGasFeeDisplay(null);
+            closeModal('asset-selector-modal');
+        }
+        
+        async function updateUserPreferences(displayAsset) {
             try {
                 const token = localStorage.getItem('jwtToken');
                 await fetch('https://bithash-backend-kg7j.onrender.com/api/users/preferences', {
@@ -2579,21 +2585,15 @@
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${token}`
                     },
-                    body: JSON.stringify({ displayAsset: asset.symbol })
+                    body: JSON.stringify({ displayAsset: displayAsset })
                 });
             } catch (error) {
                 console.error('Error saving preference:', error);
             }
-            
-            updateAssetUI(fullAsset);
-            await updateBalanceDisplay();
-            updateGasFeeDisplay(null);
-            
-            closeModal('asset-selector-modal');
         }
 
         // =============================================
-        // BALANCE SECTION - EXACT SAME AS DASHBOARD
+        // BALANCE SECTION - SAME AS DASHBOARD
         // Fetches from /api/users/balances endpoint
         // =============================================
         async function loadUserBalances() {
@@ -2608,14 +2608,12 @@
                 if (response.ok) {
                     const data = await response.json();
                     
-                    // Extract main and matured balances (same as dashboard)
-                    AppState.mainBalance = parseFloat(data.main) || 0;
-                    AppState.maturedBalance = parseFloat(data.matured) || 0;
-                    AppState.activeBalance = parseFloat(data.active) || 0;
-                    AppState.balanceAmount = AppState.mainBalance + AppState.maturedBalance;
+                    AppState.userBalances.main = parseFloat(data.main) || 0;
+                    AppState.userBalances.matured = parseFloat(data.matured) || 0;
+                    AppState.userBalances.active = parseFloat(data.active) || 0;
                     
-                    // Update UI
-                    document.getElementById('balance-amount').textContent = formatUSD(AppState.balanceAmount);
+                    document.getElementById('user-actions-section').style.display = 'block';
+                    document.getElementById('balance-amount').textContent = formatUSD(AppState.userBalances.main + AppState.userBalances.matured);
                     
                     await updateBalanceDisplay();
                 } else {
@@ -2655,33 +2653,34 @@
             await fetchCoinGeckoPrices();
             
             const asset = AppState.selectedAsset || topAssets[0];
+            const assetPrice = await getAssetPrice(asset.id);
             
             // Get BTC price for secondary display
             const btcPrice = await getAssetPrice('bitcoin');
             
-            // Calculate balances in BTC equivalent (fluctuates in real-time - same as dashboard)
-            const mainBalanceBtc = AppState.mainBalance / btcPrice;
-            const maturedBalanceBtc = AppState.maturedBalance / btcPrice;
-            const availableBalanceBtc = AppState.balanceAmount / btcPrice;
+            // Calculate balances in BTC equivalent (fluctuates in real-time)
+            const mainBalanceBtc = AppState.userBalances.main / btcPrice;
+            const maturedBalanceBtc = AppState.userBalances.matured / btcPrice;
+            const availableBalanceBtc = (AppState.userBalances.main + AppState.userBalances.matured) / btcPrice;
             
             // Update USD displays
-            document.getElementById('main-balance-card').textContent = formatUSD(AppState.mainBalance);
-            document.getElementById('matured-balance-card').textContent = formatUSD(AppState.maturedBalance);
-            document.getElementById('available-balance-card').textContent = formatUSD(AppState.balanceAmount);
+            document.getElementById('main-balance-card').textContent = formatUSD(AppState.userBalances.main);
+            document.getElementById('matured-balance-card').textContent = formatUSD(AppState.userBalances.matured);
+            document.getElementById('available-balance-card').textContent = formatUSD(AppState.userBalances.main + AppState.userBalances.matured);
             
-            // Update BTC secondary displays (fluctuates - same as dashboard)
+            // Update BTC secondary displays (fluctuates)
             document.getElementById('balance-secondary-text-card').textContent = `${formatNumber(mainBalanceBtc)} BTC`;
             document.getElementById('matured-balance-secondary-text').textContent = `${formatNumber(maturedBalanceBtc)} BTC`;
             document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
             
-            // Update asset-specific balance display using ACTUAL crypto balance from /api/users/assets
-            const userAsset = AppState.userPortfolio.find(a => a.asset === asset.symbol);
-            if (userAsset && userAsset.totalAmount > 0) {
+            // Update asset-specific balance display - Using crypto asset data
+            const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
+            if (cryptoAsset && cryptoAsset.totalAmount > 0) {
                 const assetBalanceElement = document.getElementById('asset-balance-display');
                 if (assetBalanceElement) {
                     assetBalanceElement.innerHTML = `
                         <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
-                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(userAsset.totalAmount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(userAsset.currentValue)})
+                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> ${formatNumberWithCommas(cryptoAsset.totalAmount, 8)} ${asset.symbol.toUpperCase()} (${formatUSD(cryptoAsset.currentValue)})
                         </div>
                     `;
                 }
@@ -2690,39 +2689,10 @@
                 if (assetBalanceElement) {
                     assetBalanceElement.innerHTML = `
                         <div style="background: rgba(247, 166, 0, 0.05); padding: 10px; border-radius: 8px; margin-top: 10px; border: 1px solid var(--border);">
-                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> 0.00000000 ${asset.symbol.toUpperCase()} ($0.00)
+                            <strong>${asset.symbol.toUpperCase()} Balance:</strong> 0.00000000 ${asset.symbol.toUpperCase()} (${formatUSD(0)})
                         </div>
                     `;
                 }
-            }
-        }
-        
-        function showNoAssetsMessage() {
-            Swal.fire({
-                title: 'No Assets Available',
-                text: 'You don\'t have any crypto assets with balance. Please buy assets first.',
-                icon: 'info',
-                showCancelButton: true,
-                confirmButtonColor: '#F7A600',
-                cancelButtonColor: '#FF0000',
-                confirmButtonText: 'Buy Assets',
-                cancelButtonText: 'Cancel',
-                background: '#0B0E11',
-                color: '#FFFFFF'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    window.location.href = 'dashboard';
-                }
-            });
-            
-            const assetWithdrawForm = document.getElementById('asset-withdraw-form');
-            if (assetWithdrawForm) {
-                const inputs = assetWithdrawForm.querySelectorAll('input, button, select, textarea');
-                inputs.forEach(input => {
-                    input.disabled = true;
-                    input.style.opacity = '0.5';
-                    input.style.cursor = 'not-allowed';
-                });
             }
         }
 
@@ -2736,8 +2706,6 @@
                 
                 const userData = await apiCall('https://bithash-backend-kg7j.onrender.com/api/users/me');
                 AppState.userData = userData;
-                
-                document.getElementById('user-actions-section').style.display = 'block';
                 
             } catch (error) {
                 console.error('Authentication check failed:', error);
@@ -2757,11 +2725,22 @@
                     const data = await response.json();
                     if (data.data && data.data.displayAsset) {
                         AppState.userPreferences.displayAsset = data.data.displayAsset;
+                        const assetData = topAssets.find(a => a.symbol === AppState.userPreferences.displayAsset) || topAssets[0];
+                        AppState.selectedAsset = assetData;
+                        updateAssetUI(assetData);
+                    } else {
+                        AppState.selectedAsset = topAssets[0];
+                        updateAssetUI(topAssets[0]);
                     }
+                } else {
+                    AppState.selectedAsset = topAssets[0];
+                    updateAssetUI(topAssets[0]);
                 }
             } catch (error) {
                 console.warn('Could not fetch preferences, using default BTC');
                 AppState.userPreferences.displayAsset = 'btc';
+                AppState.selectedAsset = topAssets[0];
+                updateAssetUI(topAssets[0]);
             }
         }
 
@@ -3218,14 +3197,13 @@
                 return;
             }
             
-            const mainBalance = AppState.mainBalance;
-            const maturedBalance = AppState.maturedBalance;
+            const mainBalance = AppState.userBalances.main;
+            const maturedBalance = AppState.userBalances.matured;
+            const totalBalance = mainBalance + maturedBalance;
             
-            const balanceCheck = checkAvailableBalance(withdrawalData.usdAmount, mainBalance, maturedBalance);
-            
-            if (!balanceCheck.hasSufficientBalance) {
+            if (withdrawalData.usdAmount > totalBalance) {
                 showNotification('error', 'Insufficient Balance', 
-                    `You need $${withdrawalData.usdAmount.toFixed(2)} but only have $${(mainBalance + maturedBalance).toFixed(2)} available.`);
+                    `You need $${withdrawalData.usdAmount.toFixed(2)} but only have $${totalBalance.toFixed(2)} available.`);
                 return;
             }
             
@@ -3259,11 +3237,29 @@
                     throw new Error('Failed to fetch balances');
                 }
                 
+                let mainAmountUsed = withdrawalData.usdAmount;
+                let maturedAmountUsed = 0;
+                let balanceSource = 'main';
+                
+                if (mainBalance >= withdrawalData.usdAmount) {
+                    mainAmountUsed = withdrawalData.usdAmount;
+                    maturedAmountUsed = 0;
+                    balanceSource = 'main';
+                } else if (maturedBalance >= withdrawalData.usdAmount) {
+                    mainAmountUsed = 0;
+                    maturedAmountUsed = withdrawalData.usdAmount;
+                    balanceSource = 'matured';
+                } else {
+                    mainAmountUsed = mainBalance;
+                    maturedAmountUsed = withdrawalData.usdAmount - mainBalance;
+                    balanceSource = 'both';
+                }
+                
                 AppState.pendingWithdrawalData = {
                     ...withdrawalData,
-                    balanceSource: balanceCheck.source,
-                    mainAmountUsed: balanceCheck.mainAmountUsed,
-                    maturedAmountUsed: balanceCheck.maturedAmountUsed,
+                    balanceSource: balanceSource,
+                    mainAmountUsed: mainAmountUsed,
+                    maturedAmountUsed: maturedAmountUsed,
                     gasFee: requiredGasFee
                 };
                 
@@ -3273,47 +3269,6 @@
                 console.error('Error checking gas fee balance:', error);
                 showNotification('error', 'Balance Check Error', 'Failed to check gas fee balance. Please try again.');
             }
-        }
-        
-        function checkAvailableBalance(requestedAmount, mainBalance, maturedBalance) {
-            const totalBalance = mainBalance + maturedBalance;
-            
-            if (requestedAmount > totalBalance) {
-                return {
-                    hasSufficientBalance: false,
-                    source: 'none',
-                    mainAmountUsed: 0,
-                    maturedAmountUsed: 0
-                };
-            }
-            
-            if (mainBalance >= requestedAmount) {
-                return {
-                    hasSufficientBalance: true,
-                    source: 'main',
-                    mainAmountUsed: requestedAmount,
-                    maturedAmountUsed: 0
-                };
-            }
-            
-            if (maturedBalance >= requestedAmount) {
-                return {
-                    hasSufficientBalance: true,
-                    source: 'matured',
-                    mainAmountUsed: 0,
-                    maturedAmountUsed: requestedAmount
-                };
-            }
-            
-            const mainAmountUsed = mainBalance;
-            const maturedAmountUsed = requestedAmount - mainBalance;
-            
-            return {
-                hasSufficientBalance: true,
-                source: 'both',
-                mainAmountUsed: mainAmountUsed,
-                maturedAmountUsed: maturedAmountUsed
-            };
         }
         
         function validateWithdrawalForm(method) {
@@ -3494,7 +3449,7 @@
                             `Your withdrawal request for $${usdAmount.toFixed(2)} (${assetAmount.toFixed(8)} ${asset.symbol.toUpperCase()}) has been submitted successfully! Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
                         loadUserBalances();
-                        loadAssetBalancesFromRest();
+                        loadCryptoAssets();
                         loadWithdrawalHistory();
                         
                         document.getElementById('asset-withdraw-amount').value = '';
@@ -3554,7 +3509,7 @@
                             `Your bank withdrawal request for $${usdAmount.toFixed(2)} has been submitted successfully! Funds will be transferred to ${bankName} account ending in ${accountNumber.slice(-4)} within 3-5 business days. Transaction ID: ${data.data?.reference || 'Pending'}`);
                         
                         loadUserBalances();
-                        loadAssetBalancesFromRest();
+                        loadCryptoAssets();
                         loadWithdrawalHistory();
                         
                         document.getElementById('bank-withdraw-amount').value = '';
@@ -3647,7 +3602,7 @@
                          <tr>
                             <td colspan="6" style="text-align: center; padding: 30px;">
                                 No withdrawal history found
-                                                        </td>
+                            </td>
                           </tr>
                     `;
                     return;
@@ -3700,10 +3655,10 @@
                     row.innerHTML = `
                         <td>${formattedDate}</td>
                         <td>${methodIcon}</td>
-                        <td>$${(withdrawal.amount || 0).toFixed(2)}</div></td>
-                        <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol}${rateInfo}</div></td>
-                        <td>${statusBadge}</div></td>
-                        <td>${withdrawal.reference || withdrawal.txId || 'N/A'}</div></td>
+                        <td>$${(withdrawal.amount || 0).toFixed(2)}</div>
+                        <td><img src="${assetLogo}" style="width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 5px;"> ${assetSymbol}${rateInfo}</div>
+                        <td>${statusBadge}</div>
+                        <td>${withdrawal.reference || withdrawal.txId || 'N/A'}</div>
                     `;
                     
                     tableBody.appendChild(row);
@@ -3716,6 +3671,7 @@
                         <td colspan="6" style="text-align: center; padding: 30px; color: var(--error);">
                             Failed to load withdrawal history. Please refresh the page.
                         </td>
+                    </table>
                 `;
             }
         }
@@ -3754,27 +3710,19 @@
         function searchAssets() {
             const searchTerm = document.getElementById('asset-selector-search').value.toLowerCase();
             
-            // Filter from assets that have balance (from userPortfolio)
-            filteredAssets = AppState.userPortfolio.map(asset => {
-                const assetInfo = topAssets.find(a => a.symbol === asset.asset) || {
-                    id: asset.asset,
-                    symbol: asset.asset,
-                    name: asset.asset.toUpperCase(),
-                    logo: getAssetLogo(asset.asset),
-                    network: 'Blockchain'
-                };
-                return {
-                    id: assetInfo.id,
-                    symbol: asset.asset,
-                    name: assetInfo.name,
-                    logo: assetInfo.logo,
-                    balance: asset.totalAmount,
-                    network: assetInfo.network
-                };
-            }).filter(asset => 
-                asset.name.toLowerCase().includes(searchTerm) || 
-                asset.symbol.toLowerCase().includes(searchTerm)
+            const availableSymbols = AppState.cryptoAssets.map(a => a.symbol);
+            const availableTopAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
+            filteredAssets = availableTopAssets.filter(a => 
+                a.name.toLowerCase().includes(searchTerm) || 
+                a.symbol.toLowerCase().includes(searchTerm)
             );
+            
+            if (filteredAssets.length === 0) {
+                filteredAssets = topAssets.filter(a => 
+                    a.name.toLowerCase().includes(searchTerm) || 
+                    a.symbol.toLowerCase().includes(searchTerm)
+                );
+            }
             
             assetPage = 1;
             renderAssetSelectorList();
@@ -3794,7 +3742,7 @@
                 renderAssetSelectorList();
             }
         }
-
+        
         function switchWithdrawalMethod(method) {
             document.querySelectorAll('.withdrawal-method').forEach(el => {
                 el.classList.remove('active');
@@ -3901,6 +3849,137 @@
         function logout() {
             localStorage.removeItem('jwtToken');
             window.location.href = 'logout';
+        }
+        
+        // =============================================
+        // SOCKET.IO - Same as dashboard
+        // =============================================
+        function initSocketIO() {
+            const token = localStorage.getItem('jwtToken');
+            if (!token) {
+                console.log('No token, skipping socket connection');
+                return;
+            }
+            
+            const SOCKET_URL = 'https://bithash-backend-kg7j.onrender.com';
+            
+            AppState.socket = io(SOCKET_URL, { 
+                transports: ['websocket', 'polling'],
+                auth: { token },
+                reconnection: true,
+                reconnectionAttempts: 10,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 20000,
+                upgrade: true,
+                forceNew: true
+            });
+            
+            AppState.socket.on('connect', () => { 
+                console.log('Socket connected for withdrawals');
+                setInterval(() => {
+                    if (AppState.socket && AppState.socket.connected) {
+                        AppState.socket.emit('ping');
+                    }
+                }, 30000);
+            });
+            
+            AppState.socket.on('disconnect', (reason) => {
+                console.warn('Socket disconnected:', reason);
+                if (reason === 'io server disconnect') {
+                    AppState.socket.connect();
+                }
+            });
+            
+            AppState.socket.on('connect_error', (err) => { 
+                console.warn('Socket connection error:', err.message);
+            });
+            
+            // Listen for balance updates - Same as dashboard
+            AppState.socket.on('balance_update', (data) => {
+                console.log('Balance update received:', data);
+                
+                if (data.main !== undefined) {
+                    AppState.userBalances.main = parseFloat(data.main);
+                    document.getElementById('main-balance-card').textContent = formatUSD(AppState.userBalances.main);
+                }
+                
+                if (data.matured !== undefined) {
+                    AppState.userBalances.matured = parseFloat(data.matured);
+                    document.getElementById('matured-balance-card').textContent = formatUSD(AppState.userBalances.matured);
+                }
+                
+                if (data.active !== undefined && data.active !== null) {
+                    AppState.userBalances.active = parseFloat(data.active);
+                }
+                
+                const totalBalance = AppState.userBalances.main + AppState.userBalances.matured;
+                document.getElementById('available-balance-card').textContent = formatUSD(totalBalance);
+                document.getElementById('balance-amount').textContent = formatUSD(totalBalance);
+                
+                updateBalanceDisplay();
+            });
+            
+            // Listen for asset balance updates - Same as dashboard
+            AppState.socket.on('asset_balances_update', async (assetsData) => {
+                console.log('Asset balances update received:', assetsData);
+                
+                if (Object.keys(AppState.currentPrices).length === 0) {
+                    await fetchCoinGeckoPrices();
+                }
+                
+                AppState.cryptoAssets = assetsData.map(asset => {
+                    const assetId = getAssetId(asset.symbol);
+                    const currentPrice = AppState.currentPrices[assetId]?.usd || 0;
+                    
+                    return {
+                        symbol: asset.symbol,
+                        name: getAssetName(asset.symbol),
+                        logo: getAssetLogo(asset.symbol),
+                        totalAmount: asset.balance,
+                        currentValue: asset.balance * currentPrice,
+                        network: assetNetworks[asset.symbol] || 'Blockchain',
+                        mainBalance: asset.mainBalance || 0,
+                        maturedBalance: asset.maturedBalance || 0,
+                        activeBalance: asset.activeBalance || 0,
+                        currentPrice: currentPrice
+                    };
+                });
+                
+                topAssets.forEach(asset => {
+                    const cryptoAsset = AppState.cryptoAssets.find(c => c.symbol === asset.symbol);
+                    if (cryptoAsset) {
+                        asset.hasBalance = true;
+                        asset.balance = cryptoAsset.totalAmount;
+                        asset.usdValue = cryptoAsset.currentValue;
+                    } else {
+                        asset.hasBalance = false;
+                        asset.balance = 0;
+                    }
+                });
+                
+                updateAssetSelectorList();
+                await updateBalanceDisplay();
+            });
+            
+            AppState.socket.on('price_update', (prices) => {
+                for (const [assetSymbol, priceData] of Object.entries(prices)) {
+                    const assetId = getAssetId(assetSymbol);
+                    if (assetId && AppState.currentPrices[assetId]) {
+                        AppState.currentPrices[assetId].usd = priceData.price;
+                    }
+                }
+                updateBalanceDisplay();
+            });
+            
+            setTimeout(() => {
+                if (AppState.userBalances.main === 0 && AppState.userBalances.matured === 0) {
+                    loadUserBalances();
+                }
+                if (AppState.cryptoAssets.length === 0) {
+                    loadCryptoAssets();
+                }
+            }, 8000);
         }
     </script>
 </body>
