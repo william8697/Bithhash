@@ -2221,18 +2221,16 @@
         });
         
         // =============================================
-        // GLOBAL STATE - Same as dashboard
+        // GLOBAL STATE - Uses ONLY backend data
         // =============================================
         const AppState = {
             userData: null,
             currentAssetRate: 0,
-            currentAssetRateChange: 0,
             MIN_WITHDRAWAL: 100,
             userPreferences: { displayAsset: 'btc' },
-            currentPrices: {},
             selectedAsset: null,
-            cryptoAssets: [], // From /api/users/assets (crypto with balances)
-            userBalances: { main: 0, active: 0, matured: 0 },
+            cryptoAssets: [],
+            userBalances: { main: 0, matured: 0, active: 0 },
             socket: null,
             otpTimer: null,
             resendTimer: null,
@@ -2243,11 +2241,10 @@
             gasFeeRequired: 0,
             gasFeeAddress: '',
             gasFeePaid: false,
-            gasFeePaymentId: null,
             currentTempToken: null
         };
 
-        // Complete asset list for reference - Same as dashboard
+        // Asset list with logos (static - only for display, prices come from backend)
         const topAssets = [
             { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png', network: 'Bitcoin' },
             { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png', network: 'Ethereum (ERC20)' },
@@ -2340,15 +2337,15 @@
                 document.getElementById('loading-overlay').classList.add('hidden');
                 await checkAuthState();
                 
-                // Initialize Socket.IO - Same as dashboard
+                // Initialize Socket.IO for real-time updates
                 initSocketIO();
                 
                 await checkUserPreferences();
                 
-                // Load crypto assets from /api/users/assets - Same as dashboard
+                // Load crypto assets from /api/users/assets - SAME AS DASHBOARD
                 await loadCryptoAssets();
                 
-                // Load user balances from /api/users/balances - Same as dashboard
+                // Load user balances from /api/users/balances - SAME AS DASHBOARD
                 await loadUserBalances();
                 
                 await loadWithdrawalHistory();
@@ -2359,12 +2356,6 @@
                 initMobileMenu();
                 initHeaderScrollEffect();
                 document.getElementById('current-year').textContent = new Date().getFullYear();
-                
-                // Start price refresh every 60 seconds - Same as dashboard
-                setInterval(async () => {
-                    await fetchCoinGeckoPrices();
-                    await updateBalanceDisplay();
-                }, 60000);
                 
                 setupCopyButtons();
             }, 1000);
@@ -2405,7 +2396,7 @@
 
         // =============================================
         // LOAD CRYPTO ASSETS - SAME AS DASHBOARD
-        // Fetches from /api/users/assets endpoint
+        // Uses ONLY /api/users/assets endpoint
         // =============================================
         async function loadCryptoAssets() {
             try {
@@ -2418,37 +2409,21 @@
                 
                 if (response.ok) {
                     const assetsData = await response.json();
-                    
                     console.log('Assets data from /api/users/assets:', assetsData);
                     
-                    // Store in AppState - Same structure as dashboard
-                    AppState.cryptoAssets = assetsData.map(asset => ({
-                        symbol: asset.symbol,
-                        name: getAssetName(asset.symbol),
-                        logo: getAssetLogo(asset.symbol),
-                        totalAmount: asset.balance,
-                        currentValue: asset.balance * (AppState.currentPrices[getAssetId(asset.symbol)]?.usd || 0),
-                        network: assetNetworks[asset.symbol] || 'Blockchain',
-                        mainBalance: asset.mainBalance || 0,
-                        maturedBalance: asset.maturedBalance || 0,
-                        activeBalance: asset.activeBalance || 0,
-                        currentPrice: AppState.currentPrices[getAssetId(asset.symbol)]?.usd || 0
-                    }));
-                    
-                    // Update topAssets with balance info
-                    topAssets.forEach(asset => {
-                        const cryptoAsset = AppState.cryptoAssets.find(c => c.symbol === asset.symbol);
-                        if (cryptoAsset) {
-                            asset.hasBalance = true;
-                            asset.balance = cryptoAsset.totalAmount;
-                            asset.usdValue = cryptoAsset.currentValue;
-                        } else {
-                            asset.hasBalance = false;
-                            asset.balance = 0;
-                        }
+                    AppState.cryptoAssets = assetsData.map(asset => {
+                        const assetInfo = topAssets.find(a => a.symbol === asset.symbol) || { symbol: asset.symbol, name: asset.symbol.toUpperCase(), logo: '' };
+                        return {
+                            symbol: asset.symbol,
+                            name: assetInfo.name,
+                            logo: assetInfo.logo,
+                            totalAmount: asset.balance,
+                            currentValue: asset.usdValue || 0,
+                            network: asset.network || 'Blockchain',
+                            currentPrice: asset.currentPrice || 0
+                        };
                     });
                     
-                    // Set default selected asset (first one with balance or BTC)
                     if (AppState.cryptoAssets.length > 0) {
                         const firstAsset = topAssets.find(a => a.symbol === AppState.cryptoAssets[0].symbol);
                         AppState.selectedAsset = firstAsset || topAssets[0];
@@ -2458,67 +2433,16 @@
                         updateAssetUI(topAssets[0]);
                     }
                     
-                    // Update asset selector list
                     updateAssetSelectorList();
-                    
-                    // Update balance display
                     await updateBalanceDisplay();
-                    
                 } else {
                     console.error('Failed to load crypto assets:', response.status);
-                    AppState.cryptoAssets = [];
                 }
             } catch (error) {
                 console.error('Error loading crypto assets:', error);
-                AppState.cryptoAssets = [];
             }
         }
         
-        // Helper functions - Same as dashboard
-        function getAssetName(symbol) {
-            const names = {
-                'btc': 'Bitcoin', 'eth': 'Ethereum', 'usdt': 'Tether', 'bnb': 'BNB',
-                'sol': 'Solana', 'usdc': 'USDC', 'xrp': 'XRP', 'doge': 'Dogecoin',
-                'ada': 'Cardano', 'shib': 'Shiba Inu', 'avax': 'Avalanche', 'dot': 'Polkadot',
-                'trx': 'TRON', 'link': 'Chainlink', 'matic': 'Polygon', 'ltc': 'Litecoin'
-            };
-            return names[symbol] || symbol.toUpperCase();
-        }
-        
-        function getAssetLogo(symbol) {
-            const logos = {
-                'btc': 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png',
-                'eth': 'https://assets.coingecko.com/coins/images/279/large/ethereum.png',
-                'usdt': 'https://assets.coingecko.com/coins/images/325/large/Tether.png',
-                'bnb': 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png',
-                'sol': 'https://assets.coingecko.com/coins/images/4128/large/solana.png',
-                'usdc': 'https://assets.coingecko.com/coins/images/6319/large/USD_Coin_icon.png',
-                'xrp': 'https://assets.coingecko.com/coins/images/44/large/xrp-symbol-white-128.png',
-                'doge': 'https://assets.coingecko.com/coins/images/5/large/dogecoin.png',
-                'ada': 'https://assets.coingecko.com/coins/images/975/large/cardano.png',
-                'shib': 'https://assets.coingecko.com/coins/images/11939/large/shiba.png'
-            };
-            return logos[symbol] || 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png';
-        }
-        
-        function getAssetId(symbol) {
-            const mapping = {
-                'btc': 'bitcoin', 'eth': 'ethereum', 'usdt': 'tether', 'bnb': 'binancecoin',
-                'sol': 'solana', 'usdc': 'usd-coin', 'xrp': 'xrp', 'doge': 'dogecoin',
-                'ada': 'cardano', 'shib': 'shiba-inu', 'avax': 'avalanche-2', 'dot': 'polkadot',
-                'trx': 'tron', 'ltc': 'litecoin'
-            };
-            return mapping[symbol] || symbol;
-        }
-        
-        const assetNetworks = {
-            'btc': 'Bitcoin', 'eth': 'Ethereum', 'usdt': 'Tron (TRC-20)', 'bnb': 'BNB Smart Chain',
-            'sol': 'Solana', 'usdc': 'Ethereum (ERC-20)', 'xrp': 'XRP Ledger', 'doge': 'Dogecoin',
-            'ada': 'Cardano', 'shib': 'Ethereum (ERC-20)', 'avax': 'Avalanche C-Chain', 'dot': 'Polkadot',
-            'trx': 'TRON', 'link': 'Ethereum (ERC-20)', 'matic': 'Polygon', 'ltc': 'Litecoin'
-        };
-        
-        // Update asset selector list - Only shows assets from /api/users/assets
         function updateAssetSelectorList() {
             const availableSymbols = AppState.cryptoAssets.map(a => a.symbol);
             filteredAssets = topAssets.filter(a => availableSymbols.includes(a.symbol));
@@ -2594,7 +2518,7 @@
 
         // =============================================
         // BALANCE SECTION - SAME AS DASHBOARD
-        // Fetches from /api/users/balances endpoint
+        // Uses ONLY /api/users/balances endpoint
         // =============================================
         async function loadUserBalances() {
             try {
@@ -2625,40 +2549,19 @@
             }
         }
         
-        async function fetchCoinGeckoPrices() {
-            try {
-                const ids = topAssets.map(a => a.id).join(',');
-                const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
-                if (response.ok) {
-                    const data = await response.json();
-                    topAssets.forEach(asset => {
-                        if (data[asset.id]) {
-                            AppState.currentPrices[asset.id] = {
-                                usd: data[asset.id].usd || 0,
-                                usd_24h_change: data[asset.id].usd_24h_change || 0
-                            };
-                        } else {
-                            AppState.currentPrices[asset.id] = { usd: 0, usd_24h_change: 0 };
-                        }
-                    });
-                    return true;
-                }
-            } catch (error) {
-                console.warn('CoinGecko API error:', error);
-            }
-            return false;
-        }
-        
         async function updateBalanceDisplay() {
-            await fetchCoinGeckoPrices();
-            
             const asset = AppState.selectedAsset || topAssets[0];
-            const assetPrice = await getAssetPrice(asset.id);
             
-            // Get BTC price for secondary display
-            const btcPrice = await getAssetPrice('bitcoin');
+            // Get BTC price for secondary display - from backend via asset data
+            const btcAsset = AppState.cryptoAssets.find(a => a.symbol === 'btc');
+            const btcPrice = btcAsset?.currentPrice || 43000;
             
-            // Calculate balances in BTC equivalent (fluctuates in real-time)
+            // Get the selected asset's current price from backend data
+            const selectedCrypto = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
+            const assetPrice = selectedCrypto?.currentPrice || 0;
+            AppState.currentAssetRate = assetPrice;
+            
+            // Calculate balances in BTC equivalent
             const mainBalanceBtc = AppState.userBalances.main / btcPrice;
             const maturedBalanceBtc = AppState.userBalances.matured / btcPrice;
             const availableBalanceBtc = (AppState.userBalances.main + AppState.userBalances.matured) / btcPrice;
@@ -2668,12 +2571,12 @@
             document.getElementById('matured-balance-card').textContent = formatUSD(AppState.userBalances.matured);
             document.getElementById('available-balance-card').textContent = formatUSD(AppState.userBalances.main + AppState.userBalances.matured);
             
-            // Update BTC secondary displays (fluctuates)
+            // Update BTC secondary displays
             document.getElementById('balance-secondary-text-card').textContent = `${formatNumber(mainBalanceBtc)} BTC`;
             document.getElementById('matured-balance-secondary-text').textContent = `${formatNumber(maturedBalanceBtc)} BTC`;
             document.getElementById('available-balance-secondary-text').textContent = `${formatNumber(availableBalanceBtc)} BTC`;
             
-            // Update asset-specific balance display - Using crypto asset data
+            // Update asset-specific balance display - Using crypto asset data from backend
             const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
             if (cryptoAsset && cryptoAsset.totalAmount > 0) {
                 const assetBalanceElement = document.getElementById('asset-balance-display');
@@ -2789,68 +2692,6 @@
             return parts[0];
         }
 
-        // Enhanced getAssetPrice with multiple sources
-        async function getAssetPrice(assetId) {
-            if (AppState.currentPrices[assetId] && AppState.currentPrices[assetId].usd) {
-                return AppState.currentPrices[assetId].usd;
-            }
-
-            const timestamp = Date.now();
-            const sources = [
-                `https://api.coingecko.com/api/v3/simple/price?ids=${assetId}&vs_currencies=usd&_=${timestamp}`,
-                `https://api.binance.com/api/v3/ticker/price?symbol=${assetId.toUpperCase()}USDT`,
-                `https://min-api.cryptocompare.com/data/price?fsym=${assetId.toUpperCase()}&tsyms=USD`
-            ];
-
-            for (const sourceUrl of sources) {
-                try {
-                    const response = await fetch(sourceUrl);
-                    if (!response.ok) continue;
-
-                    const data = await response.json();
-                    let price = null;
-
-                    if (sourceUrl.includes('coingecko')) {
-                        price = data[assetId]?.usd;
-                    } else if (sourceUrl.includes('binance')) {
-                        price = parseFloat(data.price);
-                    } else if (sourceUrl.includes('cryptocompare')) {
-                        price = data.USD;
-                    }
-
-                    if (price && !isNaN(price) && price > 0) {
-                        if (!AppState.currentPrices[assetId]) AppState.currentPrices[assetId] = {};
-                        AppState.currentPrices[assetId].usd = price;
-                        return price;
-                    }
-                } catch (error) {
-                    console.warn(`Price fetch failed for ${assetId}:`, error);
-                }
-            }
-
-            // Fallback prices
-            const fallbackPrices = {
-                'bitcoin': 50000,
-                'ethereum': 3000,
-                'tether': 1,
-                'binancecoin': 300,
-                'solana': 100,
-                'usd-coin': 1,
-                'xrp': 0.5,
-                'dogecoin': 0.08,
-                'shiba-inu': 0.00001,
-                'tron': 0.08,
-                'litecoin': 70,
-                'cardano': 0.3,
-                'avalanche-2': 20,
-                'polkadot': 5
-            };
-            const price = fallbackPrices[assetId] || 1;
-            if (!AppState.currentPrices[assetId]) AppState.currentPrices[assetId] = {};
-            AppState.currentPrices[assetId].usd = price;
-            return price;
-        }
-        
         function setupAssetConversion() {
             const usdInput = document.getElementById('asset-withdraw-amount');
             const assetInput = document.getElementById('asset-withdraw-equivalent');
@@ -2863,11 +2704,14 @@
                 }
                 
                 const asset = AppState.selectedAsset || topAssets[0];
-                const price = await getAssetPrice(asset.id);
-                AppState.currentAssetRate = price;
+                const price = AppState.currentAssetRate;
                 
-                const assetAmount = usdAmount / price;
-                assetInput.value = assetAmount.toFixed(8) + ' ' + asset.symbol.toUpperCase();
+                if (price > 0) {
+                    const assetAmount = usdAmount / price;
+                    assetInput.value = assetAmount.toFixed(8) + ' ' + asset.symbol.toUpperCase();
+                } else {
+                    assetInput.value = 'Price unavailable';
+                }
                 
                 updateGasFeeDisplay(usdAmount);
             });
@@ -2891,9 +2735,10 @@
             }
             
             try {
-                const btcPrice = await getAssetPrice('bitcoin');
+                const btcAsset = AppState.cryptoAssets.find(a => a.symbol === 'btc');
+                const btcPrice = btcAsset?.currentPrice || 43000;
                 const gasFeeUsd = btcGasFee * btcPrice;
-                const targetAssetPrice = await getAssetPrice(asset.id);
+                const targetAssetPrice = AppState.currentAssetRate;
                 const gasFeeInTargetAsset = gasFeeUsd / targetAssetPrice;
                 return gasFeeInTargetAsset;
             } catch (error) {
@@ -2919,10 +2764,6 @@
         
         async function updateGasFeeDisplay(withdrawalAmount = null) {
             const asset = AppState.selectedAsset || topAssets[0];
-            
-            if (!AppState.currentAssetRate) {
-                AppState.currentAssetRate = await getAssetPrice(asset.id);
-            }
             
             if (withdrawalAmount !== null) {
                 const requiredFee = await getRequiredGasFee(withdrawalAmount);
@@ -3852,7 +3693,7 @@
         }
         
         // =============================================
-        // SOCKET.IO - Same as dashboard
+        // SOCKET.IO - Real-time updates from backend
         // =============================================
         function initSocketIO() {
             const token = localStorage.getItem('jwtToken');
@@ -3895,7 +3736,7 @@
                 console.warn('Socket connection error:', err.message);
             });
             
-            // Listen for balance updates - Same as dashboard
+            // Listen for balance updates from backend
             AppState.socket.on('balance_update', (data) => {
                 console.log('Balance update received:', data);
                 
@@ -3920,56 +3761,25 @@
                 updateBalanceDisplay();
             });
             
-            // Listen for asset balance updates - Same as dashboard
+            // Listen for asset balance updates from backend
             AppState.socket.on('asset_balances_update', async (assetsData) => {
                 console.log('Asset balances update received:', assetsData);
                 
-                if (Object.keys(AppState.currentPrices).length === 0) {
-                    await fetchCoinGeckoPrices();
-                }
-                
                 AppState.cryptoAssets = assetsData.map(asset => {
-                    const assetId = getAssetId(asset.symbol);
-                    const currentPrice = AppState.currentPrices[assetId]?.usd || 0;
-                    
+                    const assetInfo = topAssets.find(a => a.symbol === asset.symbol) || { symbol: asset.symbol, name: asset.symbol.toUpperCase(), logo: '' };
                     return {
                         symbol: asset.symbol,
-                        name: getAssetName(asset.symbol),
-                        logo: getAssetLogo(asset.symbol),
+                        name: assetInfo.name,
+                        logo: assetInfo.logo,
                         totalAmount: asset.balance,
-                        currentValue: asset.balance * currentPrice,
-                        network: assetNetworks[asset.symbol] || 'Blockchain',
-                        mainBalance: asset.mainBalance || 0,
-                        maturedBalance: asset.maturedBalance || 0,
-                        activeBalance: asset.activeBalance || 0,
-                        currentPrice: currentPrice
+                        currentValue: asset.usdValue || 0,
+                        network: asset.network || 'Blockchain',
+                        currentPrice: asset.currentPrice || 0
                     };
-                });
-                
-                topAssets.forEach(asset => {
-                    const cryptoAsset = AppState.cryptoAssets.find(c => c.symbol === asset.symbol);
-                    if (cryptoAsset) {
-                        asset.hasBalance = true;
-                        asset.balance = cryptoAsset.totalAmount;
-                        asset.usdValue = cryptoAsset.currentValue;
-                    } else {
-                        asset.hasBalance = false;
-                        asset.balance = 0;
-                    }
                 });
                 
                 updateAssetSelectorList();
                 await updateBalanceDisplay();
-            });
-            
-            AppState.socket.on('price_update', (prices) => {
-                for (const [assetSymbol, priceData] of Object.entries(prices)) {
-                    const assetId = getAssetId(assetSymbol);
-                    if (assetId && AppState.currentPrices[assetId]) {
-                        AppState.currentPrices[assetId].usd = priceData.price;
-                    }
-                }
-                updateBalanceDisplay();
             });
             
             setTimeout(() => {
