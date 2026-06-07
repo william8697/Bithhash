@@ -4237,9 +4237,10 @@
         }
         
         // =============================================
-        // LOAD INVESTMENTS WITH PROFIT CALCULATION (SILENT UPDATE - NO BLINK)
+        // LOAD INVESTMENTS WITH PROFIT CALCULATION - BACKGROUND REFRESH (NO BLINKING)
         // =============================================
-        let investmentsUpdateTimeout = null;
+        let investmentsRefreshTimer = null;
+        
         async function loadInvestments() {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -4248,95 +4249,98 @@
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 const tableBody = document.getElementById('investments-table');
+                if (!response.ok) {
+                    if (tableBody && tableBody.innerHTML === '') {
+                        tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);">Error loading investments</td></tr>`;
+                    }
+                    return;
+                }
                 
-                if (response.ok) {
-                    const data = await response.json();
-                    const investments = data.data?.investments || data.investments || [];
-                    if (investments.length === 0) {
+                const data = await response.json();
+                const investments = data.data?.investments || data.investments || [];
+                
+                if (investments.length === 0) {
+                    if (tableBody) {
                         tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);"><i class="fas fa-wallet" style="font-size: 2rem; margin-bottom: 10px;"></i><p>No active cloud mining contracts</p><button class="btn btn-outline" onclick="window.location.href='index.html#plans'" style="margin-top: 10px;">Start Cloud Mining</button></td></tr>`;
-                        return;
                     }
+                    return;
+                }
+                
+                // Get current BTC price from backend via socket or from stored currentPrices
+                let backendBTCPrice = currentPrices.btc?.price || 43000;
+                if (currentPrices.bitcoin?.price) backendBTCPrice = currentPrices.bitcoin.price;
+                
+                // Build new HTML content in memory first
+                let newRowsHtml = '';
+                investments.forEach(investment => {
+                    const startDate = new Date(investment.startDate);
+                    const endDate = new Date(investment.endDate);
+                    const now = new Date();
                     
-                    let currentBTCPrice = 43000;
-                    try {
-                        const priceResponse = await fetch('https://bithash-backend-kg7j.onrender.com/api/price/btc');
-                        if (priceResponse.ok) {
-                            const priceData = await priceResponse.json();
-                            currentBTCPrice = priceData.price || 43000;
-                        }
-                    } catch (err) {
-                        currentBTCPrice = 43000;
-                    }
+                    const timeLeftMs = Math.max(0, endDate - now);
+                    const hoursLeft = Math.ceil(timeLeftMs / (1000 * 60 * 60));
+                    const daysLeft = Math.floor(hoursLeft / 24);
+                    const remainingHours = hoursLeft % 24;
+                    const timeLeftDisplay = daysLeft > 0 ? `${daysLeft}d ${remainingHours}h` : `${hoursLeft}h`;
                     
-                    let html = '';
-                    investments.forEach(investment => {
-                        const startDate = new Date(investment.startDate);
-                        const endDate = new Date(investment.endDate);
-                        const now = new Date();
-                        
-                        const timeLeftMs = Math.max(0, endDate - now);
-                        const hoursLeft = Math.ceil(timeLeftMs / (1000 * 60 * 60));
-                        const daysLeft = Math.floor(hoursLeft / 24);
-                        const remainingHours = hoursLeft % 24;
-                        const timeLeftDisplay = daysLeft > 0 ? `${daysLeft}d ${remainingHours}h` : `${hoursLeft}h`;
-                        
-                        const totalDurationMs = endDate - startDate;
-                        const elapsedMs = Math.max(0, now - startDate);
-                        const progressPercentage = totalDurationMs > 0 ? Math.min(100, (elapsedMs / totalDurationMs) * 100) : 0;
-                        
-                        const roiPercentage = investment.profitPercentage || 0;
-                        const expectedProfitUSD = investment.amount * (roiPercentage / 100);
-                        const currentProfitUSD = expectedProfitUSD * (progressPercentage / 100);
-                        const currentProfitBTC = currentProfitUSD / currentBTCPrice;
-                        
-                        let statusText = '';
-                        let statusClass = '';
-                        if (investment.status === 'active') {
-                            if (timeLeftMs <= 0) {
-                                statusText = 'Ready to Mature';
-                                statusClass = 'success';
-                            } else {
-                                statusText = `${timeLeftDisplay} left`;
-                                statusClass = 'pending';
-                            }
+                    const totalDurationMs = endDate - startDate;
+                    const elapsedMs = Math.max(0, now - startDate);
+                    const progressPercentage = totalDurationMs > 0 ? Math.min(100, (elapsedMs / totalDurationMs) * 100) : 0;
+                    
+                    const roiPercentage = investment.profitPercentage || 0;
+                    const expectedProfitUSD = investment.amount * (roiPercentage / 100);
+                    const currentProfitUSD = expectedProfitUSD * (progressPercentage / 100);
+                    const currentProfitBTC = currentProfitUSD / backendBTCPrice;
+                    
+                    let statusText = '';
+                    let statusClass = '';
+                    if (investment.status === 'active') {
+                        if (timeLeftMs <= 0) {
+                            statusText = 'Ready to Mature';
+                            statusClass = 'success';
                         } else {
-                            statusText = investment.status || 'Pending';
-                            statusClass = investment.status === 'completed' ? 'success' : 'pending';
+                            statusText = `${timeLeftDisplay} left`;
+                            statusClass = 'pending';
                         }
-                        
-                        html += `
-                            <tr>
-                                <td>${investment.planName || 'Cloud Mining Plan'}</td>
-                                <td>$${formatNumberWithCommas(investment.amount || 0, 2)} USD</td>
-                                <td>${investment.durationHours || 0} hours</td>
-                                <td><span class="roi-badge">${roiPercentage}%</span></td>
-                                <td class="profit-positive">+${formatNumberWithCommas(currentProfitBTC, 8)} BTC</td>
-                                <td class="profit-positive">+$${formatNumberWithCommas(currentProfitUSD, 2)} USD</td>
-                                <td>${endDate.toLocaleDateString()}</td>
-                                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-                            </tr>
-                        `;
-                    });
-                    
-                    // Silently replace table content without animation/transition
-                    if (tableBody.innerHTML !== html) {
-                        tableBody.innerHTML = html;
+                    } else {
+                        statusText = investment.status || 'Pending';
+                        statusClass = investment.status === 'completed' ? 'success' : 'pending';
                     }
-                } else {
-                    tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);">Failed to load active investments</td></tr>';
+                    
+                    newRowsHtml += `
+                        <tr>
+                            <td>${investment.planName || 'Cloud Mining Plan'}</td>
+                            <td>$${formatNumberWithCommas(investment.amount || 0, 2)} USD</td>
+                            <td>${investment.durationHours || 0} hours</td>
+                            <td><span class="roi-badge">${roiPercentage}%</span></td>
+                            <td class="profit-positive">+${formatNumberWithCommas(currentProfitBTC, 8)} BTC</td>
+                            <td class="profit-positive">+$${formatNumberWithCommas(currentProfitUSD, 2)} USD</td>
+                            <td>${endDate.toLocaleDateString()}</td>
+                            <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                        </tr>
+                    `;
+                });
+                
+                // Only update DOM if content actually changed to prevent flicker
+                if (tableBody && tableBody.innerHTML !== newRowsHtml) {
+                    tableBody.innerHTML = newRowsHtml;
                 }
             } catch (error) {
                 console.error('Error loading investments:', error);
-                const tableBody = document.getElementById('investments-table');
-                if (tableBody) tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);">Error loading investments</td></tr>';
-            } finally {
-                if (investmentsUpdateTimeout) clearTimeout(investmentsUpdateTimeout);
-                investmentsUpdateTimeout = setTimeout(() => {
-                    loadInvestments();
-                }, 10000);
             }
         }
         
+        // Start background refresh for investments every 10 seconds
+        function startInvestmentsBackgroundRefresh() {
+            if (investmentsRefreshTimer) clearInterval(investmentsRefreshTimer);
+            investmentsRefreshTimer = setInterval(() => {
+                loadInvestments();
+            }, 10000);
+        }
+        
+        // =============================================
+        // LOAD TRANSACTIONS WITH SMOOTH UPDATE (NO BLINKING)
+        // =============================================
         async function loadTransactions() {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -4344,44 +4348,61 @@
                 const response = await fetch('https://bithash-backend-kg7j.onrender.com/api/transactions', { headers: { 'Authorization': `Bearer ${token}` } });
                 if (response.ok) {
                     const data = await response.json();
-                    allTransactions = data.data?.transactions || data.transactions || [];
+                    const newTransactions = data.data?.transactions || data.transactions || [];
                     const seenIds = new Set();
-                    allTransactions = allTransactions.filter(tx => {
+                    const deduped = newTransactions.filter(tx => {
                         const txId = tx.id || tx._id;
                         if (seenIds.has(txId)) return false;
                         if (txId) seenIds.add(txId);
                         return true;
                     });
-                    allTransactions = allTransactions.map(tx => { 
+                    const processed = deduped.map(tx => { 
                         const staticTx = { ...tx };
                         staticTx._staticAmountUSD = parseFloat(tx.amount) || 0;
                         staticTx._staticAssetAmount = parseFloat(tx.assetAmount) || 0;
                         staticTx._staticAssetSymbol = tx.asset || 'btc';
                         return staticTx;
                     });
-                    transactionsPage = 1;
-                    renderTransactionsTable();
-                    updateMoneyFlowChart();
+                    
+                    // Check if transactions array actually changed before re-rendering
+                    const hasChanged = allTransactions.length !== processed.length || 
+                        JSON.stringify(allTransactions.map(t => t.id || t._id)) !== JSON.stringify(processed.map(t => t.id || t._id));
+                    
+                    if (hasChanged) {
+                        allTransactions = processed;
+                        renderTransactionsTable();
+                        updateMoneyFlowChart();
+                    } else {
+                        allTransactions = processed;
+                        // Still update chart in case amounts changed but IDs didn't
+                        updateMoneyFlowChart();
+                    }
                 }
-            } catch (error) { console.error('Error loading transactions:', error); allTransactions = []; renderTransactionsTable(); }
+            } catch (error) { 
+                console.error('Error loading transactions:', error); 
+            }
         }
         
         function renderTransactionsTable() {
             const tableBody = document.getElementById('transactions-table');
-            tableBody.innerHTML = '';
+            if (!tableBody) return;
+            
             if (allTransactions.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>`;
+                if (tableBody.innerHTML !== '<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>') {
+                    tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>`;
+                }
                 document.getElementById('transactions-page-info').textContent = '0/0';
                 document.getElementById('transactions-prev').disabled = true;
                 document.getElementById('transactions-next').disabled = true;
                 return;
             }
+            
             const start = (transactionsPage - 1) * transactionsPerPage;
             const end = start + transactionsPerPage;
             const pageTransactions = allTransactions.slice(start, end);
+            
+            let newRowsHtml = '';
             pageTransactions.forEach(transaction => {
-                const row = document.createElement('tr');
-                row.onclick = () => openTransactionDetails(transaction);
                 const date = new Date(transaction.date || transaction.createdAt || transaction.timestamp || new Date());
                 const formattedDate = date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                 let statusBadge = transaction.status === 'completed' ? '<span class="status-badge success">Completed</span>' : transaction.status === 'pending' ? '<span class="status-badge pending">Processing</span>' : '<span class="status-badge failed">Failed</span>';
@@ -4419,13 +4440,31 @@
                                 
                 let typeCell = `<div class="type-cell-icon"><span class="type-icon">${typeIcon}</span><span class="type-label ${typeColorClass}">${transaction.type || 'Transaction'}</span></div>`;
                 let detailText = transaction.description || transaction.details || (transaction.type === 'deposit' ? `Deposit of ${formattedAssetSymbol}` : transaction.type === 'withdrawal' ? `Withdrawal of ${formattedAssetSymbol}` : transaction.type === 'buy' ? `Bought ${formattedAssetSymbol}` : transaction.type === 'sell' ? `Sold ${formattedAssetSymbol}` : 'Transaction processed');
-                row.innerHTML = `<td>${formattedDate}</td><td>${typeCell}</td><td>${amountCell}</td><td>${assetDisplay}</td><td>${statusBadge}</td><td>${detailText}</td>`;
-                tableBody.appendChild(row);
+                
+                newRowsHtml += `
+                    <tr onclick="navigateToTransactionPage(${JSON.stringify(transaction).replace(/"/g, '&quot;')})">
+                        <td>${formattedDate}</td>
+                        <td>${typeCell}</td>
+                        <td>${amountCell}</td>
+                        <td>${assetDisplay}</td>
+                        <td>${statusBadge}</td>
+                        <td>${detailText}</td>
+                    </tr>
+                `;
             });
+            
+            // Only update if content changed
+            if (tableBody.innerHTML !== newRowsHtml) {
+                tableBody.innerHTML = newRowsHtml;
+            }
+            
             const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
-            document.getElementById('transactions-page-info').textContent = `${transactionsPage}/${totalPages || 1}`;
-            document.getElementById('transactions-prev').disabled = transactionsPage === 1;
-            document.getElementById('transactions-next').disabled = transactionsPage === totalPages || totalPages === 0;
+            const pageInfoSpan = document.getElementById('transactions-page-info');
+            if (pageInfoSpan) pageInfoSpan.textContent = `${transactionsPage}/${totalPages || 1}`;
+            const prevBtn = document.getElementById('transactions-prev');
+            const nextBtn = document.getElementById('transactions-next');
+            if (prevBtn) prevBtn.disabled = transactionsPage === 1;
+            if (nextBtn) nextBtn.disabled = transactionsPage === totalPages || totalPages === 0;
         }
         
         async function loadReferralData() {
@@ -4436,10 +4475,12 @@
                 if (response.ok) {
                     const data = await response.json();
                     const referralData = data.data || data;
-                    document.getElementById('referral-link-text').textContent = referralData.referralLink || 'Not available';
-                    document.getElementById('referral-count').textContent = referralData.totalReferrals || 0;
-                    document.getElementById('referral-earnings').textContent = formatFiat(parseFloat(referralData.totalEarnings) || 0);
-                    document.getElementById('referral-pending').textContent = formatFiat(parseFloat(referralData.pendingEarnings) || 0);
+                    const countElem = document.getElementById('referral-count');
+                    const earningsElem = document.getElementById('referral-earnings');
+                    const pendingElem = document.getElementById('referral-pending');
+                    if (countElem) countElem.textContent = referralData.totalReferrals || 0;
+                    if (earningsElem) earningsElem.textContent = formatFiat(parseFloat(referralData.totalEarnings) || 0);
+                    if (pendingElem) pendingElem.textContent = formatFiat(parseFloat(referralData.pendingEarnings) || 0);
                 }
             } catch (error) { console.error('Error loading referral data:', error); }
         }
@@ -4462,7 +4503,7 @@
         function renderDownlineTable() {
             const tableBody = document.getElementById('downline-table-body');
             if (!tableBody) return;
-            tableBody.innerHTML = '';
+            
             if (!downlineData || downlineData.length === 0) {
                 tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--gray);"><i class="fas fa-users" style="font-size: 2.5rem; margin-bottom: 15px;"></i><p>You don't have any downline members yet. Share your referral link to grow your network!</p></td></tr>`;
                 document.getElementById('downline-pagination').style.display = 'none';
@@ -4472,8 +4513,9 @@
             const start = (downlinePage - 1) * downlinePerPage;
             const end = start + downlinePerPage;
             const pageDownline = downlineData.slice(start, end);
+            
+            let newRowsHtml = '';
             pageDownline.forEach(member => {
-                const row = document.createElement('tr');
                 const joinDate = member.joinDate ? new Date(member.joinDate) : new Date();
                 const formattedDate = joinDate.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
                 const fullName = member.fullName || 'User';
@@ -4486,15 +4528,22 @@
                 const levelText = level === 1 ? 'Direct' : level === 2 ? 'Level 2' : `Level ${level}`;
                 const earnings = member.totalEarned || 0;
                 const totalInvested = member.totalInvested || member.investmentRounds || 0;
-                row.innerHTML = `<td><div class="downline-user-info"><div class="downline-avatar">${initials}</div><div><div class="downline-username">${fullName}</div><div class="downline-email">${email}</div></div></div></div>
-                                                 <td><span class="downline-level-badge">${levelText}</span></td>
-                                                 <td>${formattedDate}</td>
-                                                 <td><span class="downline-status ${statusClass}">${statusText}</span></td>
-                                                 <td>${formatFiat(totalInvested)}</td>
-                                                <td class="downline-earnings">${formatFiat(earnings)}</td>
-                                            `;
-                tableBody.appendChild(row);
+                newRowsHtml += `
+                    <tr>
+                        <td><div class="downline-user-info"><div class="downline-avatar">${initials}</div><div><div class="downline-username">${fullName}</div><div class="downline-email">${email}</div></div></div></div>
+                        <td><span class="downline-level-badge">${levelText}</span></div>
+                        <td>${formattedDate}</div>
+                        <td><span class="downline-status ${statusClass}">${statusText}</span></div>
+                        <td>${formatFiat(totalInvested)}</div>
+                        <td class="downline-earnings">${formatFiat(earnings)}</div>
+                    </tr>
+                `;
             });
+            
+            if (tableBody.innerHTML !== newRowsHtml) {
+                tableBody.innerHTML = newRowsHtml;
+            }
+            
             const totalPages = Math.ceil(downlineTotal / downlinePerPage);
             document.getElementById('downline-page-info').textContent = `${downlinePage}/${totalPages || 1}`;
             document.getElementById('downline-prev').disabled = downlinePage === 1;
@@ -4514,11 +4563,21 @@
             const termsDisplay = document.getElementById('loan-terms-display');
             const eligibilityStatus = document.getElementById('loan-eligibility-status');
             const applyButton = document.getElementById('loan-application-btn');
-            if (!eligibilityData) { termsDisplay.innerHTML = '<p>Loading loan information...</p>'; return; }
-            termsDisplay.innerHTML = `<div class="loan-term-item"><div class="loan-term-label">Maximum Loan Amount</div><div class="loan-term-value">${formatFiat(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div></div><div class="loan-term-item"><div class="loan-term-label">Monthly Interest Rate</div><div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div></div><div class="loan-term-item"><div class="loan-term-label">Credit Score</div><div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div></div><div class="loan-term-item"><div class="loan-term-label">Disbursement Fee</div><div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div></div>`;
-            if (eligibilityData.eligible) { eligibilityStatus.innerHTML = `<div class="eligibility-item"><div class="eligibility-icon verified"><i class="fas fa-check"></i></div><div class="eligibility-text"><strong>Congratulations! You qualify for a loan.</strong></div></div>`; applyButton.disabled = false; applyButton.innerHTML = '<i class="fas fa-file-contract"></i> Apply for Loan'; }
-            else { eligibilityStatus.innerHTML = `<div class="eligibility-item"><div class="eligibility-icon pending"><i class="fas fa-times"></i></div><div class="eligibility-text"><strong>Not Currently Eligible:</strong> ${eligibilityData.reason || 'Requirements not met'}</div></div>`; applyButton.disabled = true; applyButton.innerHTML = '<i class="fas fa-lock"></i> Not Eligible'; }
-            const modalTerms = document.getElementById('modal-loan-terms'); if (modalTerms) modalTerms.innerHTML = termsDisplay.innerHTML;
+            if (!eligibilityData) { 
+                if (termsDisplay && termsDisplay.innerHTML === '') termsDisplay.innerHTML = '<p>Loading loan information...</p>';
+                return; 
+            }
+            const newTermsHtml = `<div class="loan-term-item"><div class="loan-term-label">Maximum Loan Amount</div><div class="loan-term-value">${formatFiat(parseFloat(eligibilityData.maxLoanAmount) || 0)}</div></div><div class="loan-term-item"><div class="loan-term-label">Monthly Interest Rate</div><div class="loan-term-value">${parseFloat(eligibilityData.monthlyInterest) || 9.99}%</div></div><div class="loan-term-item"><div class="loan-term-label">Credit Score</div><div class="loan-term-value">${parseInt(eligibilityData.creditScore) || 0}</div></div><div class="loan-term-item"><div class="loan-term-label">Disbursement Fee</div><div class="loan-term-value">${parseFloat(eligibilityData.disbursementFee) || 0.99}%</div></div>`;
+            if (termsDisplay && termsDisplay.innerHTML !== newTermsHtml) termsDisplay.innerHTML = newTermsHtml;
+            
+            if (eligibilityData.eligible) { 
+                if (eligibilityStatus) eligibilityStatus.innerHTML = `<div class="eligibility-item"><div class="eligibility-icon verified"><i class="fas fa-check"></i></div><div class="eligibility-text"><strong>Congratulations! You qualify for a loan.</strong></div></div>`; 
+                if (applyButton) { applyButton.disabled = false; applyButton.innerHTML = '<i class="fas fa-file-contract"></i> Apply for Loan'; }
+            } else { 
+                if (eligibilityStatus) eligibilityStatus.innerHTML = `<div class="eligibility-item"><div class="eligibility-icon pending"><i class="fas fa-times"></i></div><div class="eligibility-text"><strong>Not Currently Eligible:</strong> ${eligibilityData.reason || 'Requirements not met'}</div></div>`; 
+                if (applyButton) { applyButton.disabled = true; applyButton.innerHTML = '<i class="fas fa-lock"></i> Not Eligible'; }
+            }
+            const modalTerms = document.getElementById('modal-loan-terms'); if (modalTerms) modalTerms.innerHTML = newTermsHtml;
         }
         
         function openLoanApplication() { if (!currentLoanEligibility || !currentLoanEligibility.eligible) { showNotification('error', 'Not Eligible', 'You do not meet the eligibility criteria for a loan'); return; } const modal = document.getElementById('loan-application-modal'); const amountInput = document.getElementById('loan-request-amount'); const modalTerms = document.getElementById('modal-loan-terms'); amountInput.value = parseFloat(currentLoanEligibility.maxLoanAmount) || 0; modalTerms.innerHTML = document.getElementById('loan-terms-display').innerHTML; document.getElementById('loan-application-form').style.display = 'block'; document.getElementById('loan-success-message').style.display = 'none'; document.getElementById('loan-application-status').textContent = ''; modal.classList.add('active'); }
@@ -4534,13 +4593,13 @@
                 const term = parseInt(document.getElementById('loan-term-selection').value);
                 if (!amount || amount < 1000) { showNotification('error', 'Invalid Amount', 'Minimum loan amount is $1,000'); return; }
                 if (amount > (parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)) { showNotification('error', 'Amount Exceeds Limit', `Maximum loan amount is ${formatFiat(parseFloat(currentLoanEligibility?.maxLoanAmount) || 0)}`); return; }
-                document.getElementById('submit-loan-application').disabled = true;
-                document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+                const submitBtn = document.getElementById('submit-loan-application');
+                if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...'; }
                 document.getElementById('loan-application-status').textContent = 'Submitting your loan application...';
                 const response = await fetch('https://bithash-backend-kg7j.onrender.com/api/loans/apply', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ amount, purpose, term, interestRate: parseFloat(currentLoanEligibility?.monthlyInterest) || 9.99, disbursementFee: parseFloat(currentLoanEligibility?.disbursementFee) || 0.99, maxAmount: parseFloat(currentLoanEligibility?.maxLoanAmount) || 0, eligibilityData: currentLoanEligibility }) });
                 if (response.ok) { document.getElementById('loan-application-form').style.display = 'none'; document.getElementById('loan-success-message').style.display = 'block'; showNotification('success', 'Application Submitted', `Your loan application for ${formatFiat(amount)} has been submitted successfully.`); setTimeout(() => { checkLoanEligibility(); }, 2000); }
                 else { const errorData = await response.json(); throw new Error(errorData.message || 'Failed to submit loan application'); }
-            } catch (error) { console.error('Error submitting loan application:', error); document.getElementById('submit-loan-application').disabled = false; document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-paper-plane"></i> Submit Loan Application'; document.getElementById('loan-application-status').textContent = error.message || 'Failed to submit application'; showNotification('error', 'Application Failed', error.message || 'There was an issue submitting your loan application'); }
+            } catch (error) { console.error('Error submitting loan application:', error); if (document.getElementById('submit-loan-application')) { document.getElementById('submit-loan-application').disabled = false; document.getElementById('submit-loan-application').innerHTML = '<i class="fas fa-paper-plane"></i> Submit Loan Application'; } document.getElementById('loan-application-status').textContent = error.message || 'Failed to submit application'; showNotification('error', 'Application Failed', error.message || 'There was an issue submitting your loan application'); }
         }
         
         function copyReferralLink() {
@@ -4595,20 +4654,20 @@
             const pageAssets = filteredAssets.slice(start, end);
             const list = document.getElementById('asset-selector-list');
             if (!list) return;
-            list.innerHTML = '';
+            let newHtml = '';
             pageAssets.forEach(asset => {
-                const item = document.createElement('div');
-                item.className = `asset-selector-item ${asset.symbol === userPreferences.displayAsset ? 'selected' : ''}`;
-                item.onclick = () => selectDisplayAsset(asset);
-                item.innerHTML = `
-                    <img src="${asset.logo}" alt="${asset.symbol}">
-                    <div class="asset-selector-item-info">
-                        <div class="asset-selector-item-name">${asset.name}</div>
-                        <div class="asset-selector-item-symbol">${asset.symbol.toUpperCase()}</div>
+                const selectedClass = asset.symbol === userPreferences.displayAsset ? 'selected' : '';
+                newHtml += `
+                    <div class="asset-selector-item ${selectedClass}" onclick="selectDisplayAsset({id:'${asset.id}',symbol:'${asset.symbol}',name:'${asset.name}',logo:'${asset.logo}'})">
+                        <img src="${asset.logo}" alt="${asset.symbol}">
+                        <div class="asset-selector-item-info">
+                            <div class="asset-selector-item-name">${asset.name}</div>
+                            <div class="asset-selector-item-symbol">${asset.symbol.toUpperCase()}</div>
+                        </div>
                     </div>
                 `;
-                list.appendChild(item);
             });
+            if (list.innerHTML !== newHtml) list.innerHTML = newHtml;
             const totalPages = Math.ceil(filteredAssets.length / 5);
             document.getElementById('asset-selector-page-info').textContent = `${assetPage}/${totalPages || 1}`;
             document.getElementById('asset-selector-prev').disabled = assetPage === 1;
@@ -4842,7 +4901,6 @@
         
         function renderPortfolioTransactionsList(container) {
             if (!container) return;
-            container.innerHTML = '';
             if (!currentAssetTransactions || currentAssetTransactions.length === 0) {
                 container.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--gray);">No transactions found for this asset</div>';
                 return;
@@ -4851,6 +4909,7 @@
             const end = start + assetTransactionsPerPage;
             const pageTransactions = currentAssetTransactions.slice(start, end);
             
+            let newHtml = '';
             pageTransactions.forEach(t => {
                 const date = new Date(t.date || t.createdAt || t.timestamp || new Date());
                 const formattedDate = date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -4862,22 +4921,22 @@
                     if (t.profit > 0) profitDisplay = `<span class="price-positive"> (+${formatFiat(t.profit)})</span>`;
                     else if (t.loss > 0) profitDisplay = `<span class="price-negative"> (-${formatFiat(t.loss)})</span>`;
                 }
-                const item = document.createElement('div');
-                item.className = 'portfolio-transaction-item';
-                item.innerHTML = `
-                    <div class="transaction-date">${formattedDate}</div>
-                    <div class="transaction-details">
-                        <div>
-                            <span class="transaction-type ${t.type || 'buy'}">${(t.type || 'buy').toUpperCase()}</span>
-                            <span class="transaction-price">@ ${formatFiat(t.price || 0)}</span>
-                        </div>
-                        <div class="transaction-amount ${amountClass}">
-                            ${amountPrefix}${formatNumberWithCommas(t.amount || t.assetAmount || 0, 6)} ${(t.asset || 'btc').toUpperCase()}${profitDisplay}
+                newHtml += `
+                    <div class="portfolio-transaction-item">
+                        <div class="transaction-date">${formattedDate}</div>
+                        <div class="transaction-details">
+                            <div>
+                                <span class="transaction-type ${t.type || 'buy'}">${(t.type || 'buy').toUpperCase()}</span>
+                                <span class="transaction-price">@ ${formatFiat(t.price || 0)}</span>
+                            </div>
+                            <div class="transaction-amount ${amountClass}">
+                                ${amountPrefix}${formatNumberWithCommas(t.amount || t.assetAmount || 0, 6)} ${(t.asset || 'btc').toUpperCase()}${profitDisplay}
+                            </div>
                         </div>
                     </div>
                 `;
-                container.appendChild(item);
             });
+            if (container.innerHTML !== newHtml) container.innerHTML = newHtml;
             
             const pageInfo = document.getElementById('asset-portfolio-page-info');
             const prevBtn = document.getElementById('asset-portfolio-prev');
@@ -5016,14 +5075,20 @@
             const pageItems = filteredFiatList.slice(start, end); 
             const container = document.getElementById('fiat-list-container'); 
             if (!container) return;
-            container.innerHTML = ''; 
+            let newHtml = '';
             pageItems.forEach(fiat => { 
-                const item = document.createElement('div'); 
-                item.className = `asset-selector-item ${fiat.code === userPreferences.fiatCurrency ? 'selected' : ''}`; 
-                item.onclick = () => selectFiatCurrencyAndSave(fiat); 
-                item.innerHTML = `<img src="${fiat.flag}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;"><div class="asset-selector-item-info"><div class="asset-selector-item-name">${fiat.name}</div><div class="asset-selector-item-symbol">${fiat.code}</div></div>`; 
-                container.appendChild(item); 
+                const selectedClass = fiat.code === userPreferences.fiatCurrency ? 'selected' : '';
+                newHtml += `
+                    <div class="asset-selector-item ${selectedClass}" onclick="selectFiatCurrencyAndSave({code:'${fiat.code}',name:'${fiat.name}',flag:'${fiat.flag}',exchangeRate:${fiat.exchangeRate}})">
+                        <img src="${fiat.flag}" style="width: 24px; height: 24px; border-radius: 50%; object-fit: cover;">
+                        <div class="asset-selector-item-info">
+                            <div class="asset-selector-item-name">${fiat.name}</div>
+                            <div class="asset-selector-item-symbol">${fiat.code}</div>
+                        </div>
+                    </div>
+                `;
             }); 
+            if (container.innerHTML !== newHtml) container.innerHTML = newHtml;
             const totalPages = Math.ceil(filteredFiatList.length / fiatPerPage); 
             document.getElementById('fiat-page-info').textContent = `${fiatPage}/${totalPages || 1}`; 
             document.getElementById('fiat-prev').disabled = fiatPage === 1; 
@@ -5393,7 +5458,7 @@
         }
         
         // =============================================
-        // SOCKET.IO - REAL-TIME UPDATES FROM BACKEND
+        // SOCKET.IO - REAL-TIME UPDATES FROM BACKEND (NO EXTERNAL PRICE APIs)
         // =============================================
         function initSocketIO() {
             const token = localStorage.getItem('jwtToken'); 
@@ -5422,15 +5487,18 @@
             socket.on('balance_update', (data) => { 
                 if (data.main !== undefined) { 
                     userBalances.main = parseFloat(data.main); 
-                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main); 
+                    const mainElem = document.getElementById('main-balance');
+                    if (mainElem) mainElem.textContent = formatFiat(userBalances.main); 
                 } 
                 if (data.active !== undefined && data.active !== null) { 
                     userBalances.active = parseFloat(data.active); 
-                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active); 
+                    const activeElem = document.getElementById('active-balance');
+                    if (activeElem) activeElem.textContent = formatFiat(userBalances.active); 
                 } 
                 if (data.matured !== undefined) { 
                     userBalances.matured = parseFloat(data.matured); 
-                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured); 
+                    const maturedElem = document.getElementById('matured-balance');
+                    if (maturedElem) maturedElem.textContent = formatFiat(userBalances.matured); 
                 } 
                 updateMobileBalances(); 
             });
@@ -5466,10 +5534,12 @@
                 renderAssetsWithBalanceEnhanced(); 
             });
             
-            // DEBOUNCED PRICE UPDATE TO PREVENT BLINKING
+            // DEBOUNCED PRICE UPDATE TO PREVENT BLINKING - ALL PRICES FROM BACKEND ONLY
             let pendingPriceRender = false;
             socket.on('price_update', (prices) => {
                 console.log('📊 Real-time price update received from backend:', Object.keys(prices).length, 'assets');
+                // Store prices globally for investments to use
+                currentPrices = prices;
                 for (const [assetSymbol, priceData] of Object.entries(prices)) {
                     const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
                     if (assetIndex !== -1) {
@@ -5483,12 +5553,15 @@
                     }
                 }
                 
+                // Debounce render to prevent multiple rapid updates causing flicker
                 if (!pendingPriceRender) {
                     pendingPriceRender = true;
                     requestAnimationFrame(() => {
                         userPortfolio = [...fullAssetsList];
                         renderAssetsWithBalanceEnhanced();
                         renderTransactionsTable();
+                        // Also update investments silently in background
+                        loadInvestments();
                         pendingPriceRender = false;
                     });
                 }
@@ -5501,7 +5574,7 @@
                     const sign = data.main.percentage >= 0 ? '+' : ''; 
                     const formattedPnl = `${formatFiat(Math.abs(data.main.amount))} (${sign}${data.main.percentage.toFixed(2)}%)`;
                     const pnlText = `Today's PnL ${sign}${formattedPnl}`;
-                    if (mainPnlSpan) {
+                    if (mainPnlSpan && mainPnlSpan.innerHTML !== pnlText) {
                         mainPnlSpan.innerHTML = pnlText;
                         const container = document.getElementById('main-pnl-container');
                         if (container) {
@@ -5509,7 +5582,7 @@
                             container.classList.add(data.main.percentage >= 0 ? 'positive' : 'negative');
                         }
                     }
-                    if (mainMobileSpan) {
+                    if (mainMobileSpan && mainMobileSpan.innerHTML !== pnlText) {
                         mainMobileSpan.innerHTML = pnlText;
                         const mobileContainer = document.getElementById('mobile-main-pnl');
                         if (mobileContainer) {
@@ -5524,7 +5597,7 @@
                     const sign = data.matured.percentage >= 0 ? '+' : ''; 
                     const formattedPnl = `${formatFiat(Math.abs(data.matured.amount))} (${sign}${data.matured.percentage.toFixed(2)}%)`;
                     const pnlText = `Today's PnL ${sign}${formattedPnl}`;
-                    if (maturedPnlSpan) {
+                    if (maturedPnlSpan && maturedPnlSpan.innerHTML !== pnlText) {
                         maturedPnlSpan.innerHTML = pnlText;
                         const container = document.getElementById('matured-pnl-container');
                         if (container) {
@@ -5532,7 +5605,7 @@
                             container.classList.add(data.matured.percentage >= 0 ? 'positive' : 'negative');
                         }
                     }
-                    if (maturedMobileSpan) {
+                    if (maturedMobileSpan && maturedMobileSpan.innerHTML !== pnlText) {
                         maturedMobileSpan.innerHTML = pnlText;
                         const mobileContainer = document.getElementById('mobile-matured-pnl');
                         if (mobileContainer) {
@@ -5704,8 +5777,11 @@
         function updateMoneyFlowChart() { 
             if (!moneyFlowChart) return; 
             const data = calculateMoneyFlowFromTransactions(); 
-            moneyFlowChart.data.datasets[0].data = [data.deposits, data.withdrawals, data.conversions, data.investments]; 
-            moneyFlowChart.update(); 
+            const newData = [data.deposits, data.withdrawals, data.conversions, data.investments];
+            if (JSON.stringify(moneyFlowChart.data.datasets[0].data) !== JSON.stringify(newData)) {
+                moneyFlowChart.data.datasets[0].data = newData;
+                moneyFlowChart.update();
+            }
         }
         
         function initDonutChart() { 
@@ -5745,7 +5821,7 @@
         }
         
         // =============================================
-        // AUTO REFRESH (excluding active investments because it runs on its own 10-second loop)
+        // AUTO REFRESH (Background only, no blinking)
         // =============================================
         function startAutoRefresh() {
             setInterval(async () => {
@@ -5754,6 +5830,7 @@
                 await loadReferralData();
                 await loadDownlineData();
                 await checkLoanEligibility();
+                // Note: loadInvestments runs separately every 10 seconds via startInvestmentsBackgroundRefresh
             }, 60000);
         }
         
@@ -5860,6 +5937,7 @@
                 document.getElementById('current-year').textContent = new Date().getFullYear();
                 startAnnouncementsPolling();
                 startAutoRefresh();
+                startInvestmentsBackgroundRefresh();
                 initSocketIO();
                 initDonutChart();
                 
