@@ -4237,8 +4237,9 @@
         }
         
         // =============================================
-        // LOAD INVESTMENTS WITH PROFIT CALCULATION
+        // LOAD INVESTMENTS WITH PROFIT CALCULATION (SILENT UPDATE - NO BLINK)
         // =============================================
+        let investmentsUpdateTimeout = null;
         async function loadInvestments() {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -4247,58 +4248,47 @@
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 const tableBody = document.getElementById('investments-table');
-                tableBody.innerHTML = '';
+                
                 if (response.ok) {
                     const data = await response.json();
                     const investments = data.data?.investments || data.investments || [];
                     if (investments.length === 0) {
-                        tableBody.innerHTML = `</td><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);"><i class="fas fa-wallet" style="font-size: 2rem; margin-bottom: 10px;"></i><p>No active cloud mining contracts</p><button class="btn btn-outline" onclick="window.location.href='index.html#plans'" style="margin-top: 10px;">Start Cloud Mining</button></td></tr>`;
+                        tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);"><i class="fas fa-wallet" style="font-size: 2rem; margin-bottom: 10px;"></i><p>No active cloud mining contracts</p><button class="btn btn-outline" onclick="window.location.href='index.html#plans'" style="margin-top: 10px;">Start Cloud Mining</button></td></tr>`;
                         return;
                     }
                     
-                    // Get current BTC price for profit calculation
-                    let currentBTCPrice = 0;
+                    let currentBTCPrice = 43000;
                     try {
-                        const priceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+                        const priceResponse = await fetch('https://bithash-backend-kg7j.onrender.com/api/price/btc');
                         if (priceResponse.ok) {
                             const priceData = await priceResponse.json();
-                            currentBTCPrice = priceData.bitcoin?.usd || 43000;
+                            currentBTCPrice = priceData.price || 43000;
                         }
                     } catch (err) {
                         currentBTCPrice = 43000;
                     }
                     
+                    let html = '';
                     investments.forEach(investment => {
-                        const row = document.createElement('tr');
                         const startDate = new Date(investment.startDate);
                         const endDate = new Date(investment.endDate);
                         const now = new Date();
                         
-                        // Calculate time remaining
                         const timeLeftMs = Math.max(0, endDate - now);
                         const hoursLeft = Math.ceil(timeLeftMs / (1000 * 60 * 60));
                         const daysLeft = Math.floor(hoursLeft / 24);
                         const remainingHours = hoursLeft % 24;
                         const timeLeftDisplay = daysLeft > 0 ? `${daysLeft}d ${remainingHours}h` : `${hoursLeft}h`;
                         
-                        // Calculate progress percentage
                         const totalDurationMs = endDate - startDate;
                         const elapsedMs = Math.max(0, now - startDate);
                         const progressPercentage = totalDurationMs > 0 ? Math.min(100, (elapsedMs / totalDurationMs) * 100) : 0;
                         
-                        // Get ROI percentage from investment
                         const roiPercentage = investment.profitPercentage || 0;
-                        
-                        // Calculate expected profit in USD
                         const expectedProfitUSD = investment.amount * (roiPercentage / 100);
-                        
-                        // Calculate current profit based on elapsed time
                         const currentProfitUSD = expectedProfitUSD * (progressPercentage / 100);
-                        
-                        // Calculate profit in BTC using current BTC price
                         const currentProfitBTC = currentProfitUSD / currentBTCPrice;
                         
-                        // Determine status display
                         let statusText = '';
                         let statusClass = '';
                         if (investment.status === 'active') {
@@ -4314,21 +4304,36 @@
                             statusClass = investment.status === 'completed' ? 'success' : 'pending';
                         }
                         
-                        row.innerHTML = `
-                            <td>${investment.planName || 'Cloud Mining Plan'}</div>
-                            <td>$${formatNumberWithCommas(investment.amount || 0, 2)} USD</div>
-                            <td>${investment.durationHours || 0} hours</div>
-                            <td><span class="roi-badge">${roiPercentage}%</span></div>
-                            <td class="profit-positive">+${formatNumberWithCommas(currentProfitBTC, 8)} BTC</div>
-                            <td class="profit-positive">+$${formatNumberWithCommas(currentProfitUSD, 2)} USD</div>
-                            <td>${endDate.toLocaleDateString()}</div>
-                            <td><span class="status-badge ${statusClass}">${statusText}</span></div>
+                        html += `
+                            <tr>
+                                <td>${investment.planName || 'Cloud Mining Plan'}</td>
+                                <td>$${formatNumberWithCommas(investment.amount || 0, 2)} USD</td>
+                                <td>${investment.durationHours || 0} hours</td>
+                                <td><span class="roi-badge">${roiPercentage}%</span></td>
+                                <td class="profit-positive">+${formatNumberWithCommas(currentProfitBTC, 8)} BTC</td>
+                                <td class="profit-positive">+$${formatNumberWithCommas(currentProfitUSD, 2)} USD</td>
+                                <td>${endDate.toLocaleDateString()}</td>
+                                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                            </tr>
                         `;
-                        tableBody.appendChild(row);
                     });
+                    
+                    // Silently replace table content without animation/transition
+                    if (tableBody.innerHTML !== html) {
+                        tableBody.innerHTML = html;
+                    }
+                } else {
+                    tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);">Failed to load active investments</td></tr>';
                 }
             } catch (error) {
                 console.error('Error loading investments:', error);
+                const tableBody = document.getElementById('investments-table');
+                if (tableBody) tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--gray);">Error loading investments</td></tr>';
+            } finally {
+                if (investmentsUpdateTimeout) clearTimeout(investmentsUpdateTimeout);
+                investmentsUpdateTimeout = setTimeout(() => {
+                    loadInvestments();
+                }, 10000);
             }
         }
         
@@ -4365,7 +4370,7 @@
             const tableBody = document.getElementById('transactions-table');
             tableBody.innerHTML = '';
             if (allTransactions.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</div></div>`;
+                tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>`;
                 document.getElementById('transactions-page-info').textContent = '0/0';
                 document.getElementById('transactions-prev').disabled = true;
                 document.getElementById('transactions-next').disabled = true;
@@ -4414,7 +4419,7 @@
                                 
                 let typeCell = `<div class="type-cell-icon"><span class="type-icon">${typeIcon}</span><span class="type-label ${typeColorClass}">${transaction.type || 'Transaction'}</span></div>`;
                 let detailText = transaction.description || transaction.details || (transaction.type === 'deposit' ? `Deposit of ${formattedAssetSymbol}` : transaction.type === 'withdrawal' ? `Withdrawal of ${formattedAssetSymbol}` : transaction.type === 'buy' ? `Bought ${formattedAssetSymbol}` : transaction.type === 'sell' ? `Sold ${formattedAssetSymbol}` : 'Transaction processed');
-                row.innerHTML = `<td>${formattedDate}</div><td>${typeCell}</div><td>${amountCell}</div><td>${assetDisplay}</div><td>${statusBadge}</div><td>${detailText}</div>`;
+                row.innerHTML = `<td>${formattedDate}</td><td>${typeCell}</td><td>${amountCell}</td><td>${assetDisplay}</td><td>${statusBadge}</td><td>${detailText}</td>`;
                 tableBody.appendChild(row);
             });
             const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
@@ -4459,7 +4464,7 @@
             if (!tableBody) return;
             tableBody.innerHTML = '';
             if (!downlineData || downlineData.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--gray);"><i class="fas fa-users" style="font-size: 2.5rem; margin-bottom: 15px;"></i><p>You don't have any downline members yet. Share your referral link to grow your network!</p></div></div>`;
+                tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--gray);"><i class="fas fa-users" style="font-size: 2.5rem; margin-bottom: 15px;"></i><p>You don't have any downline members yet. Share your referral link to grow your network!</p></td></tr>`;
                 document.getElementById('downline-pagination').style.display = 'none';
                 return;
             }
@@ -4482,11 +4487,11 @@
                 const earnings = member.totalEarned || 0;
                 const totalInvested = member.totalInvested || member.investmentRounds || 0;
                 row.innerHTML = `<td><div class="downline-user-info"><div class="downline-avatar">${initials}</div><div><div class="downline-username">${fullName}</div><div class="downline-email">${email}</div></div></div></div>
-                                                <td><span class="downline-level-badge">${levelText}</span></div>
-                                                <td>${formattedDate}</div>
-                                                <td><span class="downline-status ${statusClass}">${statusText}</span></div>
-                                                <td>${formatFiat(totalInvested)}</div>
-                                                <td class="downline-earnings">${formatFiat(earnings)}</div>
+                                                 <td><span class="downline-level-badge">${levelText}</span></td>
+                                                 <td>${formattedDate}</td>
+                                                 <td><span class="downline-status ${statusClass}">${statusText}</span></td>
+                                                 <td>${formatFiat(totalInvested)}</td>
+                                                <td class="downline-earnings">${formatFiat(earnings)}</td>
                                             `;
                 tableBody.appendChild(row);
             });
@@ -5478,14 +5483,12 @@
                     }
                 }
                 
-                // Debounce render to prevent multiple rapid updates causing flicker
                 if (!pendingPriceRender) {
                     pendingPriceRender = true;
                     requestAnimationFrame(() => {
                         userPortfolio = [...fullAssetsList];
                         renderAssetsWithBalanceEnhanced();
                         renderTransactionsTable();
-                        loadInvestments();
                         pendingPriceRender = false;
                     });
                 }
@@ -5742,12 +5745,11 @@
         }
         
         // =============================================
-        // AUTO REFRESH
+        // AUTO REFRESH (excluding active investments because it runs on its own 10-second loop)
         // =============================================
         function startAutoRefresh() {
             setInterval(async () => {
                 await loadAvailableAssets();
-                await loadInvestments();
                 await loadTransactions();
                 await loadReferralData();
                 await loadDownlineData();
