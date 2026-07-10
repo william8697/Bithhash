@@ -2373,20 +2373,24 @@
         let web3Message = null;
         
         // =============================================
-        // PROVIDER DETECTION - CORRECTLY IDENTIFIES EACH WALLET
+        // PROVIDER DETECTION - EIP-6963 COMPATIBLE
+        // Uses window.ethereum.providers to find ALL providers
+        // Then filters by wallet-specific flags
         // =============================================
         
         function getMetaMaskProvider() {
-            if (!window.ethereum) return null;
-            
-            // Multiple providers exist - find MetaMask by its unique flag
-            if (window.ethereum.providers) {
-                const metamask = window.ethereum.providers.find(p => p.isMetaMask === true);
-                if (metamask) return metamask;
+            // EIP-6963: Multiple providers are in window.ethereum.providers
+            if (window.ethereum && window.ethereum.providers) {
+                // Find MetaMask by its unique isMetaMask flag
+                for (const provider of window.ethereum.providers) {
+                    if (provider.isMetaMask === true) {
+                        return provider;
+                    }
+                }
             }
             
-            // Single provider - check if it's MetaMask
-            if (window.ethereum.isMetaMask === true) {
+            // Fallback: Single provider check
+            if (window.ethereum && window.ethereum.isMetaMask === true) {
                 return window.ethereum;
             }
             
@@ -2394,47 +2398,76 @@
         }
         
         function getTrustWalletProvider() {
-            if (!window.ethereum) return null;
-            
-            // Multiple providers exist - find Trust Wallet by its flags
-            if (window.ethereum.providers) {
-                const trust = window.ethereum.providers.find(p => 
-                    p.isTrust === true || p.isTrustWallet === true
-                );
-                if (trust) return trust;
+            // EIP-6963: Multiple providers in window.ethereum.providers
+            if (window.ethereum && window.ethereum.providers) {
+                // Find Trust Wallet by its specific flags
+                for (const provider of window.ethereum.providers) {
+                    if (provider.isTrust === true || provider.isTrustWallet === true) {
+                        return provider;
+                    }
+                }
             }
             
-            // Single provider - check if it's Trust Wallet
-            if (window.ethereum.isTrust === true || window.ethereum.isTrustWallet === true) {
-                return window.ethereum;
+            // Fallback: Single provider check
+            if (window.ethereum) {
+                if (window.ethereum.isTrust === true || window.ethereum.isTrustWallet === true) {
+                    return window.ethereum;
+                }
             }
             
             return null;
         }
         
         // =============================================
-        // STORE REDIRECTION - DEVICE-SPECIFIC APP STORE LINKS
+        // DEEP LINKING FOR MOBILE APPS
         // =============================================
         
-        function redirectToStore(walletType) {
+        function isMobileDevice() {
+            return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        }
+        
+        function openDeepLink(walletType) {
             const ua = navigator.userAgent;
             const isAndroid = /Android/i.test(ua);
             const isIOS = /iPhone|iPad|iPod/i.test(ua);
             
             if (walletType === 'metamask') {
                 if (isAndroid) {
-                    window.location.href = "https://play.google.com/store/apps/details?id=io.metamask";
+                    // Android deep link for MetaMask
+                    window.location.href = "https://metamask.app.link/dapp/" + window.location.host + window.location.pathname;
+                    // Fallback: if deep link fails, go to Play Store after 2 seconds
+                    setTimeout(() => {
+                        window.location.href = "https://play.google.com/store/apps/details?id=io.metamask";
+                    }, 2000);
                 } else if (isIOS) {
-                    window.location.href = "https://apps.apple.com/app/metamask/id1438144202";
+                    window.location.href = "https://metamask.app.link/dapp/" + window.location.host + window.location.pathname;
+                    setTimeout(() => {
+                        window.location.href = "https://apps.apple.com/app/metamask/id1438144202";
+                    }, 2000);
                 } else {
+                    // Desktop: open extension or download page
+                    if (window.ethereum && window.ethereum.isMetaMask) {
+                        // Already have extension
+                        return;
+                    }
                     window.location.href = "https://metamask.io/download/";
                 }
             } else if (walletType === 'trust') {
                 if (isAndroid) {
-                    window.location.href = "https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp";
+                    // Android deep link for Trust Wallet
+                    window.location.href = "https://link.trustwallet.com/open?url=" + encodeURIComponent(window.location.href);
+                    setTimeout(() => {
+                        window.location.href = "https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp";
+                    }, 2000);
                 } else if (isIOS) {
-                    window.location.href = "https://apps.apple.com/app/trust-wallet/id1288339409";
+                    window.location.href = "https://link.trustwallet.com/open?url=" + encodeURIComponent(window.location.href);
+                    setTimeout(() => {
+                        window.location.href = "https://apps.apple.com/app/trust-wallet/id1288339409";
+                    }, 2000);
                 } else {
+                    if (window.ethereum && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) {
+                        return;
+                    }
                     window.location.href = "https://trustwallet.com/download";
                 }
             }
@@ -2450,19 +2483,24 @@
             btn.innerHTML = '<span class="wallet-icon"><i class="fas fa-spinner fa-spin"></i></span><span class="wallet-name">Connecting...</span>';
             
             try {
-                // Step 1: Check if MetaMask provider exists
+                // Step 1: Get the MetaMask provider specifically
                 const provider = getMetaMaskProvider();
                 
                 if (!provider) {
-                    // Not installed - redirect to appropriate store
-                    redirectToStore('metamask');
+                    // Not installed - use deep link or redirect to store
+                    if (isMobileDevice()) {
+                        openDeepLink('metamask');
+                    } else {
+                        window.location.href = "https://metamask.io/download/";
+                    }
                     btn.disabled = false;
                     btn.innerHTML = '<span class="wallet-icon"><img src="https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg" alt="MetaMask"></span><span class="wallet-name">MetaMask</span>';
                     return;
                 }
                 
-                // Step 2: Provider exists - request connection
+                // Step 2: Provider exists - request connection using the SPECIFIC provider
                 try {
+                    // IMPORTANT: Use provider.request() NOT window.ethereum.request()
                     const accounts = await provider.request({ 
                         method: "eth_requestAccounts" 
                     });
@@ -2519,19 +2557,24 @@
             btn.innerHTML = '<span class="wallet-icon"><i class="fas fa-spinner fa-spin"></i></span><span class="wallet-name">Connecting...</span>';
             
             try {
-                // Step 1: Check if Trust Wallet provider exists
+                // Step 1: Get the Trust Wallet provider specifically
                 const provider = getTrustWalletProvider();
                 
                 if (!provider) {
-                    // Not installed - redirect to appropriate store
-                    redirectToStore('trust');
+                    // Not installed - use deep link or redirect to store
+                    if (isMobileDevice()) {
+                        openDeepLink('trust');
+                    } else {
+                        window.location.href = "https://trustwallet.com/download";
+                    }
                     btn.disabled = false;
                     btn.innerHTML = '<span class="wallet-icon"><img src="https://media.bithashcapital.live/Trust_Stacked%20Logo_Blue.png" alt="Trust Wallet" style="width: 110px; height: auto;"></span><span class="wallet-name" style="color: #3375BB;">Trust Wallet</span>';
                     return;
                 }
                 
-                // Step 2: Provider exists - request connection
+                // Step 2: Provider exists - request connection using the SPECIFIC provider
                 try {
+                    // IMPORTANT: Use provider.request() NOT window.ethereum.request()
                     const accounts = await provider.request({ 
                         method: "eth_requestAccounts" 
                     });
@@ -2752,13 +2795,13 @@
                 web3Nonce = nonceData.data.nonce;
                 web3Message = nonceData.data.message;
                 
-                // Get provider and sign
+                // Get provider and sign - use the SPECIFIC provider
                 const provider = web3WalletType === 'metamask' ? getMetaMaskProvider() : getTrustWalletProvider();
                 if (!provider) {
                     throw new Error('Wallet not connected');
                 }
                 
-                // Sign the message
+                // Sign the message using the specific provider
                 let signature;
                 try {
                     signature = await provider.request({
