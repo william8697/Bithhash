@@ -56,6 +56,20 @@
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js">
 </script>
 
+<!-- WalletConnect v2 Sign Client -->
+<script src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js">
+</script>
+
+<!-- EIP-6963 polyfill for browsers that don't support it -->
+<script>
+if (typeof window !== 'undefined' && !window.eip6963) {
+  window.eip6963 = {
+    providers: [],
+    listeners: []
+  };
+}
+</script>
+
 <style>
     :root {
         --bg-base: #0B0E11;
@@ -2274,32 +2288,32 @@
 
                         <div class="divider">OR</div>
 
-                        <!-- WEB3 SECTION - COMPLETELY REWRITTEN WITH EIP-6963 AND WALLETCONNECT v2 -->
+                        <!-- WEB3 SECTION - COMPLETELY REWRITTEN WITH EIP-6963 + WALLETCONNECT v2 -->
                         <div class="web3-section">
                             <div class="web3-section-title">
                                 <i class="fas fa-link" style="margin-right: 8px;"></i>
                                 Sign up with Web3 Wallet
                             </div>
                             <div class="web3-wallets">
-                                <button type="button" class="wallet-btn metamask" id="metamask-btn" onclick="connectWeb3Wallet('metamask')">
+                                <button type="button" class="wallet-btn metamask" id="metamask-btn" onclick="connectWallet('io.metamask', 'metamask')">
                                     <span class="wallet-icon">
                                         <img src="https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg" alt="MetaMask">
                                     </span>
                                     <span class="wallet-name">MetaMask</span>
                                 </button>
-                                <button type="button" class="wallet-btn trust" id="trust-btn" onclick="connectWeb3Wallet('trust')">
+                                <button type="button" class="wallet-btn trust" id="trust-btn" onclick="connectWallet('com.trustwallet.app', 'trust')">
                                     <span class="wallet-icon">
                                         <img src="https://media.bithashcapital.live/Trust_Stacked%20Logo_Blue.png" alt="Trust Wallet" style="width: 90px; height: 90px;">
                                     </span>
                                     <span class="wallet-name" style="color: #3375BB;">Trust Wallet</span>
                                 </button>
-                                <button type="button" class="wallet-btn phantom" id="phantom-btn" onclick="connectWeb3Wallet('phantom')">
+                                <button type="button" class="wallet-btn phantom" id="phantom-btn" onclick="connectWallet('app.phantom', 'phantom')">
                                     <span class="wallet-icon">
                                         <img src="https://media.bithashcapital.live/Phantom-Icon_App_1200x1200.png" alt="Phantom Wallet" style="width: 24px; height: 24px;">
                                     </span>
                                     <span class="wallet-name" style="color: #6C3DFF;">Phantom</span>
                                 </button>
-                                <button type="button" class="wallet-btn rainbow" id="rainbow-btn" onclick="connectWeb3Wallet('rainbow')">
+                                <button type="button" class="wallet-btn rainbow" id="rainbow-btn" onclick="connectWallet('me.rainbow', 'rainbow')">
                                     <span class="wallet-icon">
                                         <img src="https://media.bithashcapital.live/ChatGPT%20Image%20Jul%2010%2C%202026%2C%2007_25_09%20PM.png" alt="Rainbow Wallet" style="width: 24px; height: 24px;">
                                     </span>
@@ -2406,10 +2420,15 @@
 
     <script>
         // =============================================
-        // WEB3 WALLET CONNECTION - EIP-6963 COMPLIANT
-        // NO window.ethereum direct calls - uses EIP-6963 discovery
+        // WEB3 WALLET CONNECTION - EIP-6963 + WALLETCONNECT v2
+        // COMPLETE REWRITE - No legacy window.ethereum conflicts
         // =============================================
 
+        // =============================================
+        // 1. EIP-6963 PROVIDER DISCOVERY
+        // =============================================
+
+        let discoveredProviders = [];
         let web3WalletAddress = null;
         let web3WalletType = null;
         let web3Nonce = null;
@@ -2419,88 +2438,20 @@
         let web3Message = null;
         let isConnecting = false;
 
-        // =============================================
-        // EIP-6963 PROVIDER DISCOVERY ENGINE
-        // =============================================
-
-        // Store discovered providers by rdns (Reverse Domain Name System)
-        const discoveredProviders = new Map();
-
-        // RDNS mapping for wallet identification
-        const WALLET_RDNS = {
-            'metamask': 'io.metamask',
-            'trust': 'com.trustwallet.app',
-            'phantom': 'app.phantom',
-            'rainbow': 'me.rainbow'
-        };
-
-        // =============================================
-        // STEP 1: Set up EIP-6963 event listener BEFORE DOM loads
-        // =============================================
-
+        // Set up EIP-6963 listener BEFORE DOM loads
         window.addEventListener("eip6963:announceProvider", (event) => {
             const detail = event.detail;
-            if (!detail || !detail.info || !detail.provider) return;
-
-            const rdns = detail.info.rdns;
-            // Store the provider by its rdns for targeted execution
-            if (!discoveredProviders.has(rdns)) {
-                discoveredProviders.set(rdns, {
-                    info: detail.info,
-                    provider: detail.provider
-                });
-                console.log(`🔍 Discovered wallet: ${detail.info.name} (${rdns})`);
+            if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
+                discoveredProviders.push(detail);
+                console.log(`[EIP-6963] Provider discovered: ${detail.info.name} (${detail.info.rdns})`);
             }
         });
 
-        // =============================================
-        // STEP 2: Request providers to announce themselves
-        // =============================================
-
-        // Dispatch the request event to trigger wallet announcements
+        // Request providers
         window.dispatchEvent(new Event("eip6963:requestProvider"));
 
-        // Also handle case where providers were already loaded (fallback)
-        if (window.ethereum && window.ethereum.providers) {
-            for (const provider of window.ethereum.providers) {
-                // Check if this provider has a rdns in its info
-                if (provider.info && provider.info.rdns) {
-                    if (!discoveredProviders.has(provider.info.rdns)) {
-                        discoveredProviders.set(provider.info.rdns, {
-                            info: provider.info,
-                            provider: provider
-                        });
-                    }
-                }
-            }
-        }
-
         // =============================================
-        // STEP 3: Get provider by rdns (targeted execution)
-        // =============================================
-
-        function getProviderByRdns(rdns) {
-            return discoveredProviders.get(rdns) || null;
-        }
-
-        function getProviderByWalletType(walletType) {
-            const rdns = WALLET_RDNS[walletType];
-            if (!rdns) return null;
-            return getProviderByRdns(rdns);
-        }
-
-        // =============================================
-        // STEP 4: Check if wallet is installed (via EIP-6963)
-        // =============================================
-
-        function isWalletInstalled(walletType) {
-            const rdns = WALLET_RDNS[walletType];
-            if (!rdns) return false;
-            return discoveredProviders.has(rdns);
-        }
-
-        // =============================================
-        // STEP 5: Mobile Deep Linking with Smart Fallback
+        // 2. MOBILE DETECTION & DEEP LINK HELPERS
         // =============================================
 
         function isMobileDevice() {
@@ -2514,111 +2465,112 @@
             return 'desktop';
         }
 
-        function safeRedirectToWallet(deepLinkUrl, storeUrl, callback) {
-            const startTime = Date.now();
-
-            // Attempt to trigger the native application scheme
-            window.location.href = deepLinkUrl;
-
-            // Set a delayed structural check
-            setTimeout(() => {
-                // If the browser window lost focus, the app launched successfully
-                // If the delta time is tight, the window remained active -> App is missing
-                if (Date.now() - startTime < 2000) {
-                    if (storeUrl) {
-                        window.location.href = storeUrl;
-                    }
-                }
-                if (callback) callback();
-            }, 1500);
-        }
-
-        function openWalletDeepLink(walletType) {
+        function getDeepLink(rdns, uri) {
+            const encodedUri = encodeURIComponent(uri);
             const os = getMobileOS();
-            const host = window.location.host;
-            const path = window.location.pathname;
-            const fullUrl = window.location.href;
+            
+            const deepLinks = {
+                'io.metamask': {
+                    android: `metamask://wc?uri=${encodedUri}`,
+                    ios: `metamask://wc?uri=${encodedUri}`
+                },
+                'com.trustwallet.app': {
+                    android: `trust://wc?uri=${encodedUri}`,
+                    ios: `trust://wc?uri=${encodedUri}`
+                },
+                'app.phantom': {
+                    android: `phantom://v1/connect?uri=${encodedUri}`,
+                    ios: `phantom://v1/connect?uri=${encodedUri}`
+                },
+                'me.rainbow': {
+                    android: `rainbow://wc?uri=${encodedUri}`,
+                    ios: `rainbow://wc?uri=${encodedUri}`
+                }
+            };
 
-            let deepLinkUrl = '';
-            let storeUrl = '';
+            const fallbackLinks = {
+                'io.metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
+                'com.trustwallet.app': `https://link.trustwallet.com/wc?uri=${encodedUri}`,
+                'app.phantom': `https://phantom.app/wc?uri=${encodedUri}`,
+                'me.rainbow': `https://rainbow.me/wc?uri=${encodedUri}`
+            };
 
-            switch (walletType) {
-                case 'metamask':
-                    if (os === 'android') {
-                        deepLinkUrl = `intent://${host}${path}#Intent;package=io.metamask;scheme=dapp;end`;
-                        storeUrl = 'https://play.google.com/store/apps/details?id=io.metamask';
-                    } else if (os === 'ios') {
-                        deepLinkUrl = `metamask://${host}${path}`;
-                        storeUrl = 'https://apps.apple.com/app/metamask/id1438144202';
-                    } else {
-                        deepLinkUrl = 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn';
-                    }
-                    break;
+            const link = deepLinks[rdns]?.[os] || fallbackLinks[rdns];
+            return link || fallbackLinks[rdns] || `https://walletconnect.org/wc?uri=${encodedUri}`;
+        }
 
-                case 'trust':
-                    if (os === 'android') {
-                        deepLinkUrl = `intent://${host}${path}#Intent;package=com.wallet.crypto.trustapp;scheme=trust;end`;
-                        storeUrl = 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp';
-                    } else if (os === 'ios') {
-                        deepLinkUrl = `trust://${host}${path}`;
-                        storeUrl = 'https://apps.apple.com/app/trust-wallet/id1288339409';
-                    } else {
-                        deepLinkUrl = 'https://trustwallet.com/browser-extension';
-                    }
-                    break;
-
-                case 'phantom':
-                    if (os === 'android') {
-                        deepLinkUrl = `intent://${host}${path}#Intent;package=app.phantom;scheme=phantom;end`;
-                        storeUrl = 'https://play.google.com/store/apps/details?id=app.phantom';
-                    } else if (os === 'ios') {
-                        deepLinkUrl = `phantom://${host}${path}`;
-                        storeUrl = 'https://apps.apple.com/app/phantom-wallet/id1598432977';
-                    } else {
-                        deepLinkUrl = 'https://phantom.app/download';
-                    }
-                    break;
-
-                case 'rainbow':
-                    if (os === 'android') {
-                        deepLinkUrl = `intent://${host}${path}#Intent;package=me.rainbow;scheme=rainbow;end`;
-                        storeUrl = 'https://play.google.com/store/apps/details?id=me.rainbow';
-                    } else if (os === 'ios') {
-                        deepLinkUrl = `rainbow://${host}${path}`;
-                        storeUrl = 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021';
-                    } else {
-                        deepLinkUrl = 'https://rainbow.me/download';
-                    }
-                    break;
-
-                default:
-                    return;
-            }
-
-            safeRedirectToWallet(deepLinkUrl, storeUrl);
+        function getStoreUrl(rdns) {
+            const stores = {
+                'io.metamask': {
+                    android: 'https://play.google.com/store/apps/details?id=io.metamask',
+                    ios: 'https://apps.apple.com/app/metamask/id1438144202'
+                },
+                'com.trustwallet.app': {
+                    android: 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp',
+                    ios: 'https://apps.apple.com/app/trust-wallet/id1288339409'
+                },
+                'app.phantom': {
+                    android: 'https://play.google.com/store/apps/details?id=app.phantom',
+                    ios: 'https://apps.apple.com/app/phantom-wallet/id1598432977'
+                },
+                'me.rainbow': {
+                    android: 'https://play.google.com/store/apps/details?id=me.rainbow',
+                    ios: 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021'
+                }
+            };
+            const os = getMobileOS();
+            return stores[rdns]?.[os] || 'https://walletconnect.org';
         }
 
         // =============================================
-        // STEP 6: Connect Web3 Wallet - EIP-6963 Target Execution
+        // 3. WALLETCONNECT v2 URI GENERATOR
         // =============================================
 
-        async function connectWeb3Wallet(walletType) {
+        let wcSignClient = null;
+
+        async function getWalletConnectURI() {
+            try {
+                if (!wcSignClient) {
+                    // Use the global SignClient from CDN
+                    wcSignClient = await WalletConnectSignClient.init({
+                        projectId: 'YOUR_WALLETCONNECT_PROJECT_ID', // Replace with your project ID
+                        metadata: {
+                            name: 'BitHash Capital',
+                            description: 'Web3 Application',
+                            url: 'https://www.bithashcapital.live',
+                            icons: ['https://www.bithashcapital.live/favicon.ico']
+                        }
+                    });
+                }
+
+                const { uri, approval } = await wcSignClient.connect({
+                    requiredNamespaces: {
+                        eip155: {
+                            methods: ['eth_sendTransaction', 'personal_sign'],
+                            chains: ['eip155:1'],
+                            events: ['chainChanged', 'accountsChanged']
+                        }
+                    }
+                });
+
+                // Store approval for later use
+                window._wcApproval = approval;
+                return uri;
+            } catch (err) {
+                console.error('[WC] Failed to generate URI:', err);
+                return null;
+            }
+        }
+
+        // =============================================
+        // 4. MAIN CONNECT FUNCTION - Unified for Desktop & Mobile
+        // =============================================
+
+        async function connectWallet(rdns, walletType) {
             if (isConnecting) return;
             isConnecting = true;
 
-            const btnMap = {
-                'metamask': 'metamask-btn',
-                'trust': 'trust-btn',
-                'phantom': 'phantom-btn',
-                'rainbow': 'rainbow-btn'
-            };
-
-            const btn = document.getElementById(btnMap[walletType]);
-            if (!btn) {
-                isConnecting = false;
-                return;
-            }
-
+            const btn = document.getElementById(`${walletType}-btn`);
             const originalHTML = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = '<span class="wallet-icon"><i class="fas fa-spinner fa-spin"></i></span><span class="wallet-name">Connecting...</span>';
@@ -2627,13 +2579,15 @@
                 // =============================================
                 // DESKTOP FLOW: EIP-6963 Provider Discovery
                 // =============================================
-                const rdns = WALLET_RDNS[walletType];
-                const providerEntry = getProviderByRdns(rdns);
+                const providerDetail = discoveredProviders.find(p => p.info.rdns === rdns);
 
-                if (providerEntry) {
-                    // Desktop: Use the isolated provider instance
+                if (providerDetail) {
+                    // Desktop: Use the isolated EIP-6963 provider
+                    console.log(`[Desktop] Using EIP-6963 provider for ${rdns}`);
+                    const provider = providerDetail.provider;
+
                     try {
-                        const accounts = await providerEntry.provider.request({
+                        const accounts = await provider.request({
                             method: "eth_requestAccounts"
                         });
 
@@ -2647,6 +2601,7 @@
 
                         await handleWeb3Connection(address);
 
+                        // Update UI
                         const statusDiv = document.getElementById('web3-status');
                         statusDiv.classList.add('active');
                         document.getElementById('web3-connected-address').textContent =
@@ -2656,13 +2611,10 @@
                         btn.innerHTML = originalHTML;
                         btn.style.borderColor = '#10B981';
                         btn.style.background = 'rgba(16, 185, 129, 0.1)';
-
                         isConnecting = false;
                         return;
-
                     } catch (err) {
-                        console.error(`${walletType} provider error:`, err);
-                        // User rejected or other error
+                        console.error(`[Desktop] Provider request failed for ${rdns}:`, err);
                         btn.disabled = false;
                         btn.innerHTML = originalHTML;
                         isConnecting = false;
@@ -2671,10 +2623,56 @@
                 }
 
                 // =============================================
-                // MOBILE FLOW: Smart Deep Linking
+                // MOBILE FLOW: WalletConnect v2 + Deep Link
                 // =============================================
                 if (isMobileDevice()) {
-                    openWalletDeepLink(walletType);
+                    console.log(`[Mobile] Using WalletConnect v2 for ${rdns}`);
+
+                    // Generate WalletConnect URI
+                    const uri = await getWalletConnectURI();
+                    if (!uri) {
+                        throw new Error('Failed to generate WalletConnect URI');
+                    }
+
+                    // Build native deep link
+                    const deepLink = getDeepLink(rdns, uri);
+                    const storeUrl = getStoreUrl(rdns);
+
+                    // Execute deep link with fallback
+                    const startTime = Date.now();
+                    window.location.href = deepLink;
+
+                    setTimeout(() => {
+                        // If window still has focus, app wasn't installed
+                        if (document.hasFocus() && Date.now() - startTime < 2000) {
+                            window.location.href = storeUrl;
+                        }
+                    }, 1500);
+
+                    // Wait for WalletConnect approval
+                    try {
+                        const session = await window._wcApproval();
+                        if (session && session.namespaces) {
+                            const address = session.namespaces.eip155.accounts[0].split(':')[2];
+                            web3WalletAddress = address;
+                            web3WalletType = walletType;
+                            await handleWeb3Connection(address);
+
+                            // Update UI
+                            const statusDiv = document.getElementById('web3-status');
+                            statusDiv.classList.add('active');
+                            document.getElementById('web3-connected-address').textContent =
+                                address.substring(0, 6) + '...' + address.substring(address.length - 4);
+
+                            btn.disabled = false;
+                            btn.innerHTML = originalHTML;
+                            btn.style.borderColor = '#10B981';
+                            btn.style.background = 'rgba(16, 185, 129, 0.1)';
+                        }
+                    } catch (wcErr) {
+                        console.error('[WC] Approval error:', wcErr);
+                    }
+
                     btn.disabled = false;
                     btn.innerHTML = originalHTML;
                     isConnecting = false;
@@ -2682,14 +2680,47 @@
                 }
 
                 // =============================================
-                // FALLBACK: Extension not installed
+                // FALLBACK: If no provider and not mobile
                 // =============================================
-                openWalletDeepLink(walletType);
+                console.log(`[Fallback] No EIP-6963 provider found for ${rdns}`);
+                // Try legacy window.ethereum as a last resort
+                if (window.ethereum) {
+                    try {
+                        const accounts = await window.ethereum.request({
+                            method: "eth_requestAccounts"
+                        });
+                        if (accounts && accounts.length > 0) {
+                            const address = accounts[0];
+                            web3WalletAddress = address;
+                            web3WalletType = walletType;
+                            await handleWeb3Connection(address);
+
+                            const statusDiv = document.getElementById('web3-status');
+                            statusDiv.classList.add('active');
+                            document.getElementById('web3-connected-address').textContent =
+                                address.substring(0, 6) + '...' + address.substring(address.length - 4);
+
+                            btn.disabled = false;
+                            btn.innerHTML = originalHTML;
+                            btn.style.borderColor = '#10B981';
+                            btn.style.background = 'rgba(16, 185, 129, 0.1)';
+                            isConnecting = false;
+                            return;
+                        }
+                    } catch (legacyErr) {
+                        console.error('[Fallback] Legacy window.ethereum failed:', legacyErr);
+                    }
+                }
+
+                // If all else fails, open download page
+                const storeUrl = getStoreUrl(rdns);
+                window.open(storeUrl, '_blank');
+
                 btn.disabled = false;
                 btn.innerHTML = originalHTML;
 
             } catch (err) {
-                console.error(`${walletType} connection error:`, err);
+                console.error(`[Connect] Error for ${rdns}:`, err);
                 btn.disabled = false;
                 btn.innerHTML = originalHTML;
             }
@@ -2698,7 +2729,7 @@
         }
 
         // =============================================
-        // STEP 7: Web3 User Check
+        // 5. WEB3 HANDLER - Check user and show popup
         // =============================================
 
         async function handleWeb3Connection(address) {
@@ -2709,24 +2740,20 @@
                 const checkData = await checkResponse.json();
 
                 if (checkData.data && checkData.data.exists) {
-                    // User exists, redirect to login
                     setTimeout(() => {
                         window.location.href = 'login';
                     }, 500);
                     return;
                 } else {
-                    // New user, show signup popup
                     showWeb3SignupPopup(address);
                 }
             } catch (err) {
                 console.error('Error checking user:', err);
-                // Still allow signup attempt
-                showWeb3SignupPopup(address);
             }
         }
 
         // =============================================
-        // STEP 8: Web3 Popup Functions
+        // 6. WEB3 POPUP FUNCTIONS
         // =============================================
 
         function showWeb3SignupPopup(address) {
@@ -2769,7 +2796,7 @@
         }
 
         // =============================================
-        // STEP 9: Web3 Signup Form Submission
+        // 7. WEB3 SIGNUP FORM SUBMISSION
         // =============================================
 
         document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
@@ -2788,7 +2815,7 @@
 
             try {
                 const accountType = document.querySelector('.web3-account-type .type-option.selected')?.dataset.type ||
-                    'individual';
+                'individual';
                 let formData;
 
                 if (accountType === 'individual') {
@@ -2855,7 +2882,6 @@
                     formData.referralCode = referralCode;
                 }
 
-                // Get nonce for signature
                 const nonceResponse = await fetch(
                     `https://bithash-backend-ycuf.onrender.com/api/web3/nonce?walletAddress=${web3WalletAddress}&type=signup&isSignup=true&accountType=${accountType}&referralCode=${referralCode || ''}`
                 );
@@ -2868,7 +2894,7 @@
 
                     if (nonceData.data?.action === 'login_suggested') {
                         statusDiv.innerHTML = nonceData.message +
-                            ' <a href="login" style="color: var(--accent);">Login here</a>';
+                        ' <a href="login" style="color: var(--accent);">Login here</a>';
                     }
 
                     submitText.style.display = 'inline-block';
@@ -2880,17 +2906,17 @@
                 web3Nonce = nonceData.data.nonce;
                 web3Message = nonceData.data.message;
 
-                // Get the provider via EIP-6963
-                const rdns = WALLET_RDNS[web3WalletType];
-                const providerEntry = getProviderByRdns(rdns);
+                // Get the provider directly from discovered providers
+                const providerDetail = discoveredProviders.find(p => p.info.rdns === web3WalletType);
+                const provider = providerDetail ? providerDetail.provider : window.ethereum;
 
-                if (!providerEntry) {
-                    throw new Error('Wallet not connected or not found');
+                if (!provider) {
+                    throw new Error('Wallet provider not found');
                 }
 
                 let signature;
                 try {
-                    signature = await providerEntry.provider.request({
+                    signature = await provider.request({
                         method: 'personal_sign',
                         params: [web3Message, web3WalletAddress]
                     });
@@ -2906,7 +2932,6 @@
 
                 web3Signature = signature;
 
-                // Verify signature
                 const verifyResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/web3/verify', {
                     method: 'POST',
                     headers: {
@@ -2948,7 +2973,6 @@
                     return;
                 }
 
-                // Complete signup
                 const signupResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/web3/signup', {
                     method: 'POST',
                     headers: {
@@ -2989,7 +3013,19 @@
         });
 
         // =============================================
-        // OTP FUNCTIONS (unchanged from original)
+        // 8. WEB3 POPUP CLOSE HANDLERS
+        // =============================================
+
+        document.getElementById('web3-popup').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeWeb3Popup();
+            }
+        });
+
+        document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
+
+        // =============================================
+        // 9. OTP FUNCTIONS (Unchanged from original)
         // =============================================
 
         let otpTimer, resendTimer, currentUserEmail = '',
@@ -3102,7 +3138,7 @@
                 else this.classList.remove('filled');
                 document.getElementById('otp-error').style.display = 'none';
                 const allFilled = Array.from(document.querySelectorAll('.otp-input')).every(inp => inp.value.length ===
-                    1);
+                1);
                 if (allFilled) setTimeout(() => autoVerifyOtp(), 100);
             });
             input.addEventListener('keydown', function(e) {
@@ -3223,14 +3259,6 @@
             pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
         });
         modal.addEventListener('click', (event) => { if (event.target === modal) modal.classList.remove('active'); });
-
-        document.getElementById('web3-popup').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeWeb3Popup();
-            }
-        });
-
-        document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
         // =============================================
         // TRADITIONAL FORM - COMPLETELY INDEPENDENT
