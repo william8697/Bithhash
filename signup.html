@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 
-    <!-- Google tag (gtag.js) -->
+<!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18267889047"></script>
 <script>
   window.dataLayer = window.dataLayer || [];
@@ -53,7 +53,7 @@
 <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCk7mCa_AnGRr0r9NswBFo1SKRvQiOy8fM&libraries=places&callback=initAutocomplete" async defer></script>
 
 <!-- ============================================= -->
-<!-- WALLETCONNECT v2 CDN - REQUIRED FOR MOBILE    -->
+<!-- WALLETCONNECT v2 CDN - PRODUCTION VERSION -->
 <!-- ============================================= -->
 <script src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js">
 </script>
@@ -1928,7 +1928,7 @@
         </div>
     </div>
 
-    <!-- Web3 Popup Modal - SCROLLABLE -->
+    <!-- Web3 Popup Modal -->
     <div class="web3-popup-overlay" id="web3-popup">
         <div class="web3-popup">
             <button class="web3-popup-close" id="web3-popup-close">&times;</button>
@@ -2280,9 +2280,7 @@
 
                         <div class="divider">OR</div>
 
-                        <!-- ============================================= -->
-                        <!-- WEB3 SECTION - EIP-6963 + WalletConnect v2    -->
-                        <!-- ============================================= -->
+                        <!-- WEB3 SECTION - EIP-6963 + WalletConnect v2 Architecture -->
                         <div class="web3-section">
                             <div class="web3-section-title">
                                 <i class="fas fa-link" style="margin-right: 8px;"></i>
@@ -2417,7 +2415,52 @@
         // WEB3 WALLET CONNECTION - EIP-6963 + WalletConnect v2 Architecture
         // =============================================
 
-        // Global state
+        // =============================================
+        // 1. CONFIGURATION - Fetch from /api/config endpoint
+        // =============================================
+        let walletConnectProjectId = null;
+        let configFetched = false;
+
+        async function fetchWalletConnectConfig() {
+            if (configFetched && walletConnectProjectId) return walletConnectProjectId;
+
+            try {
+                const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/config', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data && data.projectId) {
+                        walletConnectProjectId = data.projectId;
+                        configFetched = true;
+                        console.log('✅ WalletConnect Project ID fetched from /api/config');
+                        return walletConnectProjectId;
+                    }
+                }
+                
+                // Fallback to environment variable or hardcoded fallback
+                const fallbackId = '0a5035cbff45bc8eacd8bfbbc5361765';
+                console.warn('⚠️ Using fallback WalletConnect Project ID:', fallbackId);
+                walletConnectProjectId = fallbackId;
+                configFetched = true;
+                return walletConnectProjectId;
+
+            } catch (err) {
+                console.error('❌ Failed to fetch /api/config, using fallback:', err.message);
+                const fallbackId = '0a5035cbff45bc8eacd8bfbbc5361765';
+                walletConnectProjectId = fallbackId;
+                configFetched = true;
+                return walletConnectProjectId;
+            }
+        }
+
+        // =============================================
+        // 2. GLOBAL STATE
+        // =============================================
         let web3WalletAddress = null;
         let web3WalletType = null;
         let web3Nonce = null;
@@ -2428,54 +2471,32 @@
         let web3Provider = null;
         let signClient = null;
         let walletConnectInitialized = false;
-        let activeWcSession = null;
-        let wcUriLock = null;
+        let currentWcUri = null;
+        let wcSessionPromise = null;
+        let wcResolveSession = null;
+        let wcRejectSession = null;
+        let wcConnectionTimeout = null;
 
         // EIP-6963 Provider Discovery
         const discoveredProviders = [];
         let eip6963Initialized = false;
 
-        // WalletConnect Project ID - fetched from config endpoint
-        let WALLETCONNECT_PROJECT_ID = '0a5035cbff45bc8eacd8bfbbc5361765'; // Fallback
+        // =============================================
+        // 3. EIP-6963 Multi-Injected Provider Discovery
+        // =============================================
 
-        // =============================================
-        // 1. FETCH WALLETCONNECT PROJECT ID FROM CONFIG
-        // =============================================
-        async function fetchWalletConnectConfig() {
-            try {
-                const response = await fetch('/api/config');
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data && data.projectId) {
-                        WALLETCONNECT_PROJECT_ID = data.projectId;
-                        console.log('✅ WalletConnect Project ID fetched from config:', WALLETCONNECT_PROJECT_ID);
-                        return;
-                    }
-                }
-                console.log('⚠️ Config endpoint failed, using fallback Project ID');
-            } catch (err) {
-                console.warn('⚠️ Failed to fetch config, using fallback Project ID:', err.message);
-            }
-        }
-
-        // =============================================
-        // 2. EIP-6963 Multi-Injected Provider Discovery
-        // =============================================
         function initializeEIP6963() {
             if (eip6963Initialized) return;
 
-            // Set up event listener BEFORE DOM loads fully
             window.addEventListener("eip6963:announceProvider", (event) => {
                 const detail = event.detail;
                 
-                // Prevent duplicate injections
                 if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
                     discoveredProviders.push(detail);
                     console.log(`🔍 Discovered provider: ${detail.info.name} (${detail.info.rdns})`);
                 }
             });
 
-            // Request providers to announce themselves
             window.dispatchEvent(new Event("eip6963:requestProvider"));
             
             eip6963Initialized = true;
@@ -2483,31 +2504,26 @@
         }
 
         // =============================================
-        // 3. Get Provider by RDNS
+        // 4. Get Provider by RDNS
         // =============================================
+
         function getProviderByRDNS(targetRdns) {
-            // First check discovered providers
             for (const provider of discoveredProviders) {
                 if (provider.info.rdns === targetRdns) {
                     return provider;
                 }
             }
 
-            // Fallback: Check window.ethereum if it matches the target
             if (window.ethereum) {
-                // Check if MetaMask
                 if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
                     return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
                 }
-                // Check if Trust Wallet
                 if (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) {
                     return { provider: window.ethereum, info: { rdns: 'com.trustwallet.app', name: 'Trust Wallet' } };
                 }
-                // Check if Phantom
                 if (targetRdns === 'app.phantom' && window.ethereum.isPhantom) {
                     return { provider: window.ethereum, info: { rdns: 'app.phantom', name: 'Phantom' } };
                 }
-                // Check if Rainbow
                 if (targetRdns === 'me.rainbow' && window.ethereum.isRainbow) {
                     return { provider: window.ethereum, info: { rdns: 'me.rainbow', name: 'Rainbow' } };
                 }
@@ -2517,8 +2533,9 @@
         }
 
         // =============================================
-        // 4. Mobile Device Detection & Deep Links
+        // 5. Mobile Device Detection & Deep Links
         // =============================================
+
         function isMobileDevice() {
             return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
         }
@@ -2531,8 +2548,9 @@
         }
 
         // =============================================
-        // 5. Smart Deep Linking - Direct App Launch
+        // 6. Smart Deep Linking - Direct App Launch
         // =============================================
+
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
             const encodedUri = encodeURIComponent(uri);
@@ -2608,7 +2626,6 @@
                 if (os === 'ios' && stores[walletType].ios) return stores[walletType].ios;
             }
 
-            // Fallback desktop extension stores
             const desktopStores = {
                 'metamask': 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn',
                 'trust': 'https://trustwallet.com/browser-extension',
@@ -2620,18 +2637,15 @@
         }
 
         // =============================================
-        // 6. Safe Redirect with Fallback Timer
+        // 7. Safe Redirect with Fallback Timer
         // =============================================
+
         function safeRedirectToWallet(deepLinkUrl, storeUrl) {
             const startTime = Date.now();
             
-            // Attempt to trigger the native application scheme instantly
             window.location.href = deepLinkUrl;
 
-            // Set a delayed structural check execution
             setTimeout(() => {
-                // If the browser window lost focus, the user successfully launched the native app.
-                // If the delta time is tight, the window remained active -> App is missing.
                 if (Date.now() - startTime < 2000) {
                     window.location.href = storeUrl;
                 }
@@ -2639,219 +2653,160 @@
         }
 
         // =============================================
-        // 7. WalletConnect v2 Session Management - ROBUST
+        // 8. WalletConnect v2 Session Management
         // =============================================
+
         async function initWalletConnect() {
             if (walletConnectInitialized && signClient) return signClient;
 
             try {
-                // Ensure we have the project ID
-                await fetchWalletConnectConfig();
-
-                // Check if SignClient is available from CDN
+                const projectId = await fetchWalletConnectConfig();
+                
+                // Check if SignClient is available globally
                 if (typeof window.SignClient === 'undefined') {
-                    console.warn('SignClient not loaded from CDN, attempting dynamic import...');
-                    // Fallback: try to load from CDN dynamically
-                    await loadWalletConnectCDN();
+                    console.error('❌ WalletConnect SignClient not loaded. Check CDN script.');
+                    throw new Error('WalletConnect SignClient not available');
                 }
 
-                const SignClientLib = window.SignClient || (await import('@walletconnect/sign-client')).SignClient;
-                
-                signClient = await SignClientLib.init({
-                    projectId: WALLETCONNECT_PROJECT_ID,
-                    relayUrl: 'wss://relay.walletconnect.org',
+                signClient = await window.SignClient.init({
+                    projectId: projectId,
                     metadata: {
                         name: 'BitHash Capital',
                         description: 'BitHash Cloud Mining Platform',
-                        url: window.location.origin || 'https://www.bithashcapital.live',
+                        url: 'https://www.bithashcapital.live',
                         icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
-                    }
+                    },
+                    relayUrl: 'wss://relay.walletconnect.org'
                 });
 
-                // Setup relay event handlers for auto-reconnection
+                // ✅ CRITICAL: Handle relay events for background reconnection
                 signClient.core.relayer.on('relayer_disconnect', () => {
                     console.log('⚠️ WalletConnect relay disconnected. Attempting to reconnect...');
-                    // Attempt to reconnect
-                    setTimeout(() => {
-                        signClient.core.relayer.connect().catch(err => {
-                            console.error('Failed to reconnect WalletConnect relay:', err);
-                        });
-                    }, 1000);
                 });
 
                 signClient.core.relayer.on('relayer_connect', () => {
-                    console.log('✅ WalletConnect relay reconnected');
+                    console.log('✅ WalletConnect relay reconnected.');
                 });
 
-                // Handle pairing events
-                signClient.on('session_proposal', (proposal) => {
-                    console.log('📱 Session proposal received:', proposal);
-                });
-
-                signClient.on('session_created', (session) => {
-                    console.log('✅ Session created:', session.topic);
-                    activeWcSession = session;
+                // ✅ CRITICAL: Handle pairing expiration
+                signClient.core.pairing.events.on('pairing_expire', (event) => {
+                    console.log('⏰ Pairing expired:', event);
                 });
 
                 walletConnectInitialized = true;
-                console.log('✅ WalletConnect v2 initialized with project ID:', WALLETCONNECT_PROJECT_ID);
+                console.log('✅ WalletConnect SignClient initialized with Project ID:', projectId.substring(0, 8) + '...');
                 return signClient;
+
             } catch (err) {
-                console.error('Failed to init WalletConnect:', err);
-                return null;
+                console.error('❌ Failed to init WalletConnect:', err);
+                throw err;
             }
         }
 
         // =============================================
-        // 8. Load WalletConnect CDN if not loaded
+        // 9. Reset WalletConnect Connection State
         // =============================================
-        function loadWalletConnectCDN() {
-            return new Promise((resolve, reject) => {
-                if (typeof window.SignClient !== 'undefined') {
-                    resolve();
-                    return;
+
+        async function resetWalletConnectState() {
+            try {
+                if (signClient) {
+                    const pairings = signClient.pairing.getValues();
+                    if (pairings && pairings.length > 0) {
+                        console.log(`🔄 Cleaning up ${pairings.length} existing pairings...`);
+                        await Promise.all(pairings.map(pairing => 
+                            signClient.pairing.delete(pairing.topic, { 
+                                code: 6000, 
+                                message: "Fresh session requested." 
+                            })
+                        ));
+                    }
                 }
-                const script = document.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js';
-                script.onload = () => {
-                    console.log('✅ WalletConnect CDN loaded dynamically');
-                    resolve();
-                };
-                script.onerror = () => {
-                    console.error('Failed to load WalletConnect CDN');
-                    reject(new Error('Failed to load WalletConnect CDN'));
-                };
-                document.head.appendChild(script);
-            });
+            } catch (err) {
+                console.warn('Error cleaning up pairings:', err);
+            }
+            
+            currentWcUri = null;
+            wcSessionPromise = null;
+            wcResolveSession = null;
+            wcRejectSession = null;
+            if (wcConnectionTimeout) {
+                clearTimeout(wcConnectionTimeout);
+                wcConnectionTimeout = null;
+            }
         }
 
         // =============================================
-        // 9. Generate Single Locked WalletConnect URI
+        // 10. Generate WalletConnect URI (Single Locked URI)
         // =============================================
+
         async function generateWalletConnectURI(walletType) {
             try {
-                // If we already have a locked URI, reuse it
-                if (wcUriLock) {
-                    console.log('🔄 Reusing locked WalletConnect URI');
-                    return wcUriLock;
-                }
-
+                // ✅ CRITICAL: Reset state to prevent URI regeneration issues
+                await resetWalletConnectState();
+                
+                // Initialize SignClient
                 const client = await initWalletConnect();
                 if (!client) {
                     throw new Error('WalletConnect client not initialized');
                 }
 
-                // Reset any pending sessions to avoid conflicts
-                await resetConnectionState(client);
-
                 // Create a new session proposal
                 const { uri, approval } = await client.connect({
                     requiredNamespaces: {
                         eip155: {
-                            methods: ['eth_sendTransaction', 'personal_sign', 'eth_signTypedData_v4'],
-                            chains: ['eip155:1', 'eip155:56', 'eip155:137'],
+                            methods: ['eth_sendTransaction', 'personal_sign', 'eth_signTypedData'],
+                            chains: ['eip155:1', 'eip155:137', 'eip155:56'],
                             events: ['chainChanged', 'accountsChanged']
                         }
                     }
                 });
 
                 if (!uri) {
-                    throw new Error('No URI generated from WalletConnect');
+                    throw new Error('Failed to generate WalletConnect URI');
                 }
 
-                // Lock the URI for this session
-                wcUriLock = uri;
+                // ✅ CRITICAL: Store the URI and approval promise for the connection attempt
+                currentWcUri = uri;
+                wcSessionPromise = approval;
                 
-                console.log('🔗 WalletConnect URI generated and locked:', uri.substring(0, 50) + '...');
-
-                // Store approval promise for later resolution
-                window.wcApprovalPromise = approval;
-
+                console.log('🔗 WalletConnect URI generated (locked for this session):', uri.substring(0, 30) + '...');
                 return uri;
+
             } catch (err) {
-                console.error('Error generating WalletConnect URI:', err);
-                // Reset lock on error
-                wcUriLock = null;
+                console.error('❌ Error generating WalletConnect URI:', err);
                 return null;
             }
         }
 
         // =============================================
-        // 10. Reset WalletConnect Connection State
+        // 11. Wait for WalletConnect Session Approval
         // =============================================
-        async function resetConnectionState(client) {
-            try {
-                if (!client) return;
-                const pairings = client.pairing.getValues();
-                if (pairings.length > 0) {
-                    console.log(`🔄 Closing ${pairings.length} existing pairings...`);
-                    await Promise.all(pairings.map(pairing => 
-                        client.pairing.delete(pairing.topic, { code: 6000, message: "Fresh session requested." })
-                    ));
-                }
-                wcUriLock = null;
-                window.wcApprovalPromise = null;
-            } catch (err) {
-                console.warn('Error resetting connection state:', err);
+
+        async function waitForWalletConnectSession() {
+            if (!wcSessionPromise) {
+                throw new Error('No WalletConnect session pending');
             }
-        }
 
-        // =============================================
-        // 11. Wait for WalletConnect Session Resolution
-        // =============================================
-        async function waitForWalletConnectSession(uri) {
+            // ✅ CRITICAL: Set a timeout for the session approval
+            const timeoutPromise = new Promise((_, reject) => {
+                wcConnectionTimeout = setTimeout(() => {
+                    reject(new Error('WalletConnect session approval timed out. Please try again.'));
+                }, 120000); // 2 minutes timeout
+            });
+
             try {
-                // Check if we have the approval promise stored
-                let approval = window.wcApprovalPromise;
-                
-                if (!approval) {
-                    // If no approval stored, try to reconnect
-                    const client = await initWalletConnect();
-                    if (!client) throw new Error('WalletConnect client not available');
-                    
-                    // Try to find existing session
-                    const sessions = client.session.getValues();
-                    for (const session of sessions) {
-                        if (session.pairingTopic && session.acknowledged) {
-                            return {
-                                accounts: session.namespaces.eip155.accounts,
-                                chainId: parseInt(session.namespaces.eip155.chains[0]?.split(':')[1] || '1')
-                            };
-                        }
-                    }
-                    
-                    // No existing session, wait for new one
-                    approval = new Promise((resolve, reject) => {
-                        const timeout = setTimeout(() => {
-                            reject(new Error('Session approval timeout'));
-                        }, 120000); // 2 minute timeout
-                        
-                        client.on('session_created', (session) => {
-                            clearTimeout(timeout);
-                            resolve({
-                                accounts: session.namespaces.eip155.accounts,
-                                chainId: parseInt(session.namespaces.eip155.chains[0]?.split(':')[1] || '1')
-                            });
-                        });
-                    });
-                }
-
-                // Wait for approval with timeout
-                const result = await Promise.race([
-                    approval,
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Approval timeout')), 120000))
+                const session = await Promise.race([
+                    wcSessionPromise,
+                    timeoutPromise
                 ]);
 
-                // Clean up
-                window.wcApprovalPromise = null;
-                wcUriLock = null;
+                clearTimeout(wcConnectionTimeout);
+                wcConnectionTimeout = null;
 
-                return result;
+                return session;
             } catch (err) {
-                console.error('Error waiting for WalletConnect session:', err);
-                // Reset state on error
-                wcUriLock = null;
-                window.wcApprovalPromise = null;
+                clearTimeout(wcConnectionTimeout);
+                wcConnectionTimeout = null;
                 throw err;
             }
         }
@@ -2859,11 +2814,9 @@
         // =============================================
         // 12. Main Connection Handler - EIP-6963 + Mobile Deep Link
         // =============================================
+
         async function connectWeb3Wallet(targetRdns, walletType) {
-            if (isConnecting) {
-                console.log('⏳ Connection already in progress, please wait...');
-                return;
-            }
+            if (isConnecting) return;
             isConnecting = true;
 
             const btn = document.querySelector(`[data-rdns="${targetRdns}"]`);
@@ -2873,10 +2826,8 @@
             }
 
             try {
-                // Initialize EIP-6963 if not done
                 initializeEIP6963();
 
-                // Check if we're on mobile
                 const isMobile = isMobileDevice();
 
                 if (isMobile) {
@@ -2884,50 +2835,81 @@
                     // MOBILE FLOW - WalletConnect v2 + Deep Links
                     // =============================================
                     
-                    // Generate a SINGLE LOCKED URI
-                    const wcUri = await generateWalletConnectURI(walletType);
-                    if (!wcUri) {
-                        throw new Error('Failed to generate WalletConnect URI');
-                    }
-
-                    // Open deep link directly - INSTANT APP LAUNCH (no browser)
-                    const deepLink = openDeepLink(walletType, wcUri);
-                    const storeUrl = getAppStoreUrl(walletType);
+                    let providerInfo = getProviderByRDNS(targetRdns);
                     
-                    // Execute the routing action instantly
-                    safeRedirectToWallet(deepLink, storeUrl);
-
-                    // Await the asynchronous websocket resolution
-                    try {
-                        const session = await waitForWalletConnectSession(wcUri);
-                        if (session && session.accounts && session.accounts.length > 0) {
-                            const address = session.accounts[0].split(':')[1] || session.accounts[0];
-                            web3WalletAddress = address;
-                            web3WalletType = walletType;
-                            await handleWeb3Connection(address);
-                            updateUIAfterConnection(address, walletType);
+                    if (!providerInfo) {
+                        // ✅ CRITICAL: Generate a SINGLE URI for this connection attempt
+                        const wcUri = await generateWalletConnectURI(walletType);
+                        if (!wcUri) {
+                            throw new Error('Failed to generate WalletConnect URI');
                         }
-                    } catch (sessionError) {
-                        console.error('WalletConnect session error:', sessionError);
-                        // Show user-friendly error
-                        alert('Connection timeout. Please try again and approve the connection in your wallet app.');
+
+                        const deepLink = openDeepLink(walletType, wcUri);
+                        const storeUrl = getAppStoreUrl(walletType);
+                        
+                        safeRedirectToWallet(deepLink, storeUrl);
+
+                        try {
+                            const session = await waitForWalletConnectSession();
+                            if (session && session.namespaces && session.namespaces.eip155) {
+                                const accounts = session.namespaces.eip155.accounts;
+                                if (accounts && accounts.length > 0) {
+                                    const address = accounts[0].split(':')[2];
+                                    web3WalletAddress = address;
+                                    web3WalletType = walletType;
+                                    await handleWeb3Connection(address);
+                                    updateUIAfterConnection(address, walletType);
+                                }
+                            }
+                        } catch (sessionError) {
+                            console.error('❌ WalletConnect session error:', sessionError);
+                            // Show error to user
+                            const statusDiv = document.getElementById('web3-status');
+                            statusDiv.classList.add('active');
+                            statusDiv.style.borderColor = 'var(--error)';
+                            statusDiv.style.color = 'var(--error)';
+                            statusDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> ${sessionError.message || 'Connection failed. Please try again.'}`;
+                        }
+                        
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = getOriginalButtonHTML(walletType);
+                        }
+                        isConnecting = false;
+                        return;
                     }
-                    
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.innerHTML = getOriginalButtonHTML(walletType);
+
+                    // Try direct provider connection on mobile
+                    try {
+                        const provider = providerInfo.provider;
+                        const accounts = await provider.request({
+                            method: "eth_requestAccounts"
+                        });
+
+                        if (accounts && accounts.length > 0) {
+                            web3WalletAddress = accounts[0];
+                            web3WalletType = walletType;
+                            web3Provider = provider;
+                            await handleWeb3Connection(accounts[0]);
+                            updateUIAfterConnection(accounts[0], walletType);
+                        }
+                    } catch (providerErr) {
+                        console.error('Provider connection error:', providerErr);
+                        // Fallback to deep link
+                        const wcUri = await generateWalletConnectURI(walletType);
+                        if (wcUri) {
+                            const deepLink = openDeepLink(walletType, wcUri);
+                            const storeUrl = getAppStoreUrl(walletType);
+                            safeRedirectToWallet(deepLink, storeUrl);
+                        }
                     }
-                    isConnecting = false;
-                    return;
                 } else {
                     // =============================================
                     // DESKTOP FLOW - EIP-6963 Provider Discovery
                     // =============================================
                     
-                    // Get provider by RDNS
                     let providerInfo = getProviderByRDNS(targetRdns);
 
-                    // If not found via EIP-6963, check window.ethereum fallback
                     if (!providerInfo && window.ethereum) {
                         const isTarget = (
                             (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
@@ -2942,7 +2924,6 @@
                     }
 
                     if (!providerInfo) {
-                        // Extension not installed - redirect to download
                         const storeUrl = getAppStoreUrl(walletType);
                         window.open(storeUrl, '_blank');
                         if (btn) {
@@ -2953,7 +2934,6 @@
                         return;
                     }
 
-                    // Connect using the isolated provider
                     try {
                         const provider = providerInfo.provider;
                         const accounts = await provider.request({
@@ -2972,11 +2952,6 @@
 
                     } catch (err) {
                         console.error('Provider connection error:', err);
-                        if (err.code === 4001) {
-                            alert('Connection rejected. Please approve the connection in your wallet.');
-                        } else {
-                            alert('Failed to connect wallet. Please try again.');
-                        }
                         if (btn) {
                             btn.disabled = false;
                             btn.innerHTML = getOriginalButtonHTML(walletType);
@@ -2993,7 +2968,6 @@
 
             } catch (err) {
                 console.error('Web3 connection error:', err);
-                alert('Connection failed: ' + (err.message || 'Unknown error'));
                 if (btn) {
                     btn.disabled = false;
                     btn.innerHTML = getOriginalButtonHTML(walletType);
@@ -3006,6 +2980,7 @@
         // =============================================
         // 13. Web3 Handler - Check user and show popup
         // =============================================
+
         async function handleWeb3Connection(address) {
             try {
                 const checkResponse = await fetch(
@@ -3014,18 +2989,15 @@
                 const checkData = await checkResponse.json();
 
                 if (checkData.data && checkData.data.exists) {
-                    // User exists - redirect to login
                     setTimeout(() => {
                         window.location.href = 'login';
                     }, 500);
                     return;
                 } else {
-                    // New user - show signup popup
                     showWeb3SignupPopup(address);
                 }
             } catch (err) {
                 console.error('Error checking user:', err);
-                // If API fails, show popup anyway
                 showWeb3SignupPopup(address);
             }
         }
@@ -3033,18 +3005,14 @@
         // =============================================
         // 14. UI Update Helpers
         // =============================================
+
         function updateUIAfterConnection(address, walletType) {
             const statusDiv = document.getElementById('web3-status');
             statusDiv.classList.add('active');
+            statusDiv.style.borderColor = 'var(--success)';
+            statusDiv.style.color = 'var(--success)';
             document.getElementById('web3-connected-address').textContent =
                 address.substring(0, 6) + '...' + address.substring(address.length - 4);
-
-            // Update button
-            const btn = document.querySelector(`[data-rdns="${getRDNSForWallet(walletType)}"]`);
-            if (btn) {
-                btn.style.borderColor = '#10B981';
-                btn.style.background = 'rgba(16, 185, 129, 0.1)';
-            }
         }
 
         function getRDNSForWallet(walletType) {
@@ -3085,6 +3053,7 @@
         // =============================================
         // 15. Web3 Popup Functions
         // =============================================
+
         function showWeb3SignupPopup(address) {
             const popup = document.getElementById('web3-popup');
             document.getElementById('web3-popup-title').textContent = 'Complete Your Profile';
@@ -3127,6 +3096,7 @@
         // =============================================
         // 16. Web3 Signup Form Submission
         // =============================================
+
         document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
             e.preventDefault();
 
@@ -3168,8 +3138,7 @@
                         email,
                         city,
                         accountType: 'individual',
-                        walletAddress: web3WalletAddress,
-                        walletType: web3WalletType
+                        walletAddress: web3WalletAddress
                     };
                 } else {
                     const orgName = document.getElementById('web3-org-name').value.trim();
@@ -3201,8 +3170,7 @@
                         role: role,
                         country: country,
                         workEmail: workEmail,
-                        walletAddress: web3WalletAddress,
-                        walletType: web3WalletType
+                        walletAddress: web3WalletAddress
                     };
                 }
 
@@ -3212,7 +3180,7 @@
                     formData.referralCode = referralCode;
                 }
 
-                // Get nonce from server - matching the server.js endpoints
+                // Get nonce from server
                 const nonceResponse = await fetch(
                     `https://bithash-backend-ycuf.onrender.com/api/web3/nonce?walletAddress=${web3WalletAddress}&type=signup&isSignup=true&accountType=${accountType}&referralCode=${referralCode || ''}`
                 );
@@ -3352,7 +3320,7 @@
         });
 
         // =============================================
-        // 17. OTP Functions (Unchanged from original)
+        // 17. OTP Functions
         // =============================================
 
         let otpTimer, resendTimer, currentUserEmail = '',
@@ -3596,7 +3564,7 @@
         document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
         // =============================================
-        // 18. Traditional Form Logic (Unchanged)
+        // 18. Traditional Form Logic
         // =============================================
 
         AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
@@ -3610,9 +3578,8 @@
             initNewsletter();
             initializeAccountTypeSelection();
             checkReferral();
-            // Initialize EIP-6963 on load
             initializeEIP6963();
-            // Fetch WalletConnect config
+            // Pre-fetch WalletConnect config on load
             fetchWalletConnectConfig();
         });
 
@@ -4020,6 +3987,21 @@
                     securityBadge.style.boxShadow =
                         `0 0 10px ${Math.random() > 0.5 ? 'rgba(34, 139, 34, 0.5)' : 'rgba(247, 166, 0, 0.5)'}`;
                 }, 2000);
+            }
+        });
+
+        // =============================================
+        // 19. Cleanup WalletConnect on page unload
+        // =============================================
+        window.addEventListener('beforeunload', function() {
+            if (signClient) {
+                try {
+                    signClient.core.relayer.off('relayer_disconnect');
+                    signClient.core.relayer.off('relayer_connect');
+                    signClient.core.pairing.events.off('pairing_expire');
+                } catch (err) {
+                    // Ignore cleanup errors
+                }
             }
         });
     </script>
