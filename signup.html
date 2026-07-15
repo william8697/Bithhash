@@ -50,12 +50,34 @@
   <!-- Google Places API -->
   <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCk7mCa_AnGRr0r9NswBFo1SKRvQiOy8fM&libraries=places&callback=initAutocomplete" async defer></script>
 
-  <!-- ====== WALLETCONNECT v2 SIGN CLIENT CDN ====== -->
+  <!-- ====== WALLETCONNECT V2 CDN ====== -->
   <script src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js">
   </script>
-
+  
   <!-- ====== ETHERS.JS FOR WEB3 ====== -->
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js">
+  </script>
+
+  <!-- ====== ALL OTHER DEPENDENCIES ====== -->
+  <script type="importmap">
+    {
+      "imports": {
+        "@solana/web3.js": "https://cdn.jsdelivr.net/npm/@solana/web3.js@latest/lib/index.iife.min.js",
+        "@aptos-labs/ts-sdk": "https://cdn.jsdelivr.net/npm/@aptos-labs/ts-sdk@latest/dist/index.umd.min.js",
+        "@mysten/sui": "https://cdn.jsdelivr.net/npm/@mysten/sui@latest/dist/index.umd.min.js",
+        "siwe": "https://cdn.jsdelivr.net/npm/siwe@3.0.0/dist/index.umd.min.js",
+        "@metamask/eth-sig-util": "https://cdn.jsdelivr.net/npm/@metamask/eth-sig-util@8.2.0/dist/index.umd.min.js",
+        "axios": "https://cdn.jsdelivr.net/npm/axios@1.6.2/dist/axios.min.js",
+        "moment": "https://cdn.jsdelivr.net/npm/moment@2.29.4/min/moment.min.js",
+        "socket.io-client": "https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js",
+        "@resvg/resvg-js": "https://cdn.jsdelivr.net/npm/@resvg/resvg-js@2.6.0/index.js",
+        "chart.js": "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js",
+        "dompurify": "https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js",
+        "qrcode": "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js",
+        "uuid": "https://cdn.jsdelivr.net/npm/uuid@9.0.1/dist/umd/uuid.min.js",
+        "validator": "https://cdn.jsdelivr.net/npm/validator@13.11.0/dist/validator.min.js"
+      }
+    }
   </script>
 
   <style>
@@ -2570,7 +2592,6 @@
   <script>
     // =============================================
     // WEB3 WALLET CONNECTION - EIP-6963 + WalletConnect v2
-    // COMPLETELY REWRITTEN WITH ROBUST PRODUCTION-GRADE IMPLEMENTATION
     // USES /api/web3/* ENDPOINTS ONLY
     // =============================================
 
@@ -2586,7 +2607,7 @@
     let web3SignClient = null;
     let activeWcUri = null;
     let wcSessionPending = false;
-    const discoveredProviders = [];
+    let discoveredProviders = [];
     let eip6963Initialized = false;
     const WALLETCONNECT_PROJECT_ID = '0a5035cbff45bc8eacd8bfbbc5361765';
 
@@ -2599,45 +2620,34 @@
     function initializeEIP6963() {
       if (eip6963Initialized) return;
       
-      // Listen for provider announcements
       window.addEventListener("eip6963:announceProvider", (event) => {
         const detail = event.detail;
-        // Store unique providers by RDNS
         if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
           discoveredProviders.push(detail);
           console.log(`🔍 Discovered provider: ${detail.info.name} (${detail.info.rdns})`);
         }
       });
       
-      // Request providers
       window.dispatchEvent(new Event("eip6963:requestProvider"));
       eip6963Initialized = true;
       console.log('✅ EIP-6963 initialized');
     }
 
     function getProviderByRDNS(targetRdns) {
-      // Check discovered providers first (EIP-6963)
       for (const provider of discoveredProviders) {
-        if (provider.info.rdns === targetRdns) {
-          return provider;
-        }
+        if (provider.info.rdns === targetRdns) return provider;
       }
       
-      // Fallback to window.ethereum if available
       if (window.ethereum) {
-        // MetaMask
         if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
           return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
         }
-        // Trust Wallet
         if (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) {
           return { provider: window.ethereum, info: { rdns: 'com.trustwallet.app', name: 'Trust Wallet' } };
         }
-        // Phantom
         if (targetRdns === 'app.phantom' && window.ethereum.isPhantom) {
           return { provider: window.ethereum, info: { rdns: 'app.phantom', name: 'Phantom' } };
         }
-        // Rainbow
         if (targetRdns === 'me.rainbow' && window.ethereum.isRainbow) {
           return { provider: window.ethereum, info: { rdns: 'me.rainbow', name: 'Rainbow' } };
         }
@@ -2657,7 +2667,8 @@
     }
 
     // =============================================
-    // MOBILE DEEP LINK GENERATION - FIXED FOR EACH WALLET
+    // CORRECT DEEP LINK IMPLEMENTATION
+    // Fixes: MetaMask in-app browser, Trust Wallet Play Store bug
     // =============================================
     function openDeepLink(walletType, uri) {
       const os = getMobileOS();
@@ -2665,17 +2676,20 @@
       
       switch (walletType) {
         case 'metamask':
-          // ✅ CORRECT: Uses /wc?uri= parameter (NOT /dapp/)
-          return (os === 'android' || os === 'ios') ? 
-            `metamask://wc?uri=${encodedUri}` :
-            `https://metamask.app.link/wc?uri=${encodedUri}`;
+          // ✅ FIX: Use /wc?uri= instead of /dapp/ to avoid in-app browser
+          if (os === 'android' || os === 'ios') {
+            return `metamask://wc?uri=${encodedUri}`;
+          }
+          return `https://metamask.app.link/wc?uri=${encodedUri}`;
           
         case 'trust':
-          // ✅ CORRECT: Android uses trust:// URI scheme (not universal link)
+          // ✅ FIX: Android uses trust:// URI scheme to bypass Play Store bug
           if (os === 'android') {
             return `trust://wc?uri=${encodedUri}`;
           }
-          // iOS uses universal link
+          if (os === 'ios') {
+            return `trust://wc?uri=${encodedUri}`;
+          }
           return `https://link.trustwallet.com/wc?uri=${encodedUri}`;
           
         case 'phantom':
@@ -2698,19 +2712,19 @@
     function getAppStoreUrl(walletType) {
       const os = getMobileOS();
       const stores = {
-        'metamask': { 
+        'metamask': {
           'android': 'https://play.google.com/store/apps/details?id=io.metamask',
           'ios': 'https://apps.apple.com/app/metamask/id1438144202'
         },
-        'trust': { 
+        'trust': {
           'android': 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp',
           'ios': 'https://apps.apple.com/app/trust-wallet/id1288339409'
         },
-        'phantom': { 
+        'phantom': {
           'android': 'https://play.google.com/store/apps/details?id=app.phantom',
           'ios': 'https://apps.apple.com/app/phantom-wallet/id1598432977'
         },
-        'rainbow': { 
+        'rainbow': {
           'android': 'https://play.google.com/store/apps/details?id=me.rainbow',
           'ios': 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021'
         }
@@ -2721,7 +2735,6 @@
         if (os === 'ios' && stores[walletType].ios) return stores[walletType].ios;
       }
       
-      // Desktop fallback
       const desktopStores = {
         'metamask': 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn',
         'trust': 'https://trustwallet.com/browser-extension',
@@ -2734,12 +2747,12 @@
     function safeRedirectToWallet(deepLinkUrl, storeUrl) {
       const startTime = Date.now();
       
-      // Try to open the wallet
+      // Use window.location.href for direct navigation
       window.location.href = deepLinkUrl;
       
-      // If the wallet doesn't open, redirect to store after timeout
+      // Fallback to store after timeout if app doesn't open
       setTimeout(() => {
-        // If we're still on the page after 1.5s, wallet didn't open
+        // If we're still on the same page after 1.5s, app didn't open
         if (Date.now() - startTime < 2000) {
           window.location.href = storeUrl;
         }
@@ -2747,19 +2760,20 @@
     }
 
     // =============================================
-    // WalletConnect v2 Session Management - ROBUST & PRODUCTION-READY
+    // WalletConnect v2 Session Management
     // =============================================
     let signClient = null;
     let walletConnectInitialized = false;
     let wcEventListeners = [];
 
     async function initWalletConnect() {
-      // Check if existing client is still valid
+      // Clean up existing client if stale
       if (walletConnectInitialized && signClient) {
-        if (signClient.core && signClient.core.relayer) {
-          try {
-            const connectionStatus = signClient.core.relayer.connected;
-            if (connectionStatus) {
+        try {
+          // Check if relay is connected
+          if (signClient.core && signClient.core.relayer) {
+            const isConnected = signClient.core.relayer.connected;
+            if (isConnected) {
               return signClient;
             }
             console.log('⚠️ WalletConnect relay disconnected, reconnecting...');
@@ -2772,46 +2786,64 @@
               walletConnectInitialized = false;
               signClient = null;
             }
-          } catch (err) {
-            console.log('Connection check failed, reinitializing...', err.message);
+          } else {
             walletConnectInitialized = false;
             signClient = null;
           }
-        } else {
+        } catch (err) {
+          console.log('Connection check failed, reinitializing...', err.message);
           walletConnectInitialized = false;
           signClient = null;
         }
       }
 
       try {
-        // ✅ REAL SignClient.init() with actual Project ID
         const signClientConfig = {
           projectId: WALLETCONNECT_PROJECT_ID,
           relayUrl: 'wss://relay.walletconnect.org',
           relay: {
             protocol: 'waku',
             keepAlive: true,
-            reconnect: { attempts: 10, delay: 2000 }
+            reconnect: {
+              attempts: 10,
+              delay: 2000
+            }
           },
           metadata: {
             name: 'BitHash Capital',
             description: 'BitHash Cloud Mining Platform',
-            url: 'https://www.bithashcapital.live',
+            url: window.location.origin,
             icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
           }
         };
 
         signClient = await window.WalletConnectSignClient.default.init(signClientConfig);
 
-        // Setup event listeners for connection stability
+        // ✅ CRITICAL: Clean up stale pairings to prevent WebSocket timeouts
+        if (signClient.core && signClient.core.pairing) {
+          const pairings = signClient.core.pairing.getPairings();
+          if (pairings && pairings.length > 0) {
+            console.log(`🧹 Cleaning up ${pairings.length} stale pairings...`);
+            await Promise.all(
+              pairings.map(pairing => {
+                try {
+                  return signClient.core.pairing.disconnect({ topic: pairing.topic });
+                } catch (e) {
+                  console.log('Could not disconnect pairing:', e.message);
+                  return Promise.resolve();
+                }
+              })
+            );
+          }
+        }
+
+        // Setup relay event listeners for reconnection
         if (signClient.core && signClient.core.relayer) {
-          // Remove old listeners
           wcEventListeners.forEach(({ event, listener }) => {
             signClient.core.relayer.off(event, listener);
           });
           wcEventListeners = [];
 
-          // Handle disconnection - auto-reconnect
           const disconnectHandler = () => {
             console.log('⚠️ WalletConnect relay disconnected');
             setTimeout(async () => {
@@ -2835,7 +2867,7 @@
           wcEventListeners.push({ event: 'relayer_disconnect', listener: disconnectHandler });
           wcEventListeners.push({ event: 'relayer_connect', listener: connectHandler });
 
-          // Handle errors with recovery
+          // Handle socket errors
           const errorHandler = (err) => {
             console.log('⚠️ WalletConnect error:', err);
             if (err && err.message && err.message.includes('socket')) {
@@ -2867,23 +2899,22 @@
       }
     }
 
-    // =============================================
-    // CLEAN UP STALE PAIRINGS - CRITICAL FOR RELIABILITY
-    // =============================================
     async function resetConnectionState() {
       try {
         if (signClient && signClient.core && signClient.core.pairing) {
           const pairings = signClient.core.pairing.getPairings();
           if (pairings && pairings.length > 0) {
             console.log(`🧹 Clearing ${pairings.length} existing pairings...`);
-            await Promise.all(pairings.map(pairing => {
-              try {
-                return signClient.core.pairing.disconnect({ topic: pairing.topic });
-              } catch (e) {
-                console.log('Could not disconnect pairing:', e.message);
-                return Promise.resolve();
-              }
-            }));
+            await Promise.all(
+              pairings.map(pairing => {
+                try {
+                  return signClient.core.pairing.disconnect({ topic: pairing.topic });
+                } catch (e) {
+                  console.log('Could not delete pairing:', e.message);
+                  return Promise.resolve();
+                }
+              })
+            );
           }
         }
         activeWcUri = null;
@@ -2894,18 +2925,14 @@
       }
     }
 
-    // =============================================
-    // GENERATE WALLETCONNECT URI - SINGLE URI LOCKING
-    // =============================================
     async function generateWalletConnectURI(walletType) {
       try {
-        // ✅ SINGLE URI LOCKING - prevents duplicate sessions
+        // Use single URI locking to prevent multiple connection attempts
         if (activeWcUri && wcSessionPending) {
           console.log('♻️ Reusing existing WalletConnect URI (single URI locking)');
           return activeWcUri;
         }
-        
-        // Clean up before generating new URI
+
         await resetConnectionState();
         const client = await initWalletConnect();
         if (!client) throw new Error('Failed to initialize WalletConnect client');
@@ -2914,8 +2941,13 @@
           requiredNamespaces: {
             eip155: {
               methods: [
-                'eth_sendTransaction', 'personal_sign', 'eth_sign', 'eth_signTypedData',
-                'eth_signTypedData_v4', 'eth_requestAccounts', 'eth_accounts'
+                'eth_sendTransaction',
+                'personal_sign',
+                'eth_sign',
+                'eth_signTypedData',
+                'eth_signTypedData_v4',
+                'eth_requestAccounts',
+                'eth_accounts'
               ],
               chains: ['eip155:1', 'eip155:56', 'eip155:137'],
               events: ['chainChanged', 'accountsChanged']
@@ -2933,7 +2965,6 @@
         const { uri, approval } = await client.connect(connectParams);
         if (!uri) throw new Error('No URI generated from WalletConnect');
 
-        // ✅ Single URI locking
         activeWcUri = uri;
         wcSessionPending = true;
         console.log('✅ WalletConnect URI generated (locked for this connection attempt)');
@@ -2947,9 +2978,6 @@
       }
     }
 
-    // =============================================
-    // WAIT FOR WALLETCONNECT SESSION - WITH TIMEOUT
-    // =============================================
     async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
       return new Promise(async (resolve, reject) => {
         const timeout = setTimeout(() => {
@@ -2981,6 +3009,7 @@
                   chainId: parseInt(account.split(':')[1]),
                   session: session
                 });
+                return;
               }
             }
           }
@@ -2994,7 +3023,7 @@
     }
 
     // =============================================
-    // MAIN CONNECTION HANDLER - ROBUST & PRODUCTION-READY
+    // MAIN CONNECTION HANDLER
     // =============================================
     async function connectWeb3Wallet(targetRdns, walletType) {
       if (isConnecting) return;
@@ -3003,7 +3032,6 @@
       const btn = document.querySelector(`[data-rdns="${targetRdns}"]`);
       const statusEl = document.getElementById(`status-${walletType}`);
 
-      // Update UI for connecting state
       if (btn) {
         btn.disabled = true;
         btn.innerHTML = `<span class="wallet-icon"><i class="fas fa-spinner fa-spin"></i></span><span class="wallet-name">Connecting...</span>`;
@@ -3012,26 +3040,24 @@
         statusEl.className = 'connection-status connecting';
       }
 
-      // Reset status displays
       const statusDiv = document.getElementById('web3-status');
       statusDiv.classList.remove('active');
       document.getElementById('web3-connection-bar').classList.remove('active');
       document.getElementById('wc-mobile-status').classList.remove('active');
 
       try {
-        // Initialize EIP-6963
         initializeEIP6963();
         const isMobile = isMobileDevice();
 
+        // =============================================
+        // MOBILE: Use WalletConnect with deep links
+        // =============================================
         if (isMobile) {
-          // =============================================
-          // MOBILE FLOW - Open wallet app directly
-          // =============================================
           const wcStatus = document.getElementById('wc-mobile-status');
           wcStatus.classList.add('active');
           document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
 
-          // First try: Check if provider is available (e.g., MetaMask in-app browser)
+          // First try to use injected provider (if available)
           let providerInfo = getProviderByRDNS(targetRdns);
           if (providerInfo) {
             try {
@@ -3052,25 +3078,25 @@
             }
           }
 
-          // Second try: Generate WalletConnect URI
+          // Generate WalletConnect URI
           const wcUri = await generateWalletConnectURI(walletType);
           if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
 
           document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
           
-          // Generate deep link and store URL
+          // Use the correct deep link for the wallet
           const deepLink = openDeepLink(walletType, wcUri);
           const storeUrl = getAppStoreUrl(walletType);
           
           document.getElementById('wc-status-text').textContent = 'Opening wallet app... Please approve the connection.';
           
-          // Use safe redirect that falls back to store if app doesn't open
+          // Redirect to wallet app
           safeRedirectToWallet(deepLink, storeUrl);
 
-          // Wait for session approval
           try {
             document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
             const session = await waitForWalletConnectSession(wcUri);
+            
             if (session && session.accounts && session.accounts.length > 0) {
               const address = session.accounts[0];
               web3WalletAddress = address;
@@ -3100,10 +3126,11 @@
             isConnecting = false;
             return;
           }
-        } else {
-          // =============================================
-          // DESKTOP FLOW - Use EIP-6963 provider
-          // =============================================
+        } 
+        // =============================================
+        // DESKTOP: Use EIP-6963 to avoid wallet conflicts
+        // =============================================
+        else {
           let providerInfo = getProviderByRDNS(targetRdns);
           
           // Fallback to window.ethereum if EIP-6963 didn't find it
@@ -3118,9 +3145,8 @@
               providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
             }
           }
-          
+
           if (!providerInfo) {
-            // Wallet not installed - redirect to download
             const storeUrl = getAppStoreUrl(walletType);
             window.open(storeUrl, '_blank');
             if (btn) { btn.disabled = false; btn.innerHTML = getOriginalButtonHTML(walletType); }
@@ -3128,14 +3154,17 @@
             isConnecting = false;
             return;
           }
-          
+
           try {
             const provider = providerInfo.provider;
+            // ✅ Use the isolated provider, not window.ethereum
             const accounts = await provider.request({ method: "eth_requestAccounts" });
             if (!accounts || accounts.length === 0) throw new Error('No accounts found.');
+            
             web3WalletAddress = accounts[0];
             web3WalletType = walletType;
             web3Provider = provider;
+            
             await handleWeb3Connection(accounts[0]);
             updateUIAfterConnection(accounts[0], walletType);
           } catch (err) {
@@ -3147,7 +3176,6 @@
           }
         }
 
-        // Update UI for connected state
         if (btn) { btn.disabled = false; btn.innerHTML = getOriginalButtonHTML(walletType); }
         if (statusEl) { statusEl.className = 'connection-status connected'; }
 
@@ -3155,6 +3183,7 @@
         console.error('Web3 connection error:', err);
         if (btn) { btn.disabled = false; btn.innerHTML = getOriginalButtonHTML(walletType); }
         if (statusEl) { statusEl.className = 'connection-status'; }
+        
         document.getElementById('wc-mobile-status').classList.remove('active');
         
         const statusDiv = document.getElementById('web3-status');
@@ -3169,7 +3198,12 @@
 
     function retryWalletConnect() {
       const walletType = web3WalletType || 'metamask';
-      const rdnsMap = { 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 'phantom': 'app.phantom', 'rainbow': 'me.rainbow' };
+      const rdnsMap = {
+        'metamask': 'io.metamask',
+        'trust': 'com.trustwallet.app',
+        'phantom': 'app.phantom',
+        'rainbow': 'me.rainbow'
+      };
       const targetRdns = rdnsMap[walletType] || 'io.metamask';
       wcSessionPending = false;
       activeWcUri = null;
@@ -3185,6 +3219,7 @@
           `https://bithash-backend-ycuf.onrender.com/api/web3/check-user?walletAddress=${address}`
         );
         const checkData = await checkResponse.json();
+        
         if (checkData.data && checkData.data.exists) {
           // Wallet already registered - redirect to login
           const statusDiv = document.getElementById('web3-status');
@@ -3200,7 +3235,7 @@
         }
       } catch (err) {
         console.error('Error checking user:', err);
-        // If check fails, still show popup to allow signup
+        // On error, still show signup popup
         showWeb3SignupPopup(address);
       }
     }
@@ -3208,22 +3243,37 @@
     function updateUIAfterConnection(address, walletType) {
       const bar = document.getElementById('web3-connection-bar');
       bar.classList.add('active');
-      document.getElementById('web3-connected-address').textContent = address.substring(0, 6) + '...' + address.substring(address.length - 4);
+      document.getElementById('web3-connected-address').textContent = 
+        address.substring(0, 6) + '...' + address.substring(address.length - 4);
       document.getElementById('web3-connected-network').textContent = 'Ethereum Mainnet';
 
       const statusDiv = document.getElementById('web3-status');
       statusDiv.classList.add('active');
-      document.getElementById('web3-connected-address-status').textContent = address.substring(0, 6) + '...' + address.substring(address.length - 4);
+      document.getElementById('web3-connected-address-status').textContent = 
+        address.substring(0, 6) + '...' + address.substring(address.length - 4);
       statusDiv.style.borderColor = 'var(--success)';
       statusDiv.style.color = 'var(--success)';
 
-      const rdnsMap = { 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 'phantom': 'app.phantom', 'rainbow': 'me.rainbow' };
+      const rdnsMap = {
+        'metamask': 'io.metamask',
+        'trust': 'com.trustwallet.app',
+        'phantom': 'app.phantom',
+        'rainbow': 'me.rainbow'
+      };
       const btn = document.querySelector(`[data-rdns="${rdnsMap[walletType] || walletType}"]`);
-      if (btn) { btn.style.borderColor = '#10B981'; btn.style.background = 'rgba(16, 185, 129, 0.1)'; }
+      if (btn) {
+        btn.style.borderColor = '#10B981';
+        btn.style.background = 'rgba(16, 185, 129, 0.1)';
+      }
     }
 
     function getRDNSForWallet(walletType) {
-      const map = { 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 'phantom': 'app.phantom', 'rainbow': 'me.rainbow' };
+      const map = {
+        'metamask': 'io.metamask',
+        'trust': 'com.trustwallet.app',
+        'phantom': 'app.phantom',
+        'rainbow': 'me.rainbow'
+      };
       return map[walletType] || walletType;
     }
 
@@ -3234,8 +3284,18 @@
         'phantom': '<img src="https://media.bithashcapital.live/Phantom-Icon_App_1200x1200.png" alt="Phantom" style="width: 24px; height: 24px;">',
         'rainbow': '<img src="https://media.bithashcapital.live/ChatGPT%20Image%20Jul%2010%2C%202026%2C%2007_25_09%20PM.png" alt="Rainbow" style="width: 24px; height: 24px;">'
       };
-      const nameMap = { 'metamask': 'MetaMask', 'trust': 'Trust Wallet', 'phantom': 'Phantom', 'rainbow': 'Rainbow' };
-      const colorMap = { 'metamask': '#F6851B', 'trust': '#3375BB', 'phantom': '#6C3DFF', 'rainbow': '#FF4B7B' };
+      const nameMap = {
+        'metamask': 'MetaMask',
+        'trust': 'Trust Wallet',
+        'phantom': 'Phantom',
+        'rainbow': 'Rainbow'
+      };
+      const colorMap = {
+        'metamask': '#F6851B',
+        'trust': '#3375BB',
+        'phantom': '#6C3DFF',
+        'rainbow': '#FF4B7B'
+      };
       return `<span class="wallet-icon">${iconMap[walletType] || ''}</span><span class="wallet-name" style="color: ${colorMap[walletType] || '#FFFFFF'};">${nameMap[walletType] || walletType}</span>`;
     }
 
@@ -3246,28 +3306,37 @@
       web3SignClient = null;
       activeWcUri = null;
       wcSessionPending = false;
+      
       document.getElementById('web3-connection-bar').classList.remove('active');
       document.getElementById('web3-status').classList.remove('active');
       document.getElementById('wc-mobile-status').classList.remove('active');
+      
       document.querySelectorAll('.wallet-btn').forEach(btn => {
         btn.style.borderColor = '';
         btn.style.background = '';
         const statusEl = btn.querySelector('.connection-status');
         if (statusEl) { statusEl.className = 'connection-status'; }
       });
+      
       if (signClient) {
-        try { signClient.core.relayer.disconnect(); } catch (err) { console.log('Disconnect error:', err.message); }
+        try {
+          signClient.core.relayer.disconnect();
+        } catch (err) {
+          console.log('Disconnect error:', err.message);
+        }
       }
       console.log('🔌 Wallet disconnected');
     }
 
     // =============================================
-    // WEB3 SIGNUP POPUP - Show after wallet connection
+    // WEB3 SIGNUP POPUP
     // =============================================
     function showWeb3SignupPopup(address) {
       const popup = document.getElementById('web3-popup');
       document.getElementById('web3-popup-title').textContent = 'Complete Your Profile';
-      document.getElementById('web3-popup-subtitle').textContent = 'Please provide your information to create your account with wallet ' + address.substring(0, 6) + '...' + address.substring(address.length - 4);
+      document.getElementById('web3-popup-subtitle').textContent = 
+        'Please provide your information to create your account with wallet ' +
+        address.substring(0, 6) + '...' + address.substring(address.length - 4);
       document.getElementById('web3-popup-form-container').style.display = 'block';
       document.getElementById('web3-popup-loading').classList.remove('active');
       document.getElementById('web3-popup-status').style.display = 'none';
@@ -3287,6 +3356,7 @@
     function selectWeb3AccountType(type) {
       document.querySelectorAll('.web3-account-type .type-option').forEach(el => el.classList.remove('selected'));
       document.querySelector(`.web3-account-type .type-option[data-type="${type}"]`).classList.add('selected');
+      
       if (type === 'individual') {
         document.getElementById('web3-individual-fields').style.display = 'block';
         document.getElementById('web3-business-fields').style.display = 'none';
@@ -3297,7 +3367,7 @@
     }
 
     // =============================================
-    // WEB3 SIGNUP FORM SUBMIT - Uses /api/web3/* endpoints only
+    // WEB3 SIGNUP FORM SUBMIT - Uses /api/web3/signup
     // =============================================
     document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -3376,7 +3446,7 @@
         if (referralCode) { formData.referralCode = referralCode; }
 
         // =============================================
-        // STEP 1: Get nonce from server - WEB3 ENDPOINT
+        // STEP 1: Get nonce from server
         // =============================================
         const nonceResponse = await fetch(
           `https://bithash-backend-ycuf.onrender.com/api/web3/nonce?walletAddress=${web3WalletAddress}&type=signup&isSignup=true&accountType=${accountType}&referralCode=${referralCode || ''}`
@@ -3428,7 +3498,7 @@
         web3Signature = signature;
 
         // =============================================
-        // STEP 3: Verify signature - WEB3 ENDPOINT
+        // STEP 3: Verify signature
         // =============================================
         const verifyResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/web3/verify', {
           method: 'POST',
@@ -3470,7 +3540,7 @@
         }
 
         // =============================================
-        // STEP 4: Submit signup - WEB3 ENDPOINT
+        // STEP 4: Submit signup
         // =============================================
         const signupResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/web3/signup', {
           method: 'POST',
@@ -3503,7 +3573,7 @@
         const tempToken = signupData.tempToken || web3TempToken;
 
         // =============================================
-        // STEP 5: Send OTP - WEB3 ENDPOINT
+        // STEP 5: Send OTP for web3 user
         // =============================================
         await sendWeb3OtpToEmail(userEmail, tempToken);
         
@@ -3523,7 +3593,7 @@
     });
 
     // =============================================
-    // SEND OTP - WEB3 ENDPOINT
+    // SEND WEB3 OTP - Uses /api/web3/send-otp
     // =============================================
     async function sendWeb3OtpToEmail(email, tempToken) {
       try {
@@ -3547,7 +3617,7 @@
     }
 
     // =============================================
-    // SEND OTP - FORM/GOOGLE AUTH ENDPOINT (same as Snippet B)
+    // FORM OTP - Uses /api/auth/send-otp (unchanged)
     // =============================================
     async function sendFormOtpToEmail(email, tempToken) {
       try {
@@ -3573,15 +3643,19 @@
     // =============================================
     // OTP FUNCTIONS - Routes based on auth method
     // =============================================
-    let otpTimer, resendTimer, currentUserEmail = '', currentTempToken = '', lastOtpRequestTime = 0;
+    let otpTimer, resendTimer, currentUserEmail = '',
+      currentTempToken = '',
+      lastOtpRequestTime = 0;
     const OTP_COOLDOWN_PERIOD = 60000;
 
     function showTwoStepModal(email, tempToken) {
       currentUserEmail = email;
       currentTempToken = tempToken;
+      
       const maskedEmail = email.substring(0, 3) + '*'.repeat(Math.max(0, email.split('@')[0].length - 3)) + '@' + email.split('@')[1];
       const emailSpan = document.getElementById('otp-email-display');
       emailSpan.textContent = maskedEmail;
+      
       if (email.toLowerCase().endsWith('@gmail.com')) {
         emailSpan.style.cursor = 'pointer';
         emailSpan.style.textDecoration = 'underline';
@@ -3591,6 +3665,7 @@
         emailSpan.style.textDecoration = 'none';
         emailSpan.onclick = null;
       }
+      
       document.getElementById('two-step-modal').classList.add('active');
       document.querySelectorAll('.otp-input').forEach(input => { input.value = ''; input.classList.remove('filled'); });
       document.querySelector('.otp-input').focus();
@@ -3602,6 +3677,7 @@
       clearInterval(otpTimer);
       let timer = duration;
       const timerElement = document.getElementById('timer-countdown');
+      
       otpTimer = setInterval(function() {
         const minutes = Math.floor(timer / 60);
         const seconds = timer % 60;
@@ -3617,6 +3693,7 @@
       const countdownElement = document.getElementById('resend-countdown');
       resendButton.disabled = true;
       countdownElement.textContent = timer;
+      
       resendTimer = setInterval(function() {
         countdownElement.textContent = --timer;
         if (timer <= 0) {
@@ -3631,16 +3708,23 @@
     document.querySelectorAll('.otp-input').forEach((input, index) => {
       input.addEventListener('input', function() {
         if (!/^\d*$/.test(this.value)) { this.value = ''; return; }
-        if (this.value.length === 1 && index < 5) document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
+        if (this.value.length === 1 && index < 5) {
+          document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
+        }
         if (this.value.length === 1) this.classList.add('filled');
         else this.classList.remove('filled');
         document.getElementById('otp-error').style.display = 'none';
+        
         const allFilled = Array.from(document.querySelectorAll('.otp-input')).every(inp => inp.value.length === 1);
         if (allFilled) setTimeout(() => autoVerifyOtp(), 100);
       });
+      
       input.addEventListener('keydown', function(e) {
-        if (e.key === 'Backspace' && this.value === '' && index > 0) document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
+        if (e.key === 'Backspace' && this.value === '' && index > 0) {
+          document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
+        }
       });
+      
       input.addEventListener('paste', function(e) {
         e.preventDefault();
         const pasteData = e.clipboardData.getData('text').trim();
@@ -3679,9 +3763,11 @@
     async function autoVerifyOtp() {
       const otpCode = Array.from(document.querySelectorAll('.otp-input')).map(inp => inp.value).join('');
       if (otpCode.length !== 6) return;
+      
       const pasteBtn = document.getElementById('otp-paste-btn');
       pasteBtn.classList.add('paste-success');
       pasteBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
+      
       try {
         let response;
 
@@ -3711,6 +3797,7 @@
         }
 
         const data = await response.json();
+        
         if (response.ok && data.status === 'success') {
           pasteBtn.innerHTML = '<i class="fas fa-check"></i> Success!';
           document.getElementById('otp-success').style.display = 'block';
@@ -3734,11 +3821,13 @@
 
     document.getElementById('resend-otp-btn').addEventListener('click', function() {
       if (this.disabled) return;
+      
       if (currentAuthMethod === 'web3') {
         sendWeb3OtpToEmail(currentUserEmail, currentTempToken);
       } else {
         sendFormOtpToEmail(currentUserEmail, currentTempToken);
       }
+      
       startOtpTimer(300);
       startResendTimer(60);
       document.querySelectorAll('.otp-input').forEach(inp => { inp.value = ''; inp.classList.remove('filled'); });
@@ -3763,6 +3852,7 @@
       pasteBtn.classList.remove('paste-success');
       pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
     });
+    
     modal.addEventListener('click', (event) => { if (event.target === modal) modal.classList.remove('active'); });
 
     document.getElementById('web3-popup').addEventListener('click', function(e) {
@@ -3772,7 +3862,7 @@
     document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
     // =============================================
-    // TRADITIONAL FORM LOGIC (Unchanged from Snippet B)
+    // TRADITIONAL FORM LOGIC (Unchanged)
     // =============================================
 
     AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
@@ -3865,6 +3955,7 @@
       strengthBar.style.width = '0%';
       strengthBar.style.backgroundColor = 'var(--error)';
       if (!password) { strengthText.textContent = 'Password strength: Very Weak'; return 0; }
+      
       let strength = 0;
       if (password.length >= 8) strength += 1;
       if (password.length >= 12) strength += 1;
@@ -3872,12 +3963,14 @@
       if (/[A-Z]/.test(password)) strength += 1;
       if (/[0-9]/.test(password)) strength += 1;
       if (/[^a-zA-Z0-9]/.test(password)) strength += 1;
+      
       let width = 0, color = '', text = '';
       if (strength <= 1) { width = 20; color = 'var(--error)'; text = 'Very Weak'; }
       else if (strength === 2) { width = 40; color = 'var(--error)'; text = 'Weak'; }
       else if (strength === 3) { width = 60; color = 'var(--warning)'; text = 'Moderate'; }
       else if (strength === 4) { width = 80; color = 'var(--success)'; text = 'Strong'; }
       else { width = 100; color = 'var(--success)'; text = 'Very Strong'; }
+      
       strengthBar.style.width = `${width}%`;
       strengthBar.style.backgroundColor = color;
       strengthText.textContent = `Password strength: ${text}`;
@@ -3888,7 +3981,7 @@
     const SIGNUP_COOLDOWN = 5000;
 
     // =============================================
-    // FORM SIGNUP - Uses /api/auth/signup (same as Snippet B)
+    // FORM SIGNUP - Uses /api/auth/signup (unchanged)
     // =============================================
     document.getElementById('signup-form').addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -3898,18 +3991,22 @@
         return;
       }
       lastSignupAttempt = now;
+      
       document.getElementById('signup-success').style.display = 'none';
       document.getElementById('signup-error').style.display = 'none';
       document.getElementById('signup-warning').style.display = 'none';
+      
       const buttonText = document.getElementById('signup-button-text');
       const spinner = document.getElementById('signup-spinner');
       const submitBtn = document.getElementById('signup-submit-btn');
       submitBtn.disabled = true;
       buttonText.style.display = 'none';
       spinner.style.display = 'inline-block';
+      
       const accountType = document.querySelector('.account-type-card.selected').getAttribute('data-account-type');
       let formData;
       const referralCode = localStorage.getItem('referralCode');
+      
       if (accountType === 'individual') {
         formData = {
           accountType: 'individual',
@@ -3934,6 +4031,7 @@
         };
       }
       if (referralCode) formData.referralCode = referralCode;
+      
       try {
         const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/auth/signup', {
           method: 'POST',
@@ -3942,6 +4040,7 @@
         });
         const data = await response.json();
         submitBtn.disabled = false;
+        
         if (response.ok) {
           if (data.tempToken) {
             currentAuthMethod = 'form';
@@ -3975,7 +4074,9 @@
       try {
         const token = localStorage.getItem('jwtToken');
         if (!token) { document.getElementById('auth-buttons').style.display = 'flex'; return; }
-        const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/me', { headers: { 'Authorization': `Bearer ${token}` } });
+        const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/me', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
         if (response.ok) window.location.href = 'dashboard';
         else { localStorage.removeItem('jwtToken'); document.getElementById('auth-buttons').style.display = 'flex'; }
       } catch (error) { console.error('Auth check failed:', error); }
@@ -3985,7 +4086,7 @@
     const GOOGLE_SIGNIN_COOLDOWN = 5000;
 
     // =============================================
-    // GOOGLE SIGN-IN - Uses /api/auth/google (same as Snippet B)
+    // GOOGLE SIGN-IN - Uses /api/auth/google (unchanged)
     // =============================================
     function handleGoogleSignIn(response) {
       const now = Date.now();
@@ -4094,6 +4195,7 @@
       const newsletterEmail = document.getElementById('newsletter-email');
       const successMsg = document.getElementById('newsletter-success');
       const errorMsg = document.getElementById('newsletter-error');
+      
       newsletterBtn.addEventListener('click', async function() {
         const email = newsletterEmail.value.trim();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -4126,6 +4228,7 @@
           setTimeout(() => { successMsg.style.display = 'none'; errorMsg.style.display = 'none'; }, 5000);
         }
       });
+      
       newsletterEmail.addEventListener('keypress', e => { if (e.key === 'Enter') newsletterBtn.click(); });
     }
 
@@ -4167,6 +4270,7 @@
         if (window.scrollY > 50) header.classList.add('scrolled');
         else header.classList.remove('scrolled');
       });
+      
       const securityBadge = document.querySelector('.security-badge');
       if (securityBadge) {
         setInterval(() => {
