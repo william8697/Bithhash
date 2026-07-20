@@ -34,7 +34,12 @@
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 
     <!-- ====== WALLETCONNECT SIGN-CLIENT CDN ====== -->
-    <script src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js">
+    <!-- CRITICAL FIX: Added onload and onerror handlers to detect when script loads -->
+    <script 
+        src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js"
+        id="wc-script"
+        onload="window._wcScriptLoaded = true; console.log('✅ WalletConnect script loaded');"
+        onerror="console.error('❌ Failed to load WalletConnect script'); window._wcScriptFailed = true;">
     </script>
 
     <!-- ====== ETHERS.JS FOR WEB3 ====== -->
@@ -2011,14 +2016,13 @@
     <script>
         // =============================================
         // PRODUCTION-GRADE WEB3 WALLET CONNECTION
-        // FIXES: Correct Relay URL, Promise Queue, Race Condition Prevention
+        // CRITICAL FIX: Wait for script to load before initializing
         // =============================================
 
         // =============================================
-        // GLOBAL CONFIGURATION (FIXED)
+        // GLOBAL CONFIGURATION
         // =============================================
         const WALLETCONNECT_PROJECT_ID = '0a5035cbff45bc8eacd8bfbbc5361765';
-        // CRITICAL FIX: Use .com NOT .org
         const WALLETCONNECT_RELAY_URL = 'wss://relay.walletconnect.com';
 
         // =============================================
@@ -2029,10 +2033,11 @@
         let activeWcUri = null;
         let wcSessionPending = false;
 
-        // CRITICAL FIX: Promise tracker to prevent race conditions
-        let walletConnectInitPromise = null;
-        let wcInitAttempts = 0;
-        const MAX_WC_INIT_ATTEMPTS = 10;
+        // CRITICAL FIX: Track script loading state
+        let wcScriptLoaded = false;
+        let wcScriptFailed = false;
+        let wcInitializationStarted = false;
+        let wcInitPromise = null;
 
         let web3WalletAddress = null;
         let web3WalletType = null;
@@ -2053,37 +2058,93 @@
         let currentAuthMethod = 'form';
 
         // =============================================
-        // 1. ROBUST CLIENT BOOTSTRAP (UNISWAP PATTERN)
+        // 1. SCRIPT LOAD DETECTION (THE REAL FIX)
+        // =============================================
+        function waitForWcScript() {
+            return new Promise((resolve, reject) => {
+                // Check if script already loaded
+                if (typeof window.WalletConnectSignClient !== 'undefined' && 
+                    typeof window.WalletConnectSignClient.default !== 'undefined') {
+                    console.log('✅ WalletConnect script already loaded');
+                    wcScriptLoaded = true;
+                    resolve();
+                    return;
+                }
+
+                // Check if script failed
+                if (window._wcScriptFailed) {
+                    reject(new Error('WalletConnect script failed to load'));
+                    return;
+                }
+
+                // Set up a listener for script load
+                const checkScript = () => {
+                    if (typeof window.WalletConnectSignClient !== 'undefined' && 
+                        typeof window.WalletConnectSignClient.default !== 'undefined') {
+                        console.log('✅ WalletConnect script loaded (detected by polling)');
+                        wcScriptLoaded = true;
+                        resolve();
+                        return true;
+                    }
+                    if (window._wcScriptFailed) {
+                        reject(new Error('WalletConnect script failed to load'));
+                        return true;
+                    }
+                    return false;
+                };
+
+                // Use the onload handler if available
+                if (window._wcScriptLoaded) {
+                    if (checkScript()) return;
+                }
+
+                // Fallback: poll for script load with increasing intervals
+                let attempts = 0;
+                const maxAttempts = 30; // 30 * 500ms = 15 seconds max
+                const interval = setInterval(() => {
+                    attempts++;
+                    if (checkScript()) {
+                        clearInterval(interval);
+                        return;
+                    }
+                    if (attempts >= maxAttempts) {
+                        clearInterval(interval);
+                        reject(new Error('WalletConnect script load timeout'));
+                    }
+                }, 500);
+            });
+        }
+
+        // =============================================
+        // 2. ROBUST CLIENT BOOTSTRAP (FIXED)
         // =============================================
         document.addEventListener('DOMContentLoaded', function() {
             initializeEIP6963();
-            // Start initializing immediately on load, and store the Promise globally
-            walletConnectInitPromise = silentlyInitWalletConnect();
+            // Start initialization with proper script loading
+            wcInitPromise = silentlyInitWalletConnect();
         });
 
         async function silentlyInitWalletConnect() {
-            // If already initialized, return existing client
-            if (walletConnectInitialized && signClient) {
-                return signClient;
+            // Prevent multiple simultaneous initializations
+            if (wcInitializationStarted && wcInitPromise) {
+                return wcInitPromise;
             }
-
-            // Prevent infinite loops
-            if (wcInitAttempts >= MAX_WC_INIT_ATTEMPTS) {
-                console.error('❌ WalletConnect SDK failed to load after ' + MAX_WC_INIT_ATTEMPTS + ' attempts');
-                walletConnectInitialized = false;
-                return null;
-            }
+            wcInitializationStarted = true;
 
             try {
-                wcInitAttempts++;
+                // CRITICAL FIX: Wait for the script to load FIRST
+                console.log('⏳ Waiting for WalletConnect script to load...');
+                await waitForWcScript();
 
-                // Check if SDK is loaded - with proper namespace detection
+                // If already initialized, return existing client
+                if (walletConnectInitialized && signClient) {
+                    return signClient;
+                }
+
+                // Check if script is properly loaded
                 if (typeof window.WalletConnectSignClient === 'undefined' ||
                     typeof window.WalletConnectSignClient.default === 'undefined') {
-                    console.warn('⚠️ WalletConnect SDK not loaded yet, retrying in 500ms... (attempt ' + wcInitAttempts +
-                        '/' + MAX_WC_INIT_ATTEMPTS + ')');
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    return await silentlyInitWalletConnect();
+                    throw new Error('WalletConnect SDK not available after waiting');
                 }
 
                 const config = {
@@ -2102,7 +2163,6 @@
 
                 signClient = clientInstance;
                 walletConnectInitialized = true;
-                wcInitAttempts = 0; // Reset attempts on success
                 console.log('✅ WalletConnect SignClient initialized and ready');
 
                 // Clean up stale sessions on start
@@ -2110,17 +2170,10 @@
 
                 return signClient;
             } catch (err) {
-                console.error('Failed to initialize WalletConnect Client:', err);
+                console.error('❌ Failed to initialize WalletConnect Client:', err);
                 walletConnectInitialized = false;
                 signClient = null;
-
-                // If we have attempts left, retry
-                if (wcInitAttempts < MAX_WC_INIT_ATTEMPTS) {
-                    console.log('🔄 Retrying WalletConnect initialization...');
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    return await silentlyInitWalletConnect();
-                }
-
+                wcInitializationStarted = false;
                 throw err;
             }
         }
@@ -2143,7 +2196,7 @@
         }
 
         // =============================================
-        // 2. EIP-6963 PROVIDER DISCOVERY
+        // 3. EIP-6963 PROVIDER DISCOVERY
         // =============================================
         function initializeEIP6963() {
             if (eip6963Initialized) return;
@@ -2185,7 +2238,7 @@
         }
 
         // =============================================
-        // 3. DEVICE DETECTION
+        // 4. DEVICE DETECTION
         // =============================================
         function isMobileDevice() {
             return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -2199,7 +2252,7 @@
         }
 
         // =============================================
-        // 4. STABLE DEEP LINK & FALLBACK
+        // 5. STABLE DEEP LINK & FALLBACK
         // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
@@ -2263,7 +2316,6 @@
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
-        // CRITICAL FIX: Document visibility-based fallback
         function safeRedirectToWallet(deepLinkUrl, storeUrl) {
             const pageVisibilityPromise = new Promise((resolve) => {
                 const handleVisibilityChange = () => {
@@ -2290,16 +2342,16 @@
         }
 
         // =============================================
-        // 5. ZERO-DELAY URI GENERATION (FIXED)
+        // 6. URI GENERATION
         // =============================================
         async function generateWalletConnectURI(walletType) {
             try {
-                // CRITICAL FIX: Wait for the running initialization promise
-                if (walletConnectInitPromise) {
-                    await walletConnectInitPromise;
+                // CRITICAL FIX: Ensure initialization is complete
+                if (wcInitPromise) {
+                    await wcInitPromise;
                 } else {
-                    walletConnectInitPromise = silentlyInitWalletConnect();
-                    await walletConnectInitPromise;
+                    wcInitPromise = silentlyInitWalletConnect();
+                    await wcInitPromise;
                 }
 
                 if (!signClient) {
@@ -2309,7 +2361,6 @@
                 // Clean up pairings to guarantee a fresh prompt
                 await pruneStalePairings();
 
-                // Use SINGLE chain for faster handshakes
                 const connectParams = {
                     requiredNamespaces: {
                         eip155: {
@@ -2385,7 +2436,7 @@
         }
 
         // =============================================
-        // 6. MAIN CONNECTION HANDLER
+        // 7. MAIN CONNECTION HANDLER
         // =============================================
         async function connectWeb3Wallet(targetRdns, walletType) {
             if (isConnecting) return;
