@@ -50,38 +50,8 @@
   <!-- Google Places API -->
   <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCk7mCa_AnGRr0r9NswBFo1SKRvQiOy8fM&libraries=places&callback=initAutocomplete" async defer></script>
 
-  <!-- ====== CRITICAL FIX: WALLETCONNECT SDK LOADING ====== -->
-  <script>
-    // Load WalletConnect SDK synchronously with fallback
-    (function loadWalletConnectSDK() {
-      console.log('🔄 Loading WalletConnect SDK...');
-      
-      if (typeof window.WalletConnectSignClient !== 'undefined') {
-        console.log('✅ WalletConnect SDK already loaded');
-        window.WALLETCONNECT_SDK_READY = true;
-        return;
-      }
-      
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js';
-      script.async = false;
-      script.onload = function() {
-        console.log('✅ WalletConnect SDK loaded successfully');
-        window.WALLETCONNECT_SDK_READY = true;
-      };
-      script.onerror = function() {
-        console.error('❌ Primary CDN failed, loading fallback...');
-        const fallback = document.createElement('script');
-        fallback.src = 'https://unpkg.com/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js';
-        fallback.async = false;
-        fallback.onload = function() {
-          console.log('✅ WalletConnect SDK loaded from fallback');
-          window.WALLETCONNECT_SDK_READY = true;
-        };
-        document.head.appendChild(fallback);
-      };
-      document.head.appendChild(script);
-    })();
+  <!-- ====== CRITICAL FIX: REPLACED WITH TURNKEY WALLETCONNECT PROVIDER ====== -->
+  <script src="https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.14.0/dist/index.umd.min.js">
   </script>
 
   <!-- ====== ETHERS.JS FOR WEB3 ====== -->
@@ -2653,6 +2623,7 @@
       walletConnectInitPromise = silentlyInitWalletConnect();
     });
 
+    // ====== CRITICAL FIX: REPLACED WITH TURNKEY PROVIDER INIT ======
     async function silentlyInitWalletConnect() {
       // If already initialized, return existing client
       if (walletConnectInitialized && signClient) {
@@ -2674,71 +2645,47 @@
       walletConnectInitAttempts++;
 
       try {
-        // Check if SDK is loaded
-        if (typeof window.WalletConnectSignClient === 'undefined') {
-          // Check if SDK is still loading
-          if (!window.WALLETCONNECT_SDK_READY) {
-            console.log(`⏳ Waiting for WalletConnect SDK to load... (Attempt ${walletConnectInitAttempts}/${MAX_WALLETCONNECT_RETRIES})`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            return await silentlyInitWalletConnect();
-          }
-          console.warn(`⚠️ WalletConnect SDK not available, retrying... (Attempt ${walletConnectInitAttempts}/${MAX_WALLETCONNECT_RETRIES})`);
-          await new Promise(resolve => setTimeout(resolve, 500));
+        // Check if provider is loaded (using the turnkey bundle)
+        if (typeof window.WalletConnectProvider === 'undefined') {
+          console.log(`⏳ Waiting for WalletConnect Provider to load... (Attempt ${walletConnectInitAttempts}/${MAX_WALLETCONNECT_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
           return await silentlyInitWalletConnect();
         }
 
-        const config = {
+        console.log('🔄 Initializing WalletConnect Provider...');
+
+        // ====== CRITICAL FIX: Use the turnkey EthereumProvider ======
+        const provider = await window.WalletConnectProvider.EthereumProvider.init({
           projectId: WALLETCONNECT_PROJECT_ID,
-          relayUrl: WALLETCONNECT_RELAY_URL,
-          metadata: {
-            name: 'BitHash Capital',
-            description: 'BitHash Cloud Mining Platform',
-            url: window.location.origin,
-            icons: [`${window.location.origin}/icon.png`]
-          }
-        };
+          showQrModal: true,
+          qrModalOptions: {
+            themeMode: "dark"
+          },
+          chains: [1],
+          methods: ["eth_sendTransaction", "personal_sign", "eth_signTypedData"],
+          events: ["chainChanged", "accountsChanged"]
+        });
 
-        console.log('🔄 Initializing WalletConnect client...');
-        const clientInstance = await window.WalletConnectSignClient.default.init(config);
-
-        signClient = clientInstance;
+        // Store provider for later use
+        signClient = provider;
         walletConnectInitialized = true;
         walletConnectInitAttempts = 0;
-        console.log('✅ WalletConnect SignClient initialized and ready');
+        console.log('✅ WalletConnect Provider initialized and ready');
 
-        await pruneStalePairings();
-
-        return signClient;
+        return provider;
       } catch (err) {
-        console.error('❌ Failed to initialize WalletConnect Client:', err);
+        console.error('❌ Failed to initialize WalletConnect Provider:', err);
         walletConnectInitialized = false;
         signClient = null;
 
         // If this is a network error, retry
-        if (err.message.includes('network') || err.message.includes('timeout')) {
+        if (err.message && (err.message.includes('network') || err.message.includes('timeout'))) {
           await new Promise(resolve => setTimeout(resolve, 1000));
           return await silentlyInitWalletConnect();
         }
 
         walletConnectInitAttempts = MAX_WALLETCONNECT_RETRIES;
         throw err;
-      }
-    }
-
-    async function pruneStalePairings() {
-      if (!signClient || !signClient.core || !signClient.core.pairing) return;
-      try {
-        const activePairings = signClient.core.pairing.getPairings();
-        if (activePairings && activePairings.length > 0) {
-          console.log(`🧹 Purging ${activePairings.length} legacy pairing configurations...`);
-          await Promise.all(
-            activePairings.map(pairing =>
-              signClient.core.pairing.disconnect({ topic: pairing.topic })
-            )
-          );
-        }
-      } catch (e) {
-        console.warn('Pairing cleanup warning:', e.message);
       }
     }
 
@@ -2917,8 +2864,17 @@
           throw new Error('WalletConnect engine is offline or failed to start.');
         }
 
-        await pruneStalePairings();
+        // ====== CRITICAL FIX: Use the provider's connect method ======
+        // The turnkey provider handles the connection differently
+        // We need to trigger the QR modal directly
 
+        // For mobile, we need to get the URI from the provider
+        // The provider will show a QR modal by default, but we need the URI for deep linking
+
+        // Since the turnkey provider doesn't expose the URI directly,
+        // we'll use the signClient to generate the URI
+
+        // Fallback: use the signClient to generate URI
         const connectParams = {
           requiredNamespaces: {
             eip155: {
@@ -3314,7 +3270,7 @@
 
       if (signClient) {
         try {
-          signClient.core.relayer.disconnect();
+          signClient.disconnect();
         } catch (err) {
           console.log('Disconnect error:', err.message);
         }
