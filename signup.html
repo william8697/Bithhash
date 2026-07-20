@@ -50,7 +50,46 @@
   <!-- Google Places API -->
   <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCk7mCa_AnGRr0r9NswBFo1SKRvQiOy8fM&libraries=places&callback=initAutocomplete" async defer></script>
 
-  <!-- ====== CRITICAL FIX: REPLACED WITH TURNKEY WALLETCONNECT PROVIDER ====== -->
+  <!-- ====== CRITICAL FIX: POLYFILLS + WALLETCONNECT ====== -->
+  <script>
+    // Inject required Node.js globals BEFORE loading the bundle
+    window.global = window;
+    window.process = { 
+      env: { NODE_ENV: 'production' },
+      browser: true,
+      version: 'v16.0.0'
+    };
+    
+    // Complete Buffer polyfill that prevents crashes
+    window.Buffer = {
+      from: function(data, encoding) {
+        if (typeof data === 'string') {
+          const bytes = [];
+          for (let i = 0; i < data.length; i++) {
+            bytes.push(data.charCodeAt(i));
+          }
+          return new Uint8Array(bytes);
+        }
+        return new Uint8Array(data || []);
+      },
+      isBuffer: function() { return false; },
+      alloc: function(size) { return new Uint8Array(size); },
+      allocUnsafe: function(size) { return new Uint8Array(size); },
+      concat: function(list) {
+        let totalLength = 0;
+        for (const item of list) totalLength += item.length;
+        const result = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const item of list) {
+          result.set(item, offset);
+          offset += item.length;
+        }
+        return result;
+      }
+    };
+  </script>
+
+  <!-- Load the Ethereum Provider bundle -->
   <script src="https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.14.0/dist/index.umd.min.js">
   </script>
 
@@ -2623,15 +2662,15 @@
       walletConnectInitPromise = silentlyInitWalletConnect();
     });
 
-    // ====== CRITICAL FIX: REPLACED WITH TURNKEY PROVIDER INIT ======
-    async function silentlyInitWalletConnect() {
+    // ====== CRITICAL FIX: UPDATED TO USE THE PROPER PROVIDER CHECK ======
+    async function silentlyInitWalletConnect(attempt = 1) {
       // If already initialized, return existing client
       if (walletConnectInitialized && signClient) {
         return signClient;
       }
 
       // CRITICAL FIX: Stop retrying after max attempts
-      if (walletConnectInitAttempts >= MAX_WALLETCONNECT_RETRIES) {
+      if (attempt > MAX_WALLETCONNECT_RETRIES) {
         console.error('❌ WalletConnect SDK failed to load after maximum retries');
         document.getElementById('wc-mobile-status').innerHTML = `
           <div style="color: #EF4444; padding: 12px; background: #1A1F2E; border-radius: 8px;">
@@ -2642,50 +2681,47 @@
         return null;
       }
 
-      walletConnectInitAttempts++;
-
       try {
-        // Check if provider is loaded (using the turnkey bundle)
-        if (typeof window.WalletConnectProvider === 'undefined') {
-          console.log(`⏳ Waiting for WalletConnect Provider to load... (Attempt ${walletConnectInitAttempts}/${MAX_WALLETCONNECT_RETRIES})`);
+        // Check for the provider in multiple possible locations
+        const Provider = window.EthereumProvider || 
+                         (window.WalletConnectProvider && window.WalletConnectProvider.EthereumProvider) ||
+                         window.WalletConnectProvider;
+
+        if (!Provider || typeof Provider.init !== 'function') {
+          console.warn(`⏳ Waiting for WalletConnect Provider to load... (Attempt ${attempt}/${MAX_WALLETCONNECT_RETRIES})`);
           await new Promise(resolve => setTimeout(resolve, 1000));
-          return await silentlyInitWalletConnect();
+          return await silentlyInitWalletConnect(attempt + 1);
         }
 
         console.log('🔄 Initializing WalletConnect Provider...');
-
-        // ====== CRITICAL FIX: Use the turnkey EthereumProvider ======
-        const provider = await window.WalletConnectProvider.EthereumProvider.init({
+        const provider = await Provider.init({
           projectId: WALLETCONNECT_PROJECT_ID,
           showQrModal: true,
-          qrModalOptions: {
-            themeMode: "dark"
-          },
+          qrModalOptions: { themeMode: "dark" },
           chains: [1],
           methods: ["eth_sendTransaction", "personal_sign", "eth_signTypedData"],
-          events: ["chainChanged", "accountsChanged"]
+          events: ["chainChanged", "accountsChanged"],
+          metadata: {
+            name: 'BitHash Capital',
+            description: 'BitHash Cloud Mining Platform',
+            url: window.location.origin,
+            icons: [`${window.location.origin}/icon.png`]
+          }
         });
 
-        // Store provider for later use
         signClient = provider;
         walletConnectInitialized = true;
         walletConnectInitAttempts = 0;
-        console.log('✅ WalletConnect Provider initialized and ready');
-
+        console.log('✅ WalletConnect Provider initialized successfully');
         return provider;
       } catch (err) {
-        console.error('❌ Failed to initialize WalletConnect Provider:', err);
-        walletConnectInitialized = false;
-        signClient = null;
-
-        // If this is a network error, retry
-        if (err.message && (err.message.includes('network') || err.message.includes('timeout'))) {
+        console.error('❌ Provider init error:', err);
+        // If error occurs, retry
+        if (attempt < MAX_WALLETCONNECT_RETRIES) {
           await new Promise(resolve => setTimeout(resolve, 1000));
-          return await silentlyInitWalletConnect();
+          return await silentlyInitWalletConnect(attempt + 1);
         }
-
-        walletConnectInitAttempts = MAX_WALLETCONNECT_RETRIES;
-        throw err;
+        return null;
       }
     }
 
@@ -2864,17 +2900,7 @@
           throw new Error('WalletConnect engine is offline or failed to start.');
         }
 
-        // ====== CRITICAL FIX: Use the provider's connect method ======
-        // The turnkey provider handles the connection differently
-        // We need to trigger the QR modal directly
-
-        // For mobile, we need to get the URI from the provider
-        // The provider will show a QR modal by default, but we need the URI for deep linking
-
-        // Since the turnkey provider doesn't expose the URI directly,
-        // we'll use the signClient to generate the URI
-
-        // Fallback: use the signClient to generate URI
+        // Use the signClient to generate URI
         const connectParams = {
           requiredNamespaces: {
             eip155: {
