@@ -34,12 +34,7 @@
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 
     <!-- ====== WALLETCONNECT SIGN-CLIENT CDN ====== -->
-    <!-- CRITICAL FIX: Added onload and onerror handlers to detect when script loads -->
-    <script 
-        src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js"
-        id="wc-script"
-        onload="window._wcScriptLoaded = true; console.log('✅ WalletConnect script loaded');"
-        onerror="console.error('❌ Failed to load WalletConnect script'); window._wcScriptFailed = true;">
+    <script src="https://cdn.jsdelivr.net/npm/@walletconnect/sign-client@2.22.4/dist/index.umd.min.js">
     </script>
 
     <!-- ====== ETHERS.JS FOR WEB3 ====== -->
@@ -2015,8 +2010,9 @@
 
     <script>
         // =============================================
-        // PRODUCTION-GRADE WEB3 WALLET CONNECTION
-        // CRITICAL FIX: Wait for script to load before initializing
+        // PRODUCTION-GRADE WEB3 WALLET CONNECTION - FIXED
+        // The issue: script detection was checking the wrong property
+        // The fix: use the actual script element's readyState and the global object correctly
         // =============================================
 
         // =============================================
@@ -2032,10 +2028,6 @@
         let walletConnectInitialized = false;
         let activeWcUri = null;
         let wcSessionPending = false;
-
-        // CRITICAL FIX: Track script loading state
-        let wcScriptLoaded = false;
-        let wcScriptFailed = false;
         let wcInitializationStarted = false;
         let wcInitPromise = null;
 
@@ -2048,7 +2040,6 @@
         let isConnecting = false;
         let web3Provider = null;
         let web3SignClient = null;
-        let wcEventListeners = [];
 
         // EIP-6963 state
         const discoveredProviders = [];
@@ -2058,60 +2049,89 @@
         let currentAuthMethod = 'form';
 
         // =============================================
-        // 1. SCRIPT LOAD DETECTION (THE REAL FIX)
+        // 1. ROBUST SCRIPT LOAD DETECTION - THE FIX
         // =============================================
-        function waitForWcScript() {
+        function waitForWalletConnectScript() {
             return new Promise((resolve, reject) => {
-                // Check if script already loaded
-                if (typeof window.WalletConnectSignClient !== 'undefined' && 
-                    typeof window.WalletConnectSignClient.default !== 'undefined') {
-                    console.log('✅ WalletConnect script already loaded');
-                    wcScriptLoaded = true;
+                // Check if the SDK is already available
+                if (typeof window.WalletConnectSignClient !== 'undefined') {
+                    console.log('✅ WalletConnect SDK already available');
                     resolve();
                     return;
                 }
 
-                // Check if script failed
-                if (window._wcScriptFailed) {
-                    reject(new Error('WalletConnect script failed to load'));
+                // Find the script element
+                const scriptEl = document.querySelector('script[src*="walletconnect/sign-client"]');
+                if (!scriptEl) {
+                    reject(new Error('WalletConnect script element not found in DOM'));
                     return;
                 }
 
-                // Set up a listener for script load
-                const checkScript = () => {
-                    if (typeof window.WalletConnectSignClient !== 'undefined' && 
-                        typeof window.WalletConnectSignClient.default !== 'undefined') {
-                        console.log('✅ WalletConnect script loaded (detected by polling)');
-                        wcScriptLoaded = true;
-                        resolve();
-                        return true;
-                    }
-                    if (window._wcScriptFailed) {
-                        reject(new Error('WalletConnect script failed to load'));
-                        return true;
-                    }
-                    return false;
-                };
+                console.log('⏳ Waiting for WalletConnect script to load...');
 
-                // Use the onload handler if available
-                if (window._wcScriptLoaded) {
-                    if (checkScript()) return;
+                // Check if script is already loaded (readyState could be 'complete' or 'loaded')
+                if (scriptEl.readyState === 'complete' || scriptEl.readyState === 'loaded') {
+                    // Give it a moment for the global to be set
+                    setTimeout(() => {
+                        if (typeof window.WalletConnectSignClient !== 'undefined') {
+                            console.log('✅ WalletConnect script already complete');
+                            resolve();
+                        } else {
+                            reject(new Error('Script is complete but SDK global is not set'));
+                        }
+                    }, 100);
+                    return;
                 }
 
-                // Fallback: poll for script load with increasing intervals
-                let attempts = 0;
-                const maxAttempts = 30; // 30 * 500ms = 15 seconds max
-                const interval = setInterval(() => {
-                    attempts++;
-                    if (checkScript()) {
-                        clearInterval(interval);
+                // Set up event listeners on the script element
+                const onLoad = () => {
+                    cleanup();
+                    // Check if global is set
+                    if (typeof window.WalletConnectSignClient !== 'undefined') {
+                        console.log('✅ WalletConnect script loaded (onload event)');
+                        resolve();
+                    } else {
+                        reject(new Error('Script loaded but SDK global not set'));
+                    }
+                };
+
+                const onError = (err) => {
+                    cleanup();
+                    reject(new Error('WalletConnect script failed to load: ' + (err.message || 'unknown error')));
+                };
+
+                const cleanup = () => {
+                    scriptEl.removeEventListener('load', onLoad);
+                    scriptEl.removeEventListener('error', onError);
+                    clearTimeout(timeoutId);
+                    clearInterval(pollInterval);
+                };
+
+                scriptEl.addEventListener('load', onLoad);
+                scriptEl.addEventListener('error', onError);
+
+                // Fallback: poll for the global
+                let pollAttempts = 0;
+                const maxPollAttempts = 60; // 60 * 200ms = 12 seconds
+                const pollInterval = setInterval(() => {
+                    pollAttempts++;
+                    if (typeof window.WalletConnectSignClient !== 'undefined') {
+                        cleanup();
+                        console.log('✅ WalletConnect SDK detected via polling');
+                        resolve();
                         return;
                     }
-                    if (attempts >= maxAttempts) {
-                        clearInterval(interval);
-                        reject(new Error('WalletConnect script load timeout'));
+                    if (pollAttempts >= maxPollAttempts) {
+                        cleanup();
+                        reject(new Error('WalletConnect script load timeout after ' + (pollAttempts * 200) + 'ms'));
                     }
-                }, 500);
+                }, 200);
+
+                // Overall timeout
+                const timeoutId = setTimeout(() => {
+                    cleanup();
+                    reject(new Error('WalletConnect script load timeout (15s)'));
+                }, 15000);
             });
         }
 
@@ -2120,7 +2140,7 @@
         // =============================================
         document.addEventListener('DOMContentLoaded', function() {
             initializeEIP6963();
-            // Start initialization with proper script loading
+            // Start initialization
             wcInitPromise = silentlyInitWalletConnect();
         });
 
@@ -2132,19 +2152,17 @@
             wcInitializationStarted = true;
 
             try {
-                // CRITICAL FIX: Wait for the script to load FIRST
-                console.log('⏳ Waiting for WalletConnect script to load...');
-                await waitForWcScript();
+                // CRITICAL FIX: Wait for the script to load properly
+                await waitForWalletConnectScript();
+
+                // Double-check the SDK is available
+                if (typeof window.WalletConnectSignClient === 'undefined') {
+                    throw new Error('WalletConnect SDK not available after script load');
+                }
 
                 // If already initialized, return existing client
                 if (walletConnectInitialized && signClient) {
                     return signClient;
-                }
-
-                // Check if script is properly loaded
-                if (typeof window.WalletConnectSignClient === 'undefined' ||
-                    typeof window.WalletConnectSignClient.default === 'undefined') {
-                    throw new Error('WalletConnect SDK not available after waiting');
                 }
 
                 const config = {
@@ -3224,8 +3242,6 @@
 
             // Initialize account type selection
             initializeAccountTypeSelection();
-
-            // Initialize EIP-6963 (already initialized in DOMContentLoaded)
         });
 
         // Set current year in footer
