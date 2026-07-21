@@ -38,8 +38,36 @@
 
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 
-    <!-- ====== WALLETCONNECT FOR WEB3 ====== -->
-    <script src="https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.14.0/dist/index.umd.min.js"></script>
+    <!-- ====== LOAD WALLETCONNECT UNIVERSAL PROVIDER ====== -->
+    <script src="https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.14.0/dist/index.umd.min.js">
+    </script>
+
+    <!-- ====== ETHERS.JS FOR WEB3 ====== -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js">
+    </script>
+
+    <!-- ====== ALL OTHER WEB3 DEPENDENCIES ====== -->
+    <script type="importmap">
+        {
+            "imports": {
+                "@walletconnect/ethereum-provider": "https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.14.0/dist/index.umd.min.js",
+                "@solana/web3.js": "https://cdn.jsdelivr.net/npm/@solana/web3.js@latest/lib/index.iife.min.js",
+                "@aptos-labs/ts-sdk": "https://cdn.jsdelivr.net/npm/@aptos-labs/ts-sdk@latest/dist/index.umd.min.js",
+                "@mysten/sui": "https://cdn.jsdelivr.net/npm/@mysten/sui@latest/dist/index.umd.min.js",
+                "siwe": "https://cdn.jsdelivr.net/npm/siwe@3.0.0/dist/index.umd.min.js",
+                "@metamask/eth-sig-util": "https://cdn.jsdelivr.net/npm/@metamask/eth-sig-util@8.2.0/dist/index.umd.min.js",
+                "axios": "https://cdn.jsdelivr.net/npm/axios@1.6.2/dist/axios.min.js",
+                "moment": "https://cdn.jsdelivr.net/npm/moment@2.29.4/min/moment.min.js",
+                "socket.io-client": "https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js",
+                "@resvg/resvg-js": "https://cdn.jsdelivr.net/npm/@resvg/resvg-js@2.6.0/index.js",
+                "chart.js": "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js",
+                "dompurify": "https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js",
+                "qrcode": "https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js",
+                "uuid": "https://cdn.jsdelivr.net/npm/uuid@9.0.1/dist/umd/uuid.min.js",
+                "validator": "https://cdn.jsdelivr.net/npm/validator@13.11.0/dist/validator.min.js"
+            }
+        }
+    </script>
 
     <style>
         :root {
@@ -4518,7 +4546,7 @@
     let web3IsConnecting = false;
     let web3LinkedWalletFromDB = null;
 
-    // ---- PRODUCTION-GRADE WEB3 STATE (from signup.html) ----
+    // ---- PRODUCTION-GRADE WEB3 STATE ----
     let universalWalletProvider = null;
     let signClient = null;
     let walletConnectInitialized = false;
@@ -4536,8 +4564,9 @@
     const discoveredProviders = [];
     let eip6963Initialized = false;
     let connectedWallets = [];
+    let depositPriceCache = {};
 
-    // ---- WALLET LOGOS (same dimensions as signup.html) ----
+    // ---- WALLET LOGOS ----
     const walletLogos = {
         'metamask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
         'trust': 'https://media.bithashcapital.live/Trust_Stacked%20Logo_Blue.png',
@@ -4545,7 +4574,33 @@
         'rainbow': 'https://media.bithashcapital.live/ChatGPT%20Image%20Jul%2010%2C%202026%2C%2007_25_09%20PM.png'
     };
 
-    // Asset definitions for display (logos only - NO price data here)
+    // ---- WALLET APP STORE URLS ----
+    const WALLET_STORE_URLS = {
+        'metamask': {
+            'android': 'https://play.google.com/store/apps/details?id=io.metamask',
+            'ios': 'https://apps.apple.com/app/metamask/id1438144202',
+            'chrome': 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn',
+            'firefox': 'https://addons.mozilla.org/en-US/firefox/addon/ether-metamask/',
+            'edge': 'https://microsoftedge.microsoft.com/addons/detail/metamask/ejbalbakoplchlghecdalmeeeajnimhm'
+        },
+        'trust': {
+            'android': 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp',
+            'ios': 'https://apps.apple.com/app/trust-wallet/id1288339409',
+            'chrome': 'https://trustwallet.com/browser-extension'
+        },
+        'phantom': {
+            'android': 'https://play.google.com/store/apps/details?id=app.phantom',
+            'ios': 'https://apps.apple.com/app/phantom-wallet/id1598432977',
+            'chrome': 'https://phantom.app/download'
+        },
+        'rainbow': {
+            'android': 'https://play.google.com/store/apps/details?id=me.rainbow',
+            'ios': 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021',
+            'chrome': 'https://rainbow.me/download'
+        }
+    };
+
+    // Asset definitions for display
     const topAssets = [
         { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png' },
         { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' },
@@ -4647,9 +4702,12 @@
     }
 
     function updateMobileBalances() {
-        document.getElementById('mobile-main-amount').textContent = document.getElementById('main-balance').textContent;
-        document.getElementById('mobile-active-amount').textContent = document.getElementById('active-balance').textContent;
-        document.getElementById('mobile-matured-amount').textContent = document.getElementById('matured-balance').textContent;
+        const main = document.getElementById('main-balance');
+        const active = document.getElementById('active-balance');
+        const matured = document.getElementById('matured-balance');
+        if (main) document.getElementById('mobile-main-amount').textContent = main.textContent;
+        if (active) document.getElementById('mobile-active-amount').textContent = active.textContent;
+        if (matured) document.getElementById('mobile-matured-amount').textContent = matured.textContent;
     }
 
     function switchMobileBalance(type) {
@@ -4677,7 +4735,7 @@
     }
 
     // =============================================
-    // RENDER ASSETS - Uses price from backend (asset.currentPrice)
+    // RENDER ASSETS
     // =============================================
     function renderAssetsWithBalanceEnhanced() {
         const container = document.getElementById('assets-container');
@@ -4941,13 +4999,11 @@
                 if (user) {
                     document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] ||
                     'Miner';
-                    // Load connected wallets from user data
                     if (user.wallets && Array.isArray(user.wallets)) {
                         connectedWallets = user.wallets;
                         renderConnectedWallets();
                         updateConnectedWalletsCount();
                     }
-                    // Check if user has a wallet linked (for backward compatibility)
                     if (user.web3Wallet && !connectedWallets.some(w => w.address === user.web3Wallet)) {
                         connectedWallets.push({ address: user.web3Wallet, type: 'metamask' });
                         renderConnectedWallets();
@@ -5006,8 +5062,7 @@
     }
 
     // =============================================
-    // LOAD INVESTMENTS - ALL DATA FROM BACKEND ONLY
-    // NO HARDCODED VALUES
+    // LOAD INVESTMENTS
     // =============================================
     let investmentsRefreshTimer = null;
     let countdownInterval = null;
@@ -5034,7 +5089,6 @@
             const investments = data.data?.investments || data.investments || [];
             miningContractsData = investments;
 
-            // Generate timestamp for last updated
             const lastUpdated = data.data?.generatedAt ? new Date(data.data.generatedAt) : new Date();
             const formattedLastUpdated = lastUpdated.toLocaleTimeString('en-US', {
                 hour: '2-digit',
@@ -5068,7 +5122,6 @@
                 return;
             }
 
-            // Build new HTML content in memory first - ALL DATA FROM BACKEND
             let newRowsHtml = '';
             investments.forEach(investment => {
                 const planName = investment.planName || 'Cloud Mining Plan';
@@ -5095,16 +5148,13 @@
                     `;
             });
 
-            // Only update DOM if content changed to prevent flicker
             if (tableBody && tableBody.innerHTML !== newRowsHtml) {
                 tableBody.innerHTML = newRowsHtml;
             }
 
-            // Render card view if active - ALL DATA FROM BACKEND
             if (currentMiningView === 'card') {
                 renderMiningCardView(investments);
             } else {
-                // List view already rendered via table
                 const container = document.getElementById('mining-contracts-container');
                 if (container) {
                     container.innerHTML = `<div class="investments-table-container">
@@ -5123,7 +5173,6 @@
         }
     }
 
-    // ===== RENDER MINING CARD VIEW - ALL DATA FROM BACKEND =====
     function renderMiningCardView(investments) {
         const container = document.getElementById('mining-contracts-container');
         if (!container) return;
@@ -5136,7 +5185,6 @@
             return;
         }
 
-        // Start countdown timer if not already running
         if (!countdownInterval) {
             countdownInterval = setInterval(() => {
                 loadInvestments();
@@ -5146,7 +5194,6 @@
         let cardsHtml = `<div class="mining-contracts-grid">`;
 
         investments.forEach(inv => {
-            // ALL DATA COMES FROM BACKEND - NO FRONTEND CALCULATIONS
             const planName = inv.planName || 'Cloud Mining';
             const amount = inv.amount || 0;
             const durationHours = inv.durationHours || 0;
@@ -5202,7 +5249,6 @@
         container.innerHTML = cardsHtml;
     }
 
-    // ===== VIEW TOGGLE FOR MINING CONTRACTS =====
     function setMiningView(view) {
         currentMiningView = view;
         document.getElementById('mining-toggle-card').classList.toggle('active', view === 'card');
@@ -5210,7 +5256,6 @@
         loadInvestments();
     }
 
-    // Start background refresh for investments every 10 seconds
     function startInvestmentsBackgroundRefresh() {
         if (investmentsRefreshTimer) clearInterval(investmentsRefreshTimer);
         investmentsRefreshTimer = setInterval(() => {
@@ -5219,7 +5264,7 @@
     }
 
     // =============================================
-    // LOAD TRANSACTIONS WITH SMOOTH UPDATE (NO BLINKING)
+    // LOAD TRANSACTIONS
     // =============================================
     async function loadTransactions() {
         try {
@@ -5245,7 +5290,6 @@
                     return staticTx;
                 });
 
-                // Check if transactions array actually changed before re-rendering
                 const hasChanged = allTransactions.length !== processed.length ||
                     JSON.stringify(allTransactions.map(t => t.id || t._id)) !== JSON.stringify(processed.map(t => t
                     .id || t._id));
@@ -5256,7 +5300,6 @@
                     updateMoneyFlowChart();
                 } else {
                     allTransactions = processed;
-                    // Still update chart in case amounts changed but IDs didn't
                     updateMoneyFlowChart();
                 }
             }
@@ -5354,7 +5397,6 @@
                 `;
         });
 
-        // Only update if content changed
         if (tableBody.innerHTML !== newRowsHtml) {
             tableBody.innerHTML = newRowsHtml;
         }
@@ -6474,7 +6516,7 @@
     }
 
     // =============================================
-    // SOCKET.IO - REAL-TIME UPDATES FROM BACKEND (NO EXTERNAL PRICE APIs)
+    // SOCKET.IO - REAL-TIME UPDATES FROM BACKEND
     // =============================================
     function initSocketIO() {
         const token = localStorage.getItem('jwtToken');
@@ -6553,11 +6595,9 @@
             renderAssetsWithBalanceEnhanced();
         });
 
-        // DEBOUNCED PRICE UPDATE TO PREVENT BLINKING - ALL PRICES FROM BACKEND ONLY
         let pendingPriceRender = false;
         socket.on('price_update', (prices) => {
             console.log('📊 Real-time price update received from backend:', Object.keys(prices).length, 'assets');
-            // Store prices globally for other components
             currentPrices = prices;
             for (const [assetSymbol, priceData] of Object.entries(prices)) {
                 const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
@@ -6576,17 +6616,19 @@
                             .totalAmount)) * 100 : 0;
                     }
                 }
+                // Update price cache for deposit fiat conversion
+                depositPriceCache[assetSymbol] = priceData.price;
             }
 
-            // Debounce render to prevent multiple rapid updates causing flicker
             if (!pendingPriceRender) {
                 pendingPriceRender = true;
                 requestAnimationFrame(() => {
                     userPortfolio = [...fullAssetsList];
                     renderAssetsWithBalanceEnhanced();
                     renderTransactionsTable();
-                    // Update investments silently in background (uses locked BTC price per investment)
                     loadInvestments();
+                    // Update deposit fiat estimate if amount is entered
+                    updateFiatEstimate();
                     pendingPriceRender = false;
                 });
             }
@@ -6864,7 +6906,7 @@
     }
 
     // =============================================
-    // AUTO REFRESH (Background only, no blinking)
+    // AUTO REFRESH
     // =============================================
     function startAutoRefresh() {
         setInterval(async () => {
@@ -6873,7 +6915,6 @@
             await loadReferralData();
             await loadDownlineData();
             await checkLoanEligibility();
-            // Note: loadInvestments runs separately every 10 seconds via startInvestmentsBackgroundRefresh
         }, 60000);
     }
 
@@ -6956,10 +6997,9 @@
     }
 
     // =============================================
-    // PRODUCTION-GRADE WEB3 WALLET CONNECTION (from signup.html)
+    // PRODUCTION-GRADE WEB3 WALLET CONNECTION
     // =============================================
 
-    // ---- DEVICE DETECTION (from signup.html) ----
     function isMobileDevice() {
         return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     }
@@ -6971,7 +7011,47 @@
         return 'desktop';
     }
 
-    // ---- EIP-6963 PROVIDER DISCOVERY (from signup.html) ----
+    function getWalletInstallUrl(walletType) {
+        const os = getMobileOS();
+        const urls = WALLET_STORE_URLS[walletType] || WALLET_STORE_URLS['metamask'];
+        
+        if (os === 'android' && urls.android) return urls.android;
+        if (os === 'ios' && urls.ios) return urls.ios;
+        
+        // Desktop fallback - check if Chrome, Firefox, Edge
+        const isChrome = navigator.userAgent.indexOf('Chrome') > -1;
+        const isFirefox = navigator.userAgent.indexOf('Firefox') > -1;
+        const isEdge = navigator.userAgent.indexOf('Edg') > -1;
+        
+        if (isChrome && urls.chrome) return urls.chrome;
+        if (isFirefox && urls.firefox) return urls.firefox;
+        if (isEdge && urls.edge) return urls.edge;
+        
+        return urls.chrome || urls.android || urls.ios || 'https://walletconnect.org/';
+    }
+
+    function isWalletInstalled(walletType) {
+        // Check for injected providers
+        if (walletType === 'metamask' && window.ethereum && window.ethereum.isMetaMask) return true;
+        if (walletType === 'trust' && window.ethereum && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) return true;
+        if (walletType === 'phantom' && window.ethereum && window.ethereum.isPhantom) return true;
+        if (walletType === 'rainbow' && window.ethereum && window.ethereum.isRainbow) return true;
+        
+        // Check EIP-6963 discovered providers
+        const targetRdns = {
+            'metamask': 'io.metamask',
+            'trust': 'com.trustwallet.app',
+            'phantom': 'app.phantom',
+            'rainbow': 'me.rainbow'
+        }[walletType];
+        
+        if (targetRdns && discoveredProviders.some(p => p.info.rdns === targetRdns)) {
+            return true;
+        }
+        
+        return false;
+    }
+
     function initializeEIP6963() {
         if (eip6963Initialized) return;
 
@@ -7011,7 +7091,6 @@
         return null;
     }
 
-    // ---- WALLETCONNECT INITIALIZATION (from signup.html) ----
     async function silentlyInitWalletConnect(attempt = 1) {
         if (universalWalletProvider) return universalWalletProvider;
 
@@ -7063,7 +7142,6 @@
         }
     }
 
-    // ---- MOBILE DEEP LINK RESOLUTION (from signup.html) ----
     function openDeepLink(walletType, uri) {
         const os = getMobileOS();
         const encodedUri = encodeURIComponent(uri);
@@ -7078,42 +7156,6 @@
         return nativePaths[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
     }
 
-    function getAppStoreUrl(walletType) {
-        const os = getMobileOS();
-        const stores = {
-            'metamask': {
-                'android': 'https://play.google.com/store/apps/details?id=io.metamask',
-                'ios': 'https://apps.apple.com/app/metamask/id1438144202'
-            },
-            'trust': {
-                'android': 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp',
-                'ios': 'https://apps.apple.com/app/trust-wallet/id1288339409'
-            },
-            'phantom': {
-                'android': 'https://play.google.com/store/apps/details?id=app.phantom',
-                'ios': 'https://apps.apple.com/app/phantom-wallet/id1598432977'
-            },
-            'rainbow': {
-                'android': 'https://play.google.com/store/apps/details?id=me.rainbow',
-                'ios': 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021'
-            }
-        };
-
-        if (stores[walletType]) {
-            if (os === 'android' && stores[walletType].android) return stores[walletType].android;
-            if (os === 'ios' && stores[walletType].ios) return stores[walletType].ios;
-        }
-
-        const desktopStores = {
-            'metamask': 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn',
-            'trust': 'https://trustwallet.com/browser-extension',
-            'phantom': 'https://phantom.app/download',
-            'rainbow': 'https://rainbow.me/download'
-        };
-        return desktopStores[walletType] || 'https://walletconnect.org/';
-    }
-
-    // ---- RENDER CONNECTED WALLETS ----
     function renderConnectedWallets() {
         const container = document.getElementById('connected-wallets-list');
         if (!container) return;
@@ -7132,7 +7174,7 @@
 
             html += `
                 <div class="connected-wallet-item">
-                    <img src="${logo}" class="wallet-icon" alt="${type}">
+                    <img src="${logo}" class="wallet-icon" alt="${type}" style="${type === 'trust' ? 'width: 90px; height: 90px;' : ''}">
                     <span class="wallet-address">${shortAddress}</span>
                     <span class="wallet-type">${type.charAt(0).toUpperCase() + type.slice(1)}</span>
                     <button class="remove-wallet-btn" onclick="removeWallet('${address}')" title="Remove wallet">
@@ -7153,7 +7195,6 @@
         }
     }
 
-    // ---- REMOVE WALLET ----
     async function removeWallet(address) {
         if (!confirm('Are you sure you want to remove this wallet?')) return;
 
@@ -7187,15 +7228,40 @@
         }
     }
 
-    // ---- MAIN CONNECT WALLET FUNCTION (production-grade from signup.html) ----
     async function connectSelectedWallet() {
         const dropdown = document.getElementById('wallet-dropdown');
         const walletType = dropdown.value;
         const connectBtn = document.getElementById('web3-connect-btn');
-        const statusDiv = document.getElementById('web3-status-indicator');
         const errorDiv = document.getElementById('web3-error-msg');
 
         if (isConnecting) return;
+
+        // Check if wallet is installed
+        if (!isWalletInstalled(walletType)) {
+            const installUrl = getWalletInstallUrl(walletType);
+            errorDiv.textContent = `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} is not installed. Click the button below to install.`;
+            errorDiv.style.display = 'block';
+            
+            const installBtn = document.createElement('button');
+            installBtn.textContent = `📥 Install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}`;
+            installBtn.style.cssText = `
+                background: var(--accent); color: #000; border: none; 
+                padding: 8px 16px; border-radius: 8px; cursor: pointer; 
+                font-weight: 600; margin-top: 8px; display: block; width: 100%;
+            `;
+            installBtn.onclick = () => {
+                window.open(installUrl, '_blank');
+            };
+            
+            const existingBtn = errorDiv.querySelector('.install-wallet-btn');
+            if (existingBtn) existingBtn.remove();
+            installBtn.className = 'install-wallet-btn';
+            errorDiv.appendChild(installBtn);
+            
+            showNotification('warning', 'Wallet Not Installed', 
+                `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} is not installed. Please install it first.`);
+            return;
+        }
 
         // Check if wallet already exists in database
         const existingWallet = connectedWallets.find(w => (w.address || w.walletAddress) === web3WalletAddress);
@@ -7212,7 +7278,6 @@
         errorDiv.style.display = 'none';
 
         try {
-            // Desktop Flow: Use EIP-6963 / Injected Provider
             if (!isMobileDevice()) {
                 const targetRdns = {
                     'metamask': 'io.metamask',
@@ -7228,7 +7293,6 @@
                         if (accounts && accounts.length > 0) {
                             const address = accounts[0];
                             
-                            // Check if wallet already exists in database
                             const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
                             if (walletExists) {
                                 errorDiv.textContent = 'This wallet is already connected to your account.';
@@ -7266,12 +7330,10 @@
                 throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
             }
 
-            // Handle display_uri event for deep linking
             provider.once("display_uri", (uri) => {
                 activeWcUri = uri;
                 const appDeepLink = openDeepLink(walletType, uri);
                 
-                // Show mobile status with deep link options
                 const wcStatus = document.getElementById('wc-mobile-status');
                 if (wcStatus) {
                     wcStatus.classList.add('active');
@@ -7283,7 +7345,7 @@
                                         style="background: #F7A600; color: #000; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
                                     🔗 Open Wallet
                                 </button>
-                                <button onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" 
+                                <button onclick="window.open('${getWalletInstallUrl(walletType)}', '_blank')" 
                                         style="background: #10B981; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
                                     📥 Install Wallet
                                 </button>
@@ -7302,7 +7364,6 @@
                     `;
                 }
 
-                // Open deep link
                 window.location.href = appDeepLink;
             });
 
@@ -7310,7 +7371,6 @@
             if (accounts && accounts.length > 0) {
                 const address = accounts[0];
                 
-                // Check if wallet already exists in database
                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
                 if (walletExists) {
                     errorDiv.textContent = 'This wallet is already connected to your account.';
@@ -7348,7 +7408,6 @@
         }
     }
 
-    // ---- LINK WALLET TO BACKEND ----
     async function linkWalletToBackend(address, walletType, network) {
         try {
             const token = localStorage.getItem('jwtToken');
@@ -7379,11 +7438,9 @@
             web3WalletType = walletType;
             web3Network = network || '0x1';
 
-            // Add to connected wallets list
             connectedWallets.push({ address: address, type: walletType });
             renderConnectedWallets();
 
-            // Update UI
             const statusDiv = document.getElementById('web3-status-indicator');
             statusDiv.style.display = 'flex';
             document.getElementById('web3-connected-address-short').textContent = 
@@ -7395,7 +7452,6 @@
             connectBtn.style.color = '#228B22';
             connectBtn.disabled = true;
 
-            // Update deposit network
             updateDepositNetwork();
 
             showNotification('success', 'Wallet Linked',
@@ -7408,7 +7464,6 @@
         }
     }
 
-    // ---- WALLET LOGO UPDATES ----
     function updateWalletLogo() {
         const dropdown = document.getElementById('wallet-dropdown');
         const selected = dropdown.options[dropdown.selectedIndex];
@@ -7443,8 +7498,10 @@
             if (response.ok) {
                 const data = await response.json();
                 const price = data.price || 0;
+                depositPriceCache[assetSymbol] = price;
                 document.getElementById('deposit-rate-info').textContent =
                     `1 ${assetSymbol.toUpperCase()} ≈ ${formatFiat(price)}`;
+                updateFiatEstimate();
             }
         } catch (e) {
             console.warn('Price fetch error:', e);
@@ -7458,30 +7515,42 @@
 
         const asset = assetSelect.value;
         const amount = parseFloat(amountInput.value) || 0;
+        
         if (amount > 0) {
             try {
-                const token = localStorage.getItem('jwtToken');
-                if (!token) return;
-                const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    const price = data.price || 0;
+                // Use cached price if available, otherwise fetch
+                let price = depositPriceCache[asset];
+                if (!price) {
+                    const token = localStorage.getItem('jwtToken');
+                    if (token) {
+                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                        if (response.ok) {
+                            const data = await response.json();
+                            price = data.price || 0;
+                            depositPriceCache[asset] = price;
+                        }
+                    }
+                }
+                
+                if (price) {
                     const fiatValue = amount * price;
                     fiatDisplay.textContent = `≈ ${formatFiat(fiatValue)}`;
                     document.getElementById('deposit-rate-info').textContent =
                         `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                } else {
+                    fiatDisplay.textContent = '≈ $0.00';
                 }
             } catch (e) {
                 console.warn('Price update error:', e);
+                fiatDisplay.textContent = '≈ $0.00';
             }
         } else {
             fiatDisplay.textContent = '≈ $0.00';
         }
     }
 
-    // ---- EXECUTE DEPOSIT ----
     async function executeDeposit() {
         const assetSelect = document.getElementById('deposit-asset-select');
         const amountInput = document.getElementById('deposit-amount-input');
@@ -7643,10 +7712,7 @@
             initMobileMenu();
             initHeaderScrollEffect();
 
-            // Initialize EIP-6963
             initializeEIP6963();
-
-            // Initialize WalletConnect silently
             silentlyInitWalletConnect();
 
             await loadBalancesFromRest();
