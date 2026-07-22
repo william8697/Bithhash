@@ -1045,7 +1045,7 @@
       padding: 5px 0;
     }
 
-    /* --- WEB3 WALLET SECTION (UPDATED) --- */
+    /* --- WEB3 WALLET SECTION (UPDATED - EIP-6963 COMPLIANT) --- */
     .web3-wallet-section {
       margin: 20px 0 40px;
       padding: 24px 20px;
@@ -1421,7 +1421,6 @@
       flex-shrink: 0;
     }
 
-    /* Trust wallet logo bigger */
     .connected-wallets-dropdown-menu .dropdown-item .wallet-icon.trust-icon {
       width: 90px;
       height: 90px;
@@ -3837,7 +3836,6 @@
       display: block;
     }
 
-    /* Trust wallet logo bigger in dropdown - override */
     .trust-icon-large {
       width: 90px !important;
       height: 90px !important;
@@ -4035,7 +4033,7 @@
         </div>
       </div>
 
-      <!-- ===== WEB3 WALLET & DEPOSIT SECTION (UPDATED) ===== -->
+      <!-- ===== WEB3 WALLET & DEPOSIT SECTION (EIP-6963 COMPLIANT) ===== -->
       <div class="web3-wallet-section" id="web3-wallet-section">
         <div class="section-header">
           <h2><i class="fas fa-link"></i> Web3 Wallet & Deposit</h2>
@@ -4738,7 +4736,27 @@
   const notificationQueue = [];
   let isNotificationShowing = false;
 
-  // ---- PRODUCTION-GRADE WEB3 WALLET CONNECTION STATE ----
+  // ---- WEB3 STATE (EIP-6963 COMPLIANT - NO OLD LOGIC) ----
+  let web3WalletAddress = null;
+  let web3WalletType = null;
+  let web3Provider = null;
+  let web3Network = null;
+  let web3IsConnecting = false;
+  let universalWalletProvider = null;
+  let signClient = null;
+  let walletConnectInitialized = false;
+  let activeWcUri = null;
+  let wcSessionPending = false;
+  let walletConnectInitPromise = null;
+  let walletConnectInitAttempts = 0;
+  const MAX_WALLETCONNECT_RETRIES = 15;
+  let isConnecting = false;
+  const discoveredProviders = [];
+  let eip6963Initialized = false;
+  let connectedWallets = [];
+  let pendingUnlinkAddress = null;
+  let walletDropdownOpen = false;
+
   const walletLogos = {
     'metamask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
     'trust': 'https://media.bithashcapital.live/Trust_Stacked%20Logo_Blue.png',
@@ -4794,24 +4812,6 @@
     'uni': 'Ethereum',
     'bch': 'Bitcoin Cash'
   };
-
-  // ---- WEB3 STATE (PRODUCTION-GRADE) ----
-  let web3WalletAddress = null;
-  let web3WalletType = null;
-  let web3Provider = null;
-  let web3Network = null;
-  let web3IsConnecting = false;
-  let universalWalletProvider = null;
-  let walletConnectInitialized = false;
-  let activeWcUri = null;
-  let walletConnectInitAttempts = 0;
-  const MAX_WALLETCONNECT_RETRIES = 15;
-  let isConnecting = false;
-  const discoveredProviders = [];
-  let eip6963Initialized = false;
-  let connectedWallets = [];
-  let pendingUnlinkAddress = null;
-  let walletDropdownOpen = false;
 
   // ---- HELPER FUNCTIONS ----
   function formatNumber(num) {
@@ -5116,7 +5116,7 @@
     document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
   }
 
-  // ---- LOAD LINKED WALLETS FROM DATABASE (ENDPOINT) ----
+  // ---- LOAD USER WALLETS FROM DATABASE ----
   async function loadUserData() {
     try {
       const token = localStorage.getItem('jwtToken');
@@ -5131,7 +5131,16 @@
           document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
           // Load connected wallets from database
           if (user.wallets && Array.isArray(user.wallets)) {
-            connectedWallets = user.wallets;
+            connectedWallets = user.wallets.map(w => ({
+              address: w.address || w.walletAddress,
+              type: w.type || 'metamask'
+            }));
+            renderConnectedWalletsDropdown();
+            updateConnectedWalletsCount();
+          }
+          // Also check legacy web3Wallet field
+          if (user.web3Wallet && !connectedWallets.some(w => w.address === user.web3Wallet)) {
+            connectedWallets.push({ address: user.web3Wallet, type: 'metamask' });
             renderConnectedWalletsDropdown();
             updateConnectedWalletsCount();
           }
@@ -6921,7 +6930,10 @@
       window.location.href = 'login.html'; }
   }
 
-  // ---- PRODUCTION-GRADE WEB3 FUNCTIONS (UNISWAP-STYLE) ----
+  // ============================================================
+  // PRODUCTION-GRADE WEB3 WALLET CONNECTION - EIP-6963 COMPLIANT
+  // (NO OLD LOGIC - COMPLETELY REWRITTEN)
+  // ============================================================
 
   function isMobileDevice() { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent); }
 
@@ -6932,6 +6944,7 @@
     return 'desktop';
   }
 
+  // EIP-6963 Provider Discovery
   function initializeEIP6963() {
     if (eip6963Initialized) return;
     window.addEventListener("eip6963:announceProvider", (event) => {
@@ -6946,27 +6959,19 @@
     console.log('✅ EIP-6963 initialized');
   }
 
+  // Get provider by RDNS (strict - no fallback to window.ethereum)
   function getProviderByRDNS(targetRdns) {
+    // First check EIP-6963 discovered providers
     for (const provider of discoveredProviders) {
-      if (provider.info.rdns === targetRdns) return provider;
-    }
-    if (window.ethereum) {
-      if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
-        return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
-      }
-      if (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) {
-        return { provider: window.ethereum, info: { rdns: 'com.trustwallet.app', name: 'Trust Wallet' } };
-      }
-      if (targetRdns === 'app.phantom' && window.ethereum.isPhantom) {
-        return { provider: window.ethereum, info: { rdns: 'app.phantom', name: 'Phantom' } };
-      }
-      if (targetRdns === 'me.rainbow' && window.ethereum.isRainbow) {
-        return { provider: window.ethereum, info: { rdns: 'me.rainbow', name: 'Rainbow' } };
+      if (provider.info.rdns === targetRdns) {
+        return { provider: provider.provider, info: provider.info };
       }
     }
+    // If not found, return null (do NOT fall back to window.ethereum)
     return null;
   }
 
+  // WalletConnect for mobile
   async function silentlyInitWalletConnect(attempt = 1) {
     if (universalWalletProvider) return universalWalletProvider;
     if (attempt > MAX_WALLETCONNECT_RETRIES) {
@@ -6978,8 +6983,7 @@
         (window.WalletConnectProvider && window.WalletConnectProvider.EthereumProvider) ||
         window.WalletConnectProvider;
       if (!ProviderClass || typeof ProviderClass.init !== 'function') {
-        console.warn(
-          `⏳ Waiting for WalletConnect Provider to load... (Attempt ${attempt}/${MAX_WALLETCONNECT_RETRIES})`);
+        console.warn(`⏳ Waiting for WalletConnect Provider to load... (Attempt ${attempt}/${MAX_WALLETCONNECT_RETRIES})`);
         await new Promise(r => setTimeout(r, 1000));
         return await silentlyInitWalletConnect(attempt + 1);
       }
@@ -6998,6 +7002,7 @@
           icons: [`${window.location.origin}/icon.png`]
         }
       });
+      signClient = universalWalletProvider;
       walletConnectInitialized = true;
       walletConnectInitAttempts = 0;
       console.log('✅ WalletConnect Provider initialized successfully');
@@ -7012,6 +7017,7 @@
     }
   }
 
+  // Mobile deep link generator
   function openDeepLink(walletType, uri) {
     const os = getMobileOS();
     const encodedUri = encodeURIComponent(uri);
@@ -7189,7 +7195,7 @@
     closeUnlinkConfirm();
   }
 
-  // ---- MAIN CONNECT WALLET FUNCTION (UNISWAP-STYLE) ----
+  // ---- MAIN CONNECT WALLET FUNCTION (EIP-6963 COMPLIANT) ----
   async function connectSelectedWallet() {
     const dropdown = document.getElementById('wallet-dropdown');
     const walletType = dropdown.value;
@@ -7207,7 +7213,7 @@
     if (wcStatus) wcStatus.style.display = 'none';
 
     try {
-      // Desktop Flow: Use EIP-6963 (Uniswap-style)
+      // Desktop Flow: Use EIP-6963 (strict provider discovery)
       if (!isMobileDevice()) {
         const targetRdns = {
           'metamask': 'io.metamask',
@@ -7216,13 +7222,17 @@
           'rainbow': 'me.rainbow'
         }[walletType] || 'io.metamask';
 
+        // STRICT: Get provider by RDNS only, NO fallback to window.ethereum
         const injectedTarget = getProviderByRDNS(targetRdns);
+
         if (injectedTarget) {
           try {
             const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
             if (accounts && accounts.length > 0) {
               const address = accounts[0];
+              // Check if this exact wallet address is already connected
               const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+              // Check if any wallet of same type is already connected
               const sameTypeExists = connectedWallets.some(w => w.type === walletType);
               if (walletExists) {
                 errorDiv.textContent = 'This wallet address is already connected to your account.';
@@ -7257,31 +7267,14 @@
               connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
               return;
             }
-            // If provider exists but user declined or error, don't fallback to window.ethereum
-            // Show install link for the specific wallet
-            const storeUrl = getAppStoreUrl(walletType);
-            errorDiv.innerHTML = `
-              <div style="color: var(--text-secondary); font-size:0.85rem;">
-                <p style="margin-bottom:6px;">${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension not available or connection failed.</p>
-                <a href="${storeUrl}" target="_blank" style="color: var(--accent); text-decoration: underline;">Install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}</a>
-              </div>
-            `;
-            errorDiv.style.display = 'block';
-            isConnecting = false;
-            connectBtn.disabled = false;
-            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-            return;
+            throw err;
           }
         } else {
-          // Wallet not installed - show install link
-          const storeUrl = getAppStoreUrl(walletType);
-          errorDiv.innerHTML = `
-            <div style="color: var(--text-secondary); font-size:0.85rem;">
-              <p style="margin-bottom:6px;">${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension is not installed.</p>
-              <a href="${storeUrl}" target="_blank" style="color: var(--accent); text-decoration: underline;">Install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}</a>
-            </div>
-          `;
+          // Wallet not installed - show explicit error with install link
+          const walletName = walletType.charAt(0).toUpperCase() + walletType.slice(1);
+          errorDiv.innerHTML = `${walletName} extension is not installed. <a href="${getAppStoreUrl(walletType)}" target="_blank" style="color: var(--accent);">Install ${walletName}</a>`;
           errorDiv.style.display = 'block';
+          showNotification('warning', 'Wallet Not Installed', `${walletName} extension is not installed. Please install it first.`);
           isConnecting = false;
           connectBtn.disabled = false;
           connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
@@ -7289,7 +7282,7 @@
         }
       }
 
-      // Mobile Flow: Use WalletConnect with Deep Links
+      // Mobile Flow: Use WalletConnect
       const provider = await silentlyInitWalletConnect();
       if (!provider) {
         throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
@@ -7405,10 +7398,12 @@
       web3WalletType = walletType;
       web3Network = network || '0x1';
 
+      // Add to connected wallets list
       connectedWallets.push({ address: address, type: walletType });
       renderConnectedWalletsDropdown();
       updateConnectedWalletsCount();
 
+      // Update UI
       const statusDiv = document.getElementById('web3-status-indicator');
       statusDiv.style.display = 'flex';
       document.getElementById('web3-connected-address-short').textContent =
