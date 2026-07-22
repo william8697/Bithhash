@@ -1197,7 +1197,6 @@
       font-size: 0.75rem;
     }
 
-    /* Deposit section - hidden by default, shown when wallet linked */
     .web3-deposit-section {
       background: var(--bg-card);
       border-radius: 12px;
@@ -1427,6 +1426,7 @@
       flex-shrink: 0;
     }
 
+    /* Trust wallet logo bigger */
     .connected-wallets-dropdown-menu .dropdown-item .wallet-icon.trust-icon {
       width: 90px;
       height: 90px;
@@ -3842,6 +3842,7 @@
       display: block;
     }
 
+    /* Trust wallet logo bigger in dropdown - override */
     .trust-icon-large {
       width: 90px !important;
       height: 90px !important;
@@ -4089,7 +4090,7 @@
             </div>
           </div>
 
-          <!-- Right Column: Deposit - Hidden by default, shown when wallet linked -->
+          <!-- Right Column: Deposit -->
           <div class="web3-wallet-col">
             <div class="web3-deposit-section" id="web3-deposit-section">
               <label><i class="fas fa-arrow-down"></i> Deposit Crypto</label>
@@ -4742,34 +4743,32 @@
   const notificationQueue = [];
   let isNotificationShowing = false;
 
-  // ---- WEB3 STATE (PRODUCTION-GRADE - EIP-6963) ----
+  // ---- WEB3 STATE (PRODUCTION-GRADE) ----
   let web3WalletAddress = null;
   let web3WalletType = null;
   let web3Provider = null;
+  let web3Signer = null;
   let web3Network = null;
   let web3IsConnecting = false;
   let universalWalletProvider = null;
   let signClient = null;
   let walletConnectInitialized = false;
   let activeWcUri = null;
+  let wcSessionPending = false;
+  let walletConnectInitPromise = null;
   let walletConnectInitAttempts = 0;
   const MAX_WALLETCONNECT_RETRIES = 15;
+  let web3Nonce = null;
+  let web3TempToken = null;
+  let web3Signature = null;
+  let web3Message = null;
   let isConnecting = false;
+  let web3SignClient = null;
+  const discoveredProviders = [];
+  let eip6963Initialized = false;
   let connectedWallets = [];
   let pendingUnlinkAddress = null;
   let walletDropdownOpen = false;
-
-  // EIP-6963 discovered providers
-  const discoveredProviders = [];
-  let eip6963Initialized = false;
-
-  // RDNS mapping for wallet types
-  const RDNS_MAP = {
-    'metamask': 'io.metamask',
-    'trust': 'com.trustwallet.app',
-    'phantom': 'app.phantom',
-    'rainbow': 'me.rainbow'
-  };
 
   const walletLogos = {
     'metamask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
@@ -5130,37 +5129,57 @@
     document.getElementById('global-asset-symbol').textContent = assetData.symbol.toUpperCase();
   }
 
-  // ---- LOAD LINKED WALLETS FROM DATABASE (NEW ENDPOINT) ----
+  // ---- NEW ENDPOINT: GET LINKED WALLETS ----
   async function loadLinkedWallets() {
     try {
       const token = localStorage.getItem('jwtToken');
       if (!token) return;
-      // NEW endpoint: /api/users/linked-wallets
       const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/linked-wallets', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (response.ok) {
         const data = await response.json();
-        const wallets = data.wallets || data.data || [];
-        if (Array.isArray(wallets)) {
-          connectedWallets = wallets.map(w => ({
-            address: w.address || w.walletAddress || w,
-            type: w.type || 'metamask'
-          }));
-        } else {
-          connectedWallets = [];
+        if (data.wallets && Array.isArray(data.wallets)) {
+          connectedWallets = data.wallets;
+          renderConnectedWalletsDropdown();
+          updateConnectedWalletsCount();
+          // Update deposit visibility based on connected wallets
+          updateDepositVisibility();
         }
-        renderConnectedWalletsDropdown();
-        updateConnectedWalletsCount();
-        updateDepositVisibility();
       }
     } catch (error) {
       console.error('Error loading linked wallets:', error);
-      connectedWallets = [];
-      renderConnectedWalletsDropdown();
-      updateConnectedWalletsCount();
-      updateDepositVisibility();
     }
+  }
+
+  // ---- UPDATE DEPOSIT VISIBILITY ----
+  function updateDepositVisibility() {
+    const depositSection = document.getElementById('web3-deposit-section');
+    if (!depositSection) return;
+    const hasWallets = connectedWallets && connectedWallets.length > 0;
+    if (hasWallets) {
+      depositSection.classList.add('visible');
+    } else {
+      depositSection.classList.remove('visible');
+    }
+  }
+
+  // ---- LOAD USER DATA (preserve existing) ----
+  async function loadUserData() {
+    try {
+      const token = localStorage.getItem('jwtToken');
+      if (!token) return;
+      const response = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const user = data.data?.user || data.user;
+        if (user) {
+          document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
+        }
+      }
+    } catch (error) { console.error('Error loading user:', error); }
   }
 
   async function loadUserPreferences() {
@@ -6954,18 +6973,13 @@
     return 'desktop';
   }
 
-  // ---- EIP-6963 Provider Discovery ----
   function initializeEIP6963() {
     if (eip6963Initialized) return;
     window.addEventListener("eip6963:announceProvider", (event) => {
       const detail = event.detail;
-      // Check if provider already exists in map
-      const existingIndex = discoveredProviders.findIndex(p => p.info.rdns === detail.info.rdns);
-      if (existingIndex === -1) {
+      if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
         discoveredProviders.push(detail);
         console.log(`🔍 Discovered provider: ${detail.info.name} (${detail.info.rdns})`);
-      } else {
-        discoveredProviders[existingIndex] = detail;
       }
     });
     window.dispatchEvent(new Event("eip6963:requestProvider"));
@@ -6974,13 +6988,9 @@
   }
 
   function getProviderByRDNS(targetRdns) {
-    // First check discovered providers via EIP-6963
     for (const provider of discoveredProviders) {
-      if (provider.info.rdns === targetRdns) {
-        return { provider: provider.provider, info: provider.info };
-      }
+      if (provider.info.rdns === targetRdns) return provider;
     }
-    // Fallback: check window.ethereum for specific wallet flags (only if no EIP-6963 discovery)
     if (window.ethereum) {
       if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
         return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
@@ -6998,7 +7008,6 @@
     return null;
   }
 
-  // ---- WalletConnect for Mobile ----
   async function silentlyInitWalletConnect(attempt = 1) {
     if (universalWalletProvider) return universalWalletProvider;
     if (attempt > MAX_WALLETCONNECT_RETRIES) {
@@ -7106,6 +7115,7 @@
       const type = wallet.type || 'metamask';
       const logo = walletLogos[type] || walletLogos['metamask'];
       const shortAddress = address.substring(0, 6) + '...' + address.substring(address.length - 4);
+      // Trust wallet gets larger logo (90x90), others 24px
       const isTrust = type === 'trust';
       const iconClass = isTrust ? 'wallet-icon trust-icon-large' : 'wallet-icon wallet-icon-small';
       html += `
@@ -7156,20 +7166,6 @@
       badge.textContent = connectedWallets.length;
     }
     renderConnectedWalletsDropdown();
-    updateDepositVisibility();
-  }
-
-  // ---- UPDATE DEPOSIT VISIBILITY ----
-  function updateDepositVisibility() {
-    const depositSection = document.getElementById('web3-deposit-section');
-    const hasLinkedWallets = connectedWallets && connectedWallets.length > 0;
-    if (depositSection) {
-      if (hasLinkedWallets) {
-        depositSection.classList.add('visible');
-      } else {
-        depositSection.classList.remove('visible');
-      }
-    }
   }
 
   // ---- UNLINK CONFIRM POPUP ----
@@ -7221,6 +7217,7 @@
         updateConnectedWalletsCount();
         updateDepositVisibility();
         showNotification('success', 'Wallet Removed', 'Wallet has been disconnected successfully.');
+        // Close dropdown
         const menu = document.getElementById('wallets-dropdown-menu');
         if (menu) {
           menu.classList.remove('open');
@@ -7255,10 +7252,15 @@
     if (wcStatus) wcStatus.style.display = 'none';
 
     try {
-      const targetRdns = RDNS_MAP[walletType] || 'io.metamask';
-
-      // --- Desktop: EIP-6963 Strict Provider ---
+      // Desktop Flow: Use EIP-6963 / Injected Provider
       if (!isMobileDevice()) {
+        const targetRdns = {
+          'metamask': 'io.metamask',
+          'trust': 'com.trustwallet.app',
+          'phantom': 'app.phantom',
+          'rainbow': 'me.rainbow'
+        }[walletType] || 'io.metamask';
+
         const injectedTarget = getProviderByRDNS(targetRdns);
         if (injectedTarget) {
           try {
@@ -7305,22 +7307,9 @@
             throw err;
           }
         }
-        // No EIP-6963 provider found → show install link
-        errorDiv.textContent = `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension is not installed. Please install it to continue.`;
-        errorDiv.style.display = 'block';
-        const installUrl = getAppStoreUrl(walletType);
-        errorDiv.innerHTML = `
-          <span>${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension is not installed. </span>
-          <a href="${installUrl}" target="_blank" style="color: var(--accent); text-decoration: underline;">Install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}</a>
-        `;
-        showNotification('warning', 'Wallet Not Installed', `Please install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension.`);
-        isConnecting = false;
-        connectBtn.disabled = false;
-        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-        return;
       }
 
-      // --- Mobile: WalletConnect ---
+      // Mobile Flow: Use WalletConnect
       const provider = await silentlyInitWalletConnect();
       if (!provider) {
         throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
@@ -7461,7 +7450,7 @@
         `Successfully linked ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet: ${address.substring(0,6)}...${address.substring(address.length-4)}`
       );
 
-      // Reload linked wallets from database
+      // Reload linked wallets to refresh list
       await loadLinkedWallets();
 
     } catch (error) {
@@ -7556,13 +7545,12 @@
     }
 
     // Use the first connected wallet if web3WalletAddress is not set
-    const walletAddress = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
-    const walletType = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
+    const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
+    const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
 
-    if (!walletAddress) {
+    if (!walletToUse) {
       statusMsg.style.color = 'var(--error)';
-      statusMsg.textContent = '❌ No wallet linked. Please link a wallet first.';
-      showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
+      statusMsg.textContent = '❌ No wallet found. Please link a wallet.';
       return;
     }
 
@@ -7601,7 +7589,7 @@
         body: JSON.stringify({
           asset: asset,
           amount: amount,
-          walletAddress: walletAddress,
+          walletAddress: walletToUse,
           network: web3Network || '0x1',
           fiatValue: fiatValue
         })
@@ -7615,9 +7603,22 @@
       const depositData = await depositResponse.json();
 
       if (depositData.txData) {
-        if (web3Provider && typeof web3Provider.request === 'function') {
+        let providerToUse = web3Provider;
+        // If no provider, try to get one from connected wallets
+        if (!providerToUse && connectedWallets.length > 0) {
+          const targetRdns = {
+            'metamask': 'io.metamask',
+            'trust': 'com.trustwallet.app',
+            'phantom': 'app.phantom',
+            'rainbow': 'me.rainbow'
+          }[walletTypeToUse] || 'io.metamask';
+          const injected = getProviderByRDNS(targetRdns);
+          if (injected) providerToUse = injected.provider;
+        }
+
+        if (providerToUse && typeof providerToUse.request === 'function') {
           try {
-            const txHash = await web3Provider.request({
+            const txHash = await providerToUse.request({
               method: 'eth_sendTransaction',
               params: [depositData.txData]
             });
@@ -7632,7 +7633,7 @@
                 txHash: txHash,
                 asset: asset,
                 amount: amount,
-                walletAddress: walletAddress
+                walletAddress: walletToUse
               })
             });
 
@@ -7658,8 +7659,9 @@
             }
           }
         } else {
+          // No provider available, just acknowledge the deposit request
           statusMsg.style.color = 'var(--success)';
-          statusMsg.textContent = '✅ Deposit request submitted. Please check your wallet for confirmation.';
+          statusMsg.textContent = '✅ Deposit request submitted. Please confirm in your wallet.';
           showNotification('success', 'Deposit Submitted',
             `Deposit request for ${amount} ${asset.toUpperCase()} has been submitted.`);
           await loadBalancesFromRest();
@@ -7714,7 +7716,9 @@
       silentlyInitWalletConnect();
       await loadBalancesFromRest();
       await loadAssetBalancesFromRest();
+      // Load linked wallets first
       await loadLinkedWallets();
+      await loadUserData();
       await checkUserDefaultAsset();
       await loadFiatCurrencies();
       await loadUserPreferences();
@@ -7759,8 +7763,6 @@
         else document.querySelector('.mobile-logout').style.display = 'none';
         if (currentAssetsView === 'card') renderAssetsWithBalanceEnhanced();
       });
-      // Set initial deposit visibility
-      updateDepositVisibility();
     }, 1000);
   });
 
