@@ -4682,8 +4682,7 @@
 
 <script>
   // =============================================
-  // COMPLETELY REWRITTEN WEB3 WALLET CONNECTION SYSTEM
-  // Using EIP-6963 + WalletConnect with project ID: 3f054c15e97b05dda5a4dcfd652bc753
+  // (All existing JavaScript code remains identical, except the Web3 parts)
   // =============================================
 
   // ---- GLOBAL STATE ----
@@ -4739,25 +4738,33 @@
   const notificationQueue = [];
   let isNotificationShowing = false;
 
-  // ---- WEB3 STATE (NEW PRODUCTION-GRADE) ----
-  const WALLETCONNECT_PROJECT_ID = '3f054c15e97b05dda5a4dcfd652bc753';
-  
+  // ---- WEB3 STATE (PRODUCTION-GRADE) ----
   let web3WalletAddress = null;
   let web3WalletType = null;
   let web3Provider = null;
+  let web3Signer = null;
   let web3Network = null;
+  let web3IsConnecting = false;
+  let universalWalletProvider = null;
+  let signClient = null;
+  let walletConnectInitialized = false;
+  let activeWcUri = null;
+  let wcSessionPending = false;
+  let walletConnectInitPromise = null;
+  let walletConnectInitAttempts = 0;
+  const MAX_WALLETCONNECT_RETRIES = 15;
+  let web3Nonce = null;
+  let web3TempToken = null;
+  let web3Signature = null;
+  let web3Message = null;
   let isConnecting = false;
+  let web3SignClient = null;
+  const discoveredProviders = [];
+  let eip6963Initialized = false;
   let connectedWallets = [];
   let pendingUnlinkAddress = null;
   let walletDropdownOpen = false;
-  
-  // EIP-6963 discovered providers
-  let discoveredProviders = [];
-  let eip6963Initialized = false;
-  
-  // WalletConnect
-  let universalWalletProvider = null;
-  let walletConnectInitialized = false;
+  const WALLETCONNECT_PROJECT_ID = '3f054c15e97b05dda5a4dcfd652bc753';
 
   const walletLogos = {
     'metamask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
@@ -5040,7 +5047,7 @@
     }
   }
 
-  // ---- API CALLS (Keep existing) ----
+  // ---- API CALLS ----
   async function loadBalancesFromRest() {
     try {
       const token = localStorage.getItem('jwtToken');
@@ -5133,6 +5140,11 @@
           document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
           if (user.wallets && Array.isArray(user.wallets)) {
             connectedWallets = user.wallets;
+            renderConnectedWalletsDropdown();
+            updateConnectedWalletsCount();
+          }
+          if (user.web3Wallet && !connectedWallets.some(w => w.address === user.web3Wallet)) {
+            connectedWallets.push({ address: user.web3Wallet, type: 'metamask' });
             renderConnectedWalletsDropdown();
             updateConnectedWalletsCount();
           }
@@ -6922,10 +6934,7 @@
       window.location.href = 'login.html'; }
   }
 
-  // =================================================================
-  // PRODUCTION-GRADE WEB3 WALLET CONNECTION (EIP-6963 + WalletConnect)
-  // =================================================================
-
+  // ---- PRODUCTION-GRADE WEB3 WALLET CONNECTION ----
   function isMobileDevice() { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent); }
 
   function getMobileOS() {
@@ -6935,7 +6944,6 @@
     return 'desktop';
   }
 
-  // ---- EIP-6963 Provider Discovery ----
   function initializeEIP6963() {
     if (eip6963Initialized) return;
     window.addEventListener("eip6963:announceProvider", (event) => {
@@ -6951,13 +6959,9 @@
   }
 
   function getProviderByRDNS(targetRdns) {
-    // First check discovered providers
     for (const provider of discoveredProviders) {
-      if (provider.info.rdns === targetRdns) {
-        return provider;
-      }
+      if (provider.info.rdns === targetRdns) return provider;
     }
-    // Fallback: check window.ethereum with RDNS detection
     if (window.ethereum) {
       if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
         return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
@@ -6975,10 +6979,9 @@
     return null;
   }
 
-  // ---- WalletConnect Initialization ----
-  async function initWalletConnect(attempt = 1) {
+  async function silentlyInitWalletConnect(attempt = 1) {
     if (universalWalletProvider) return universalWalletProvider;
-    if (attempt > 10) {
+    if (attempt > MAX_WALLETCONNECT_RETRIES) {
       console.error('❌ WalletConnect SDK failed to load after maximum retries');
       return null;
     }
@@ -6987,11 +6990,12 @@
         (window.WalletConnectProvider && window.WalletConnectProvider.EthereumProvider) ||
         window.WalletConnectProvider;
       if (!ProviderClass || typeof ProviderClass.init !== 'function') {
-        console.warn(`⏳ Waiting for WalletConnect Provider... (Attempt ${attempt}/10)`);
+        console.warn(
+          `⏳ Waiting for WalletConnect Provider to load... (Attempt ${attempt}/${MAX_WALLETCONNECT_RETRIES})`);
         await new Promise(r => setTimeout(r, 1000));
-        return await initWalletConnect(attempt + 1);
+        return await silentlyInitWalletConnect(attempt + 1);
       }
-      console.log('🔄 Initializing WalletConnect Provider with project ID:', WALLETCONNECT_PROJECT_ID);
+      console.log('🔄 Initializing WalletConnect Provider...');
       universalWalletProvider = await ProviderClass.init({
         projectId: WALLETCONNECT_PROJECT_ID,
         showQrModal: !isMobileDevice(),
@@ -7006,35 +7010,35 @@
           icons: [`${window.location.origin}/icon.png`]
         }
       });
+      signClient = universalWalletProvider;
       walletConnectInitialized = true;
+      walletConnectInitAttempts = 0;
       console.log('✅ WalletConnect Provider initialized successfully');
       return universalWalletProvider;
     } catch (err) {
       console.error('❌ Provider init error:', err);
-      if (attempt < 10) {
+      if (attempt < MAX_WALLETCONNECT_RETRIES) {
         await new Promise(r => setTimeout(r, 1000));
-        return await initWalletConnect(attempt + 1);
+        return await silentlyInitWalletConnect(attempt + 1);
       }
       return null;
     }
   }
 
-  // ---- Deep Link Generation for Mobile ----
-  function getDeepLink(walletType, uri) {
+  function openDeepLink(walletType, uri) {
     const os = getMobileOS();
     const encodedUri = encodeURIComponent(uri);
-    const deepLinks = {
-      'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
-      'trust': os === 'android' ? `trust://wc?uri=${encodedUri}` :
+    const nativePaths = {
+      metamask: `https://metamask.app.link/wc?uri=${encodedUri}`,
+      trust: os === 'android' ? `trust://wc?uri=${encodedUri}` :
         `https://link.trustwallet.com/wc?uri=${encodedUri}`,
-      'phantom': `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
-      'rainbow': os === 'android' ? `rainbow://wc?uri=${encodedUri}` :
-        `https://rainbow.me/wc?uri=${encodedUri}`
+      phantom: `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
+      rainbow: os === 'android' ? `rainbow://wc?uri=${encodedUri}` : `https://rainbow.me/wc?uri=${encodedUri}`
     };
-    return deepLinks[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
+    return nativePaths[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
   }
 
-  function getWalletAppStoreUrl(walletType) {
+  function getAppStoreUrl(walletType) {
     const os = getMobileOS();
     const stores = {
       'metamask': {
@@ -7067,7 +7071,7 @@
     return desktopStores[walletType] || 'https://walletconnect.org/';
   }
 
-  // ---- Render Connected Wallets Dropdown ----
+  // ---- RENDER CONNECTED WALLETS DROPDOWN ----
   function renderConnectedWalletsDropdown() {
     const menu = document.getElementById('wallets-dropdown-menu');
     if (!menu) return;
@@ -7082,6 +7086,7 @@
       const type = wallet.type || 'metamask';
       const logo = walletLogos[type] || walletLogos['metamask'];
       const shortAddress = address.substring(0, 6) + '...' + address.substring(address.length - 4);
+      // Trust wallet gets larger logo (90x90), others 24px
       const isTrust = type === 'trust';
       const iconClass = isTrust ? 'wallet-icon trust-icon-large' : 'wallet-icon wallet-icon-small';
       html += `
@@ -7134,7 +7139,7 @@
     renderConnectedWalletsDropdown();
   }
 
-  // ---- Unlink Confirmation ----
+  // ---- UNLINK CONFIRM POPUP ----
   function openUnlinkConfirm(address) {
     pendingUnlinkAddress = address;
     const overlay = document.getElementById('unlinkConfirmOverlay');
@@ -7182,6 +7187,7 @@
         renderConnectedWalletsDropdown();
         updateConnectedWalletsCount();
         showNotification('success', 'Wallet Removed', 'Wallet has been disconnected successfully.');
+        // Close dropdown
         const menu = document.getElementById('wallets-dropdown-menu');
         if (menu) {
           menu.classList.remove('open');
@@ -7198,7 +7204,169 @@
     closeUnlinkConfirm();
   }
 
-  // ---- Link Wallet to Backend ----
+  // ---- MAIN CONNECT WALLET FUNCTION ----
+  async function connectSelectedWallet() {
+    const dropdown = document.getElementById('wallet-dropdown');
+    const walletType = dropdown.value;
+    const connectBtn = document.getElementById('web3-connect-btn');
+    const statusDiv = document.getElementById('web3-status-indicator');
+    const errorDiv = document.getElementById('web3-error-msg');
+    const wcStatus = document.getElementById('wc-mobile-status');
+
+    if (isConnecting) return;
+
+    isConnecting = true;
+    connectBtn.disabled = true;
+    connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+    errorDiv.style.display = 'none';
+    if (wcStatus) wcStatus.style.display = 'none';
+
+    try {
+      // Desktop Flow: Use EIP-6963 / Injected Provider
+      if (!isMobileDevice()) {
+        const targetRdns = {
+          'metamask': 'io.metamask',
+          'trust': 'com.trustwallet.app',
+          'phantom': 'app.phantom',
+          'rainbow': 'me.rainbow'
+        }[walletType] || 'io.metamask';
+
+        const injectedTarget = getProviderByRDNS(targetRdns);
+        if (injectedTarget) {
+          try {
+            const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+            if (accounts && accounts.length > 0) {
+              const address = accounts[0];
+              // Check if this exact wallet address is already connected
+              const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+              // Check if any wallet of same type is already connected (prevent duplicate provider types)
+              const sameTypeExists = connectedWallets.some(w => w.type === walletType);
+              if (walletExists) {
+                errorDiv.textContent = 'This wallet address is already connected to your account.';
+                errorDiv.style.display = 'block';
+                showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
+                isConnecting = false;
+                connectBtn.disabled = false;
+                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                return;
+              }
+              if (sameTypeExists && walletType !== 'rainbow') {
+                errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected. Please use a different provider.`;
+                errorDiv.style.display = 'block';
+                showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+                isConnecting = false;
+                connectBtn.disabled = false;
+                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                return;
+              }
+              await linkWalletToBackend(address, walletType, '0x1');
+              web3Provider = injectedTarget.provider;
+              return;
+            }
+          } catch (err) {
+            console.error("Desktop provider error:", err);
+            if (err.code === 4001) {
+              errorDiv.textContent = 'Connection rejected by user.';
+              errorDiv.style.display = 'block';
+              showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
+              isConnecting = false;
+              connectBtn.disabled = false;
+              connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+              return;
+            }
+            throw err;
+          }
+        }
+      }
+
+      // Mobile Flow: Use WalletConnect
+      const provider = await silentlyInitWalletConnect();
+      if (!provider) {
+        throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
+      }
+
+      provider.once("display_uri", (uri) => {
+        activeWcUri = uri;
+        const appDeepLink = openDeepLink(walletType, uri);
+
+        if (wcStatus) {
+          wcStatus.style.display = 'block';
+          wcStatus.innerHTML = `
+            <div style="text-align: left; padding: 8px;">
+              <p style="margin: 0 0 8px 0; color: #F7A600;">📱 Opening your wallet app...</p>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+                <button onclick="window.location.href='${appDeepLink}'" 
+                        style="background: #F7A600; color: #000; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
+                  🔗 Open Wallet
+                </button>
+                <button onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" 
+                        style="background: #10B981; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
+                  📥 Install Wallet
+                </button>
+              </div>
+              <div style="background: #1A1F2E; padding: 8px; border-radius: 4px; margin-top: 8px;">
+                <p style="font-size: 10px; color: #6C7480; margin: 0 0 4px 0;">Or manually copy this URI:</p>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <code style="font-size: 9px; word-break: break-all; flex: 1; color: #B7BDC6;">${uri}</code>
+                  <button onclick="navigator.clipboard.writeText('${uri}')" 
+                          style="background: #F7A600; color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600;">
+                    📋 Copy
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        window.location.href = appDeepLink;
+      });
+
+      const accounts = await provider.connect();
+      if (accounts && accounts.length > 0) {
+        const address = accounts[0];
+        const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+        const sameTypeExists = connectedWallets.some(w => w.type === walletType);
+        if (walletExists) {
+          errorDiv.textContent = 'This wallet address is already connected to your account.';
+          errorDiv.style.display = 'block';
+          showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
+          isConnecting = false;
+          connectBtn.disabled = false;
+          connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+          if (wcStatus) wcStatus.style.display = 'none';
+          return;
+        }
+        if (sameTypeExists && walletType !== 'rainbow') {
+          errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+          errorDiv.style.display = 'block';
+          showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+          isConnecting = false;
+          connectBtn.disabled = false;
+          connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+          if (wcStatus) wcStatus.style.display = 'none';
+          return;
+        }
+        await linkWalletToBackend(address, walletType, '0x1');
+        web3Provider = provider;
+        if (wcStatus) wcStatus.style.display = 'none';
+      }
+
+    } catch (error) {
+      console.error('Wallet connection error:', error);
+      errorDiv.textContent = error.message || 'Failed to connect wallet. Please try again.';
+      errorDiv.style.display = 'block';
+      showNotification('error', 'Connection Failed', error.message || 'Please try again.');
+      if (wcStatus) wcStatus.style.display = 'none';
+    }
+
+    isConnecting = false;
+    connectBtn.disabled = false;
+    if (!web3WalletAddress) {
+      connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+    }
+  }
+
+  // ---- LINK WALLET TO BACKEND ----
   async function linkWalletToBackend(address, walletType, network) {
     try {
       const token = localStorage.getItem('jwtToken');
@@ -7260,149 +7428,7 @@
     }
   }
 
-  // ---- Main Connect Function ----
-  async function connectSelectedWallet() {
-    const dropdown = document.getElementById('wallet-dropdown');
-    const walletType = dropdown.value;
-    const connectBtn = document.getElementById('web3-connect-btn');
-    const errorDiv = document.getElementById('web3-error-msg');
-    const wcStatus = document.getElementById('wc-mobile-status');
-
-    if (isConnecting) return;
-
-    isConnecting = true;
-    connectBtn.disabled = true;
-    connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
-    errorDiv.style.display = 'none';
-    if (wcStatus) wcStatus.style.display = 'none';
-
-    try {
-      // Check if already connected
-      const existingWallet = connectedWallets.find(w => w.type === walletType);
-      if (existingWallet) {
-        errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-        errorDiv.style.display = 'block';
-        showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
-        isConnecting = false;
-        connectBtn.disabled = false;
-        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-        return;
-      }
-
-      // Desktop: Use EIP-6963 with RDNS
-      if (!isMobileDevice()) {
-        const rdnsMap = {
-          'metamask': 'io.metamask',
-          'trust': 'com.trustwallet.app',
-          'phantom': 'app.phantom',
-          'rainbow': 'me.rainbow'
-        };
-        const targetRdns = rdnsMap[walletType] || 'io.metamask';
-
-        const injectedTarget = getProviderByRDNS(targetRdns);
-        if (injectedTarget) {
-          try {
-            const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
-            if (accounts && accounts.length > 0) {
-              const address = accounts[0];
-              await linkWalletToBackend(address, walletType, '0x1');
-              web3Provider = injectedTarget.provider;
-              return;
-            }
-          } catch (err) {
-            console.error("Desktop provider error:", err);
-            if (err.code === 4001) {
-              errorDiv.textContent = 'Connection rejected by user.';
-              errorDiv.style.display = 'block';
-              showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
-              isConnecting = false;
-              connectBtn.disabled = false;
-              connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-              return;
-            }
-            throw err;
-          }
-        } else {
-          // Wallet not installed - show install link
-          const installUrl = getWalletAppStoreUrl(walletType);
-          errorDiv.innerHTML = `
-            ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension not detected.
-            <a href="${installUrl}" target="_blank" style="color: var(--accent); text-decoration: underline;">Install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}</a>
-          `;
-          errorDiv.style.display = 'block';
-          showNotification('warning', 'Wallet Not Found', `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension is not installed.`);
-          isConnecting = false;
-          connectBtn.disabled = false;
-          connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-          return;
-        }
-      }
-
-      // Mobile: Use WalletConnect with Deep Link
-      const provider = await initWalletConnect();
-      if (!provider) {
-        throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
-      }
-
-      provider.once("display_uri", (uri) => {
-        const deepLink = getDeepLink(walletType, uri);
-
-        if (wcStatus) {
-          wcStatus.style.display = 'block';
-          wcStatus.innerHTML = `
-            <div style="text-align: left; padding: 8px;">
-              <p style="margin: 0 0 8px 0; color: #F7A600;">📱 Opening your wallet app...</p>
-              <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-                <button onclick="window.location.href='${deepLink}'" 
-                        style="background: #F7A600; color: #000; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
-                  🔗 Open Wallet
-                </button>
-                <button onclick="window.open('${getWalletAppStoreUrl(walletType)}', '_blank')" 
-                        style="background: #10B981; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
-                  📥 Install Wallet
-                </button>
-              </div>
-              <div style="background: #1A1F2E; padding: 8px; border-radius: 4px; margin-top: 8px;">
-                <p style="font-size: 10px; color: #6C7480; margin: 0 0 4px 0;">Or manually copy this URI:</p>
-                <div style="display: flex; gap: 8px; align-items: center;">
-                  <code style="font-size: 9px; word-break: break-all; flex: 1; color: #B7BDC6;">${uri}</code>
-                  <button onclick="navigator.clipboard.writeText('${uri}')" 
-                          style="background: #F7A600; color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600;">
-                    📋 Copy
-                  </button>
-                </div>
-              </div>
-            </div>
-          `;
-        }
-
-        window.location.href = deepLink;
-      });
-
-      const accounts = await provider.connect();
-      if (accounts && accounts.length > 0) {
-        const address = accounts[0];
-        await linkWalletToBackend(address, walletType, '0x1');
-        web3Provider = provider;
-        if (wcStatus) wcStatus.style.display = 'none';
-      }
-
-    } catch (error) {
-      console.error('Wallet connection error:', error);
-      errorDiv.textContent = error.message || 'Failed to connect wallet. Please try again.';
-      errorDiv.style.display = 'block';
-      showNotification('error', 'Connection Failed', error.message || 'Please try again.');
-      if (wcStatus) wcStatus.style.display = 'none';
-    }
-
-    isConnecting = false;
-    connectBtn.disabled = false;
-    if (!web3WalletAddress) {
-      connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-    }
-  }
-
-  // ---- Wallet Logo Updates ----
+  // ---- WALLET LOGO UPDATES ----
   function updateWalletLogo() {
     const dropdown = document.getElementById('wallet-dropdown');
     const selected = dropdown.options[dropdown.selectedIndex];
@@ -7470,7 +7496,7 @@
     }
   }
 
-  // ---- Execute Deposit ----
+  // ---- EXECUTE DEPOSIT ----
   async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
     const amountInput = document.getElementById('deposit-amount-input');
@@ -7602,7 +7628,7 @@
     depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
   }
 
-  // ---- Deposit Amount Input Listener ----
+  // ---- DEPOSIT AMOUNT INPUT LISTENER ----
   document.addEventListener('DOMContentLoaded', function() {
     const amountInput = document.getElementById('deposit-amount-input');
     const assetSelect = document.getElementById('deposit-asset-select');
@@ -7619,17 +7645,14 @@
     }
   });
 
-  // ---- Initialization ----
+  // ---- INITIALIZATION ----
   window.addEventListener('load', function() {
     setTimeout(async function() {
       document.getElementById('loading-overlay').classList.add('hidden');
       initMobileMenu();
       initHeaderScrollEffect();
-      
-      // Initialize Web3
       initializeEIP6963();
-      await initWalletConnect();
-      
+      silentlyInitWalletConnect();
       await loadBalancesFromRest();
       await loadAssetBalancesFromRest();
       await loadUserData();
