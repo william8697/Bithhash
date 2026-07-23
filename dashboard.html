@@ -3831,6 +3831,68 @@
       border-radius: 4px !important;
       object-fit: contain !important;
     }
+
+    /* --- Enhanced Web3 Status Table --- */
+    .web3-transaction-status {
+      margin-top: 12px;
+      background: var(--bg-card);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      font-size: 0.8rem;
+    }
+    .web3-transaction-status table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.75rem;
+    }
+    .web3-transaction-status th {
+      background: var(--bg-hover);
+      padding: 8px 12px;
+      text-align: left;
+      color: var(--text-secondary);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+    .web3-transaction-status td {
+      padding: 8px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      color: var(--text-primary);
+      word-break: break-all;
+    }
+    .web3-transaction-status .status-confirmed { color: var(--success); }
+    .web3-transaction-status .status-pending { color: var(--warning); }
+    .web3-transaction-status .status-failed { color: var(--error); }
+    .web3-transaction-status .status-expired { color: var(--text-muted); }
+    .web3-transaction-status .tx-hash {
+      font-family: monospace;
+      font-size: 0.7rem;
+      background: var(--bg-base);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .web3-transaction-status .progress-bar {
+      width: 100%;
+      height: 4px;
+      background: var(--bg-hover);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .web3-transaction-status .progress-bar .fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+    .web3-tx-detail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .web3-tx-detail-row .label { color: var(--text-secondary); }
+    .web3-tx-detail-row .value { font-weight: 500; color: var(--text-primary); }
   </style>
 </head>
 <body>
@@ -4003,7 +4065,7 @@
       </div>
 
       <!-- ============================================= -->
-      <!-- WEB3 WALLET & DEPOSIT SECTION - PRODUCTION GRADE -->
+      <!-- WEB3 WALLET & DEPOSIT SECTION - ENHANCED WITH STATUS TABLE -->
       <!-- ============================================= -->
       <div class="web3-wallet-section" id="web3-wallet-section">
         <div class="section-header">
@@ -4095,6 +4157,16 @@
                 <span style="margin-left:auto; font-size:0.7rem; color:var(--text-muted);" id="deposit-rate-info">1 BTC ≈ $0.00</span>
               </div>
               <div id="deposit-status-msg" style="font-size:0.8rem; margin-top:8px; color:var(--text-secondary);"></div>
+
+              <!-- Transaction Status Table -->
+              <div id="web3-transaction-status-container" class="web3-transaction-status" style="display:none; margin-top:12px;">
+                <table>
+                  <thead>
+                    <tr><th>Tx Hash</th><th>Asset</th><th>Amount</th><th>Status</th><th>Confirmations</th><th>Details</th></tr>
+                  </thead>
+                  <tbody id="web3-transaction-status-body"></tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>
@@ -4655,6 +4727,9 @@
     let connectedWallets = [];
     let pendingUnlinkAddress = null;
     let walletDropdownOpen = false;
+
+    // Web3 transaction status tracking
+    let web3TransactionStatuses = [];
 
     // Wallet logos
     const walletLogos = {
@@ -5680,13 +5755,15 @@
     }
 
     // =============================================
-    // EXECUTE DEPOSIT - PRODUCTION GRADE
+    // EXECUTE DEPOSIT - PRODUCTION GRADE WITH STATUS TABLE
     // =============================================
     async function executeDeposit() {
       const assetSelect = document.getElementById('deposit-asset-select');
       const amountInput = document.getElementById('deposit-amount-input');
       const depositBtn = document.getElementById('deposit-btn');
       const statusMsg = document.getElementById('deposit-status-msg');
+      const statusContainer = document.getElementById('web3-transaction-status-container');
+      const statusBody = document.getElementById('web3-transaction-status-body');
 
       const asset = assetSelect.value;
       const amount = parseFloat(amountInput.value);
@@ -5719,6 +5796,20 @@
       statusMsg.style.color = 'var(--text-secondary)';
       statusMsg.textContent = '⏳ Preparing deposit request...';
 
+      // Create a status entry
+      const txStatusEntry = {
+        id: Date.now().toString(),
+        txHash: 'pending...',
+        asset: asset.toUpperCase(),
+        amount: amount,
+        status: 'pending',
+        confirmations: 0,
+        details: 'Initiating deposit...',
+        createdAt: new Date().toISOString()
+      };
+      web3TransactionStatuses.unshift(txStatusEntry);
+      renderTransactionStatusTable();
+
       try {
         const token = localStorage.getItem('jwtToken');
         if (!token) throw new Error('Please log in again.');
@@ -5750,7 +5841,6 @@
         }
 
         // Step 3: Check which chain this asset is on
-        // For simplicity, we use the network map. In production, this would be from the backend.
         const network = assetNetworkMap[asset] || 'Ethereum';
 
         // Step 4: Prepare transaction based on asset type
@@ -5773,8 +5863,6 @@
               throw new Error('Contract address not available for this token.');
             }
 
-            // We would need to use ethers to encode the function call
-            // For now, we use a standard approach
             const ethers = window.ethers;
             const provider = new ethers.BrowserProvider(window.ethereum);
             const signer = await provider.getSigner();
@@ -5786,13 +5874,17 @@
               signer
             );
 
-            // Determine decimals
             const decimals = addressData.data?.decimals || 18;
             const amountInWei = ethers.parseUnits(amount.toString(), decimals);
 
-            // Execute the transfer
             const tx = await contract.transfer(depositAddress, amountInWei);
             txHash = tx.hash;
+
+            // Update status
+            txStatusEntry.txHash = txHash;
+            txStatusEntry.status = 'pending';
+            txStatusEntry.details = 'Transaction broadcasted, waiting for confirmations...';
+            renderTransactionStatusTable();
 
             statusMsg.style.color = 'var(--success)';
             statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
@@ -5810,6 +5902,12 @@
               value: amountInWei
             });
             txHash = tx.hash;
+
+            // Update status
+            txStatusEntry.txHash = txHash;
+            txStatusEntry.status = 'pending';
+            txStatusEntry.details = 'Transaction broadcasted, waiting for confirmations...';
+            renderTransactionStatusTable();
 
             statusMsg.style.color = 'var(--success)';
             statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
@@ -5835,6 +5933,12 @@
             });
 
             if (confirmResponse.ok) {
+              const confirmData = await confirmResponse.json();
+              txStatusEntry.status = 'confirmed';
+              txStatusEntry.details = `Confirmed with ${confirmData.data?.confirmations || 0} confirmations. Required: ${confirmData.data?.requiredConfirmations || 12}`;
+              txStatusEntry.confirmations = confirmData.data?.confirmations || 0;
+              renderTransactionStatusTable();
+
               statusMsg.style.color = 'var(--success)';
               statusMsg.textContent = '✅ Deposit confirmed! Funds will be credited once the transaction is finalized.';
               showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} is being processed.`);
@@ -5843,18 +5947,23 @@
               await loadTransactions();
             } else {
               const err = await confirmResponse.json();
+              txStatusEntry.status = 'failed';
+              txStatusEntry.details = err.message || 'Failed to confirm deposit.';
+              renderTransactionStatusTable();
               throw new Error(err.message || 'Failed to confirm deposit.');
             }
           }
         } else if (['btc', 'ltc', 'doge'].includes(asset)) {
           // UTXO chain - generate address and provide QR code for manual transfer
+          txStatusEntry.status = 'pending';
+          txStatusEntry.details = `Send ${amount} ${asset.toUpperCase()} to the generated address.`;
+          renderTransactionStatusTable();
+
           statusMsg.style.color = 'var(--info)';
           statusMsg.textContent = `📱 Please send ${amount} ${asset.toUpperCase()} to the generated address.`;
           showNotification('info', 'Manual Transfer Required',
             `Please send ${amount} ${asset.toUpperCase()} to the deposit address shown in your wallet.`);
 
-          // For UTXO chains, we show the address and QR code
-          // The backend will monitor for incoming transactions
           const qrContainer = document.createElement('div');
           qrContainer.id = 'deposit-qr-container';
           qrContainer.style.marginTop = '12px';
@@ -5873,13 +5982,11 @@
           `;
           const depositInfo = document.getElementById('deposit-info-area');
           if (depositInfo) {
-            // Remove old QR if exists
             const oldQR = document.getElementById('deposit-qr-container');
             if (oldQR) oldQR.remove();
             depositInfo.after(qrContainer);
           }
 
-          // Generate QR code
           if (typeof QRCode !== 'undefined') {
             try {
               new QRCode(document.getElementById('qr-code-container'), {
@@ -5895,7 +6002,6 @@
             }
           }
 
-          // Also send a deposit request to backend to start monitoring
           const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
             method: 'POST',
             headers: {
@@ -5912,10 +6018,18 @@
           });
 
           if (monitorResponse.ok) {
+            const monitorData = await monitorResponse.json();
+            txStatusEntry.details = `Monitoring ${asset.toUpperCase()} network for your deposit...`;
+            txStatusEntry.txHash = 'manual-transfer';
+            renderTransactionStatusTable();
             statusMsg.textContent = `📊 Monitoring ${asset.toUpperCase()} network for your deposit...`;
           }
         } else if (['sol'].includes(asset)) {
           // Solana chain
+          txStatusEntry.status = 'pending';
+          txStatusEntry.details = `Send ${amount} SOL to the generated address.`;
+          renderTransactionStatusTable();
+
           statusMsg.style.color = 'var(--info)';
           statusMsg.textContent = `📱 Please send ${amount} SOL to the generated address.`;
           showNotification('info', 'Solana Transfer Required',
@@ -5975,10 +6089,17 @@
           });
 
           if (monitorResponse.ok) {
+            txStatusEntry.details = `Monitoring Solana network for your deposit...`;
+            txStatusEntry.txHash = 'manual-transfer-sol';
+            renderTransactionStatusTable();
             statusMsg.textContent = `📊 Monitoring Solana network for your deposit...`;
           }
         } else if (['xrp'].includes(asset)) {
           // XRP chain
+          txStatusEntry.status = 'pending';
+          txStatusEntry.details = `Send ${amount} XRP to the generated address.`;
+          renderTransactionStatusTable();
+
           statusMsg.style.color = 'var(--info)';
           statusMsg.textContent = `📱 Please send ${amount} XRP to the generated address.`;
           showNotification('info', 'XRP Transfer Required',
@@ -6038,10 +6159,17 @@
           });
 
           if (monitorResponse.ok) {
+            txStatusEntry.details = `Monitoring XRP network for your deposit...`;
+            txStatusEntry.txHash = 'manual-transfer-xrp';
+            renderTransactionStatusTable();
             statusMsg.textContent = `📊 Monitoring XRP network for your deposit...`;
           }
         } else if (['trx'].includes(asset)) {
           // TRON chain
+          txStatusEntry.status = 'pending';
+          txStatusEntry.details = `Send ${amount} TRX to the generated address.`;
+          renderTransactionStatusTable();
+
           statusMsg.style.color = 'var(--info)';
           statusMsg.textContent = `📱 Please send ${amount} TRX to the generated address.`;
           showNotification('info', 'TRON Transfer Required',
@@ -6101,16 +6229,22 @@
           });
 
           if (monitorResponse.ok) {
+            txStatusEntry.details = `Monitoring TRON network for your deposit...`;
+            txStatusEntry.txHash = 'manual-transfer-trx';
+            renderTransactionStatusTable();
             statusMsg.textContent = `📊 Monitoring TRON network for your deposit...`;
           }
         } else {
           // Fallback for unsupported assets
+          txStatusEntry.status = 'pending';
+          txStatusEntry.details = `Manual deposit required. Send ${amount} ${asset.toUpperCase()} to the address.`;
+          renderTransactionStatusTable();
+
           statusMsg.style.color = 'var(--warning)';
           statusMsg.textContent = `⚠️ Manual deposit required. Please send ${amount} ${asset.toUpperCase()} to: ${depositAddress}`;
           showNotification('warning', 'Manual Deposit Required',
             `Please send ${amount} ${asset.toUpperCase()} to the provided deposit address.`);
 
-          // Still try to monitor
           const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
             method: 'POST',
             headers: {
@@ -6127,8 +6261,19 @@
           });
         }
 
+        // Show the status table if there are any entries
+        if (web3TransactionStatuses.length > 0) {
+          statusContainer.style.display = 'block';
+        }
+
       } catch (error) {
         console.error('Deposit error:', error);
+        // Update status entry to failed
+        if (web3TransactionStatuses.length > 0) {
+          web3TransactionStatuses[0].status = 'failed';
+          web3TransactionStatuses[0].details = error.message || 'Deposit failed.';
+          renderTransactionStatusTable();
+        }
         statusMsg.style.color = 'var(--error)';
         statusMsg.textContent = `❌ ${error.message || 'Deposit failed. Please try again.'}`;
         showNotification('error', 'Deposit Failed', error.message || 'Please try again.');
@@ -6136,6 +6281,46 @@
 
       depositBtn.disabled = false;
       depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
+    }
+
+    // =============================================
+    // RENDER TRANSACTION STATUS TABLE
+    // =============================================
+    function renderTransactionStatusTable() {
+      const container = document.getElementById('web3-transaction-status-container');
+      const body = document.getElementById('web3-transaction-status-body');
+      if (!container || !body) return;
+
+      if (web3TransactionStatuses.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'block';
+      let html = '';
+      web3TransactionStatuses.forEach(tx => {
+        const statusClass = tx.status === 'confirmed' ? 'status-confirmed' :
+                           tx.status === 'failed' ? 'status-failed' :
+                           tx.status === 'expired' ? 'status-expired' : 'status-pending';
+        const statusText = tx.status.charAt(0).toUpperCase() + tx.status.slice(1);
+        const confirmations = tx.confirmations || 0;
+        const progress = Math.min(100, (confirmations / 12) * 100);
+
+        html += `
+          <tr>
+            <td><span class="tx-hash">${tx.txHash}</span></td>
+            <td>${tx.asset}</td>
+            <td>${formatNumberWithCommas(tx.amount, 6)}</td>
+            <td><span class="${statusClass}">${statusText}</span></td>
+            <td>
+              ${confirmations > 0 ? `${confirmations}/12` : '0/12'}
+              <div class="progress-bar"><div class="fill" style="width:${progress}%"></div></div>
+            </td>
+            <td style="font-size:0.7rem; max-width:120px; word-break:break-word;">${tx.details}</td>
+          </tr>
+        `;
+      });
+      body.innerHTML = html;
     }
 
     // =============================================
