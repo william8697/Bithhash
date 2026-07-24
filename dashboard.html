@@ -106,7 +106,6 @@
       -moz-osx-font-smoothing: grayscale;
     }
 
-    /* All existing styles remain exactly as provided */
     .balance-main-amount,
     .balance-change,
     .mobile-balance-amount,
@@ -4655,8 +4654,6 @@
     let connectedWallets = [];
     let pendingUnlinkAddress = null;
     let walletDropdownOpen = false;
-    let pendingLinkRequestId = null;
-    let pendingLinkMessage = null;
 
     // Wallet logos
     const walletLogos = {
@@ -5024,23 +5021,17 @@
         });
         if (response.ok) {
           const data = await response.json();
-          if (data.data && data.data.wallets && Array.isArray(data.data.wallets)) {
-            connectedWallets = data.data.wallets;
-          } else if (data.wallets && Array.isArray(data.wallets)) {
-            connectedWallets = data.wallets;
-          } else {
-            connectedWallets = [];
+          // The backend returns { status: 'success', data: { wallets: [...] } }
+          const wallets = data.data?.wallets || data.wallets || [];
+          if (Array.isArray(wallets)) {
+            connectedWallets = wallets;
+            renderConnectedWalletsDropdown();
+            updateConnectedWalletsCount();
+            updateDepositVisibility();
           }
-          renderConnectedWalletsDropdown();
-          updateConnectedWalletsCount();
-          updateDepositVisibility();
         }
       } catch (error) {
         console.error('Error loading linked wallets:', error);
-        connectedWallets = [];
-        renderConnectedWalletsDropdown();
-        updateConnectedWalletsCount();
-        updateDepositVisibility();
       }
     }
 
@@ -5555,15 +5546,15 @@
     }
 
     // =============================================
-    // LINK WALLET TO BACKEND - FIXED WITH 2-STEP PROCESS
+    // LINK WALLET TO BACKEND - FIXED TO MATCH BACKEND EXPECTATIONS
     // =============================================
     async function linkWalletToBackend(address, walletType, network) {
       try {
         const token = localStorage.getItem('jwtToken');
         if (!token) throw new Error('Please log in first.');
 
-        // STEP 1: Request challenge message from backend
-        const challengeResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/link-wallet', {
+        // Step 1: Get a nonce/message from backend
+        const nonceResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/link-wallet', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -5576,41 +5567,42 @@
           })
         });
 
-        if (!challengeResponse.ok) {
-          const errData = await challengeResponse.json();
-          throw new Error(errData.message || 'Failed to initiate wallet linking.');
+        if (!nonceResponse.ok) {
+          const errData = await nonceResponse.json();
+          throw new Error(errData.message || 'Failed to initiate wallet link.');
         }
 
-        const challengeData = await challengeResponse.json();
-        const requestId = challengeData.data?.requestId || challengeData.requestId;
-        const message = challengeData.data?.message || challengeData.message;
+        const nonceData = await nonceResponse.json();
+        // Backend returns: { status: 'success', data: { requestId, message, nonce, walletAddress, expiresAt } }
+        const requestId = nonceData.data?.requestId || nonceData.requestId;
+        const message = nonceData.data?.message || nonceData.message;
+        const nonce = nonceData.data?.nonce || nonceData.nonce;
 
         if (!requestId || !message) {
-          throw new Error('Invalid challenge response from server.');
+          throw new Error('Invalid response from server. Missing requestId or message.');
         }
 
-        pendingLinkRequestId = requestId;
-        pendingLinkMessage = message;
-
-        // STEP 2: Sign the message with the wallet
-        const ethers = window.ethers;
-        let provider;
-        let signer;
-
+        // Step 2: Sign the message with the wallet
+        let signature;
         if (window.ethereum) {
-          provider = new ethers.BrowserProvider(window.ethereum);
-          signer = await provider.getSigner();
-        } else if (window.solana) {
-          // For Solana, we'd use a different signing method
-          // For now, fallback to ethereum signing
-          throw new Error('Solana signing not yet supported for wallet linking. Please use an EVM-compatible wallet.');
+          try {
+            signature = await window.ethereum.request({
+              method: 'personal_sign',
+              params: [message, address]
+            });
+          } catch (signError) {
+            console.error('Signing error:', signError);
+            throw new Error('Failed to sign message. Please ensure you have a wallet connected.');
+          }
         } else {
-          throw new Error('No wallet provider found. Please install MetaMask or another wallet.');
+          throw new Error('No wallet provider found. Please install a wallet extension.');
         }
 
-        const signature = await signer.signMessage(message);
+        if (!signature) {
+          throw new Error('No signature returned. Please try again.');
+        }
 
-        // STEP 3: Verify signature with backend
+        // Step 3: Verify the signature with backend
         const verifyResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/users/link-wallet/verify', {
           method: 'POST',
           headers: {
@@ -5625,17 +5617,21 @@
 
         if (!verifyResponse.ok) {
           const errData = await verifyResponse.json();
-          throw new Error(errData.message || 'Signature verification failed.');
+          throw new Error(errData.message || 'Failed to verify wallet ownership.');
         }
 
         const verifyData = await verifyResponse.json();
 
+        // Step 4: Store the wallet info locally
         web3WalletAddress = address;
         web3WalletType = walletType;
         web3Network = network || '0x1';
 
         // Add to connected wallets list
-        connectedWallets.push({ address: address, type: walletType });
+        const exists = connectedWallets.some(w => w.address === address);
+        if (!exists) {
+          connectedWallets.push({ address: address, type: walletType });
+        }
         renderConnectedWalletsDropdown();
         updateConnectedWalletsCount();
         updateDepositVisibility();
@@ -5662,13 +5658,8 @@
         // Reload linked wallets to refresh list
         await loadLinkedWallets();
 
-        pendingLinkRequestId = null;
-        pendingLinkMessage = null;
-
       } catch (error) {
         console.error('Link wallet error:', error);
-        pendingLinkRequestId = null;
-        pendingLinkMessage = null;
         throw error;
       }
     }
@@ -5799,7 +5790,7 @@
         const fiatValue = amount * currentPrice;
         document.getElementById('deposit-fiat-value').textContent = `≈ ${formatFiat(fiatValue)}`;
 
-        // Step 2: Request deposit address from backend
+        // Step 2: Get deposit address from backend
         const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -5808,117 +5799,113 @@
           throw new Error(err.message || 'Failed to get deposit address.');
         }
         const addressData = await depositAddressResponse.json();
+        // Backend returns: { status: 'success', data: { address, asset, network, rate, ... } }
         const depositAddress = addressData.data?.address || addressData.address;
         if (!depositAddress) {
           throw new Error('No deposit address returned. Please try again.');
         }
 
         // Step 3: Check which chain this asset is on
-        // For simplicity, we use the network map. In production, this would be from the backend.
         const network = assetNetworkMap[asset] || 'Ethereum';
 
-        // Step 4: Prepare transaction based on asset type
-        let txData = null;
+        // Step 4: Initiate deposit via backend
+        const depositResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/web3', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            asset: asset,
+            amount: amount,
+            walletAddress: walletToUse,
+            network: network
+          })
+        });
+
+        if (!depositResponse.ok) {
+          const err = await depositResponse.json();
+          throw new Error(err.message || 'Failed to initiate deposit.');
+        }
+
+        const depositData = await depositResponse.json();
+        // Backend returns: { status: 'success', data: { transaction, txData, network, depositAddress, ... } }
+
+        // If the backend provides txData for EVM chains, we can use it
+        const txData = depositData.data?.txData || null;
+        const depositId = depositData.data?.transaction?.id || depositData.data?.depositId;
+        const reference = depositData.data?.transaction?.reference || depositData.data?.reference;
+
+        // Step 5: Handle the transaction based on asset type
         let txHash = null;
 
-        // For EVM chains, prepare a transaction object
-        if (['eth', 'usdt', 'usdc', 'bnb', 'shib', 'link', 'matic', 'avax', 'wbtc'].includes(asset)) {
-          // EVM chain deposit
-          const provider = web3Provider;
-          if (!provider) {
-            throw new Error('No Web3 provider available. Please reconnect your wallet.');
-          }
-
-          // For ERC20 tokens, we need to encode the transfer
-          if (['usdt', 'usdc', 'shib', 'link', 'wbtc'].includes(asset)) {
-            // ERC20 token transfer
-            const contractAddress = addressData.data?.contractAddress || addressData.contractAddress;
-            if (!contractAddress) {
-              throw new Error('Contract address not available for this token.');
-            }
-
-            // We would need to use ethers to encode the function call
-            // For now, we use a standard approach
-            const ethers = window.ethers;
-            const provider = new ethers.BrowserProvider(window.ethereum);
-            const signer = await provider.getSigner();
-            const contract = new ethers.Contract(
-              contractAddress,
-              [
-                'function transfer(address to, uint256 amount) returns (bool)'
-              ],
-              signer
-            );
-
-            // Determine decimals
-            const decimals = addressData.data?.decimals || 18;
-            const amountInWei = ethers.parseUnits(amount.toString(), decimals);
-
-            // Execute the transfer
-            const tx = await contract.transfer(depositAddress, amountInWei);
-            txHash = tx.hash;
-
-            statusMsg.style.color = 'var(--success)';
-            statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
-            showNotification('success', 'Deposit Submitted', `Transaction submitted for ${amount} ${asset.toUpperCase()}.`);
-          } else {
-            // Native coin transfer (ETH, BNB, MATIC, AVAX)
-            const ethers = window.ethers;
+        if (txData && txData.to) {
+          // EVM chain deposit with prepared transaction
+          try {
             const provider = new ethers.BrowserProvider(window.ethereum);
             const signer = await provider.getSigner();
 
-            const amountInWei = ethers.parseEther(amount.toString());
-
+            // Send the transaction
             const tx = await signer.sendTransaction({
-              to: depositAddress,
-              value: amountInWei
+              to: txData.to,
+              value: txData.value || '0x0',
+              data: txData.data || '0x',
+              chainId: txData.chainId || 1
             });
             txHash = tx.hash;
 
             statusMsg.style.color = 'var(--success)';
             statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
             showNotification('success', 'Deposit Submitted', `Transaction submitted for ${amount} ${asset.toUpperCase()}.`);
-          }
 
-          // Step 5: Confirm transaction with backend
-          if (txHash) {
-            const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-              },
-              body: JSON.stringify({
-                txHash: txHash,
-                asset: asset,
-                amount: amount,
-                walletAddress: walletToUse,
-                depositAddress: depositAddress,
-                network: network
-              })
-            });
+            // Step 6: Confirm deposit with backend
+            if (txHash) {
+              const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                  txHash: txHash,
+                  asset: asset,
+                  amount: amount,
+                  walletAddress: walletToUse,
+                  depositAddress: depositAddress,
+                  network: network
+                })
+              });
 
-            if (confirmResponse.ok) {
-              statusMsg.style.color = 'var(--success)';
-              statusMsg.textContent = '✅ Deposit confirmed! Funds will be credited once the transaction is finalized.';
-              showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} is being processed.`);
-              await loadBalancesFromRest();
-              await loadAssetBalancesFromRest();
-              await loadTransactions();
+              if (confirmResponse.ok) {
+                statusMsg.style.color = 'var(--success)';
+                statusMsg.textContent = '✅ Deposit confirmed! Funds will be credited once the transaction is finalized.';
+                showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} is being processed.`);
+                await loadBalancesFromRest();
+                await loadAssetBalancesFromRest();
+                await loadTransactions();
+              } else {
+                const err = await confirmResponse.json();
+                throw new Error(err.message || 'Failed to confirm deposit.');
+              }
+            }
+          } catch (txError) {
+            console.error('Transaction error:', txError);
+            if (txError.code === 'ACTION_REJECTED' || txError.code === 4001) {
+              statusMsg.style.color = 'var(--warning)';
+              statusMsg.textContent = '⏳ Transaction was rejected. Please try again.';
+              showNotification('warning', 'Transaction Rejected', 'You declined the transaction.');
             } else {
-              const err = await confirmResponse.json();
-              throw new Error(err.message || 'Failed to confirm deposit.');
+              throw txError;
             }
           }
-        } else if (['btc', 'ltc', 'doge'].includes(asset)) {
-          // UTXO chain - generate address and provide QR code for manual transfer
+        } else {
+          // Non-EVM or manual deposit (BTC, XRP, SOL, etc.)
           statusMsg.style.color = 'var(--info)';
-          statusMsg.textContent = `📱 Please send ${amount} ${asset.toUpperCase()} to the generated address.`;
+          statusMsg.textContent = `📱 Please send ${amount} ${asset.toUpperCase()} to: ${depositAddress}`;
           showNotification('info', 'Manual Transfer Required',
-            `Please send ${amount} ${asset.toUpperCase()} to the deposit address shown in your wallet.`);
+            `Please send ${amount} ${asset.toUpperCase()} to the provided deposit address.`);
 
-          // For UTXO chains, we show the address and QR code
-          // The backend will monitor for incoming transactions
+          // Generate QR code for the address
           const qrContainer = document.createElement('div');
           qrContainer.id = 'deposit-qr-container';
           qrContainer.style.marginTop = '12px';
@@ -5932,12 +5919,15 @@
             </div>
             <div id="qr-code-container" style="margin: 12px auto; max-width: 180px;"></div>
             <p style="font-size: 0.7rem; color: var(--text-muted);">
-              Funds will be credited after ${asset === 'btc' ? '3' : '6'} confirmations.
+              Funds will be credited after confirmations.
             </p>
+            <button class="btn btn-outline" onclick="navigator.clipboard.writeText('${depositAddress}')" style="margin-top: 8px; padding: 6px 16px;">
+              <i class="fas fa-copy"></i> Copy Address
+            </button>
           `;
+
           const depositInfo = document.getElementById('deposit-info-area');
           if (depositInfo) {
-            // Remove old QR if exists
             const oldQR = document.getElementById('deposit-qr-container');
             if (oldQR) oldQR.remove();
             depositInfo.after(qrContainer);
@@ -5946,20 +5936,23 @@
           // Generate QR code
           if (typeof QRCode !== 'undefined') {
             try {
-              new QRCode(document.getElementById('qr-code-container'), {
-                text: depositAddress,
-                width: 180,
-                height: 180,
-                colorDark: '#FFFFFF',
-                colorLight: '#0B0E11',
-                correctLevel: QRCode.CorrectLevel.H
-              });
+              const qrElement = document.getElementById('qr-code-container');
+              if (qrElement) {
+                new QRCode(qrElement, {
+                  text: depositAddress,
+                  width: 180,
+                  height: 180,
+                  colorDark: '#FFFFFF',
+                  colorLight: '#0B0E11',
+                  correctLevel: QRCode.CorrectLevel.H
+                });
+              }
             } catch (e) {
               console.warn('QR Code generation failed:', e);
             }
           }
 
-          // Also send a deposit request to backend to start monitoring
+          // Start monitoring via backend
           const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
             method: 'POST',
             headers: {
@@ -5977,218 +5970,8 @@
 
           if (monitorResponse.ok) {
             statusMsg.textContent = `📊 Monitoring ${asset.toUpperCase()} network for your deposit...`;
+            showNotification('success', 'Monitoring Started', `We're monitoring the ${asset.toUpperCase()} network for your deposit.`);
           }
-        } else if (['sol'].includes(asset)) {
-          // Solana chain
-          statusMsg.style.color = 'var(--info)';
-          statusMsg.textContent = `📱 Please send ${amount} SOL to the generated address.`;
-          showNotification('info', 'Solana Transfer Required',
-            `Please send ${amount} SOL to the deposit address shown.`);
-
-          const qrContainer = document.createElement('div');
-          qrContainer.id = 'deposit-qr-container';
-          qrContainer.style.marginTop = '12px';
-          qrContainer.style.textAlign = 'center';
-          qrContainer.innerHTML = `
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
-              Send exactly ${amount} SOL to:
-            </p>
-            <div style="background: var(--bg-card); padding: 12px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 0.75rem; color: var(--text-primary);">
-              ${depositAddress}
-            </div>
-            <div id="qr-code-container-sol" style="margin: 12px auto; max-width: 180px;"></div>
-            <p style="font-size: 0.7rem; color: var(--text-muted);">
-              Funds will be credited after 32 confirmations.
-            </p>
-          `;
-          const depositInfo = document.getElementById('deposit-info-area');
-          if (depositInfo) {
-            const oldQR = document.getElementById('deposit-qr-container');
-            if (oldQR) oldQR.remove();
-            depositInfo.after(qrContainer);
-          }
-
-          if (typeof QRCode !== 'undefined') {
-            try {
-              new QRCode(document.getElementById('qr-code-container-sol'), {
-                text: depositAddress,
-                width: 180,
-                height: 180,
-                colorDark: '#FFFFFF',
-                colorLight: '#0B0E11',
-                correctLevel: QRCode.CorrectLevel.H
-              });
-            } catch (e) {
-              console.warn('QR Code generation failed:', e);
-            }
-          }
-
-          const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              asset: asset,
-              amount: amount,
-              depositAddress: depositAddress,
-              walletAddress: walletToUse,
-              network: 'Solana'
-            })
-          });
-
-          if (monitorResponse.ok) {
-            statusMsg.textContent = `📊 Monitoring Solana network for your deposit...`;
-          }
-        } else if (['xrp'].includes(asset)) {
-          // XRP chain
-          statusMsg.style.color = 'var(--info)';
-          statusMsg.textContent = `📱 Please send ${amount} XRP to the generated address.`;
-          showNotification('info', 'XRP Transfer Required',
-            `Please send ${amount} XRP to the deposit address shown.`);
-
-          const qrContainer = document.createElement('div');
-          qrContainer.id = 'deposit-qr-container';
-          qrContainer.style.marginTop = '12px';
-          qrContainer.style.textAlign = 'center';
-          qrContainer.innerHTML = `
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
-              Send exactly ${amount} XRP to:
-            </p>
-            <div style="background: var(--bg-card); padding: 12px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 0.75rem; color: var(--text-primary);">
-              ${depositAddress}
-            </div>
-            <div id="qr-code-container-xrp" style="margin: 12px auto; max-width: 180px;"></div>
-            <p style="font-size: 0.7rem; color: var(--text-muted);">
-              Funds will be credited after 4 confirmations.
-            </p>
-          `;
-          const depositInfo = document.getElementById('deposit-info-area');
-          if (depositInfo) {
-            const oldQR = document.getElementById('deposit-qr-container');
-            if (oldQR) oldQR.remove();
-            depositInfo.after(qrContainer);
-          }
-
-          if (typeof QRCode !== 'undefined') {
-            try {
-              new QRCode(document.getElementById('qr-code-container-xrp'), {
-                text: depositAddress,
-                width: 180,
-                height: 180,
-                colorDark: '#FFFFFF',
-                colorLight: '#0B0E11',
-                correctLevel: QRCode.CorrectLevel.H
-              });
-            } catch (e) {
-              console.warn('QR Code generation failed:', e);
-            }
-          }
-
-          const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              asset: asset,
-              amount: amount,
-              depositAddress: depositAddress,
-              walletAddress: walletToUse,
-              network: 'XRP Ledger'
-            })
-          });
-
-          if (monitorResponse.ok) {
-            statusMsg.textContent = `📊 Monitoring XRP network for your deposit...`;
-          }
-        } else if (['trx'].includes(asset)) {
-          // TRON chain
-          statusMsg.style.color = 'var(--info)';
-          statusMsg.textContent = `📱 Please send ${amount} TRX to the generated address.`;
-          showNotification('info', 'TRON Transfer Required',
-            `Please send ${amount} TRX to the deposit address shown.`);
-
-          const qrContainer = document.createElement('div');
-          qrContainer.id = 'deposit-qr-container';
-          qrContainer.style.marginTop = '12px';
-          qrContainer.style.textAlign = 'center';
-          qrContainer.innerHTML = `
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
-              Send exactly ${amount} TRX to:
-            </p>
-            <div style="background: var(--bg-card); padding: 12px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 0.75rem; color: var(--text-primary);">
-              ${depositAddress}
-            </div>
-            <div id="qr-code-container-trx" style="margin: 12px auto; max-width: 180px;"></div>
-            <p style="font-size: 0.7rem; color: var(--text-muted);">
-              Funds will be credited after 19 confirmations.
-            </p>
-          `;
-          const depositInfo = document.getElementById('deposit-info-area');
-          if (depositInfo) {
-            const oldQR = document.getElementById('deposit-qr-container');
-            if (oldQR) oldQR.remove();
-            depositInfo.after(qrContainer);
-          }
-
-          if (typeof QRCode !== 'undefined') {
-            try {
-              new QRCode(document.getElementById('qr-code-container-trx'), {
-                text: depositAddress,
-                width: 180,
-                height: 180,
-                colorDark: '#FFFFFF',
-                colorLight: '#0B0E11',
-                correctLevel: QRCode.CorrectLevel.H
-              });
-            } catch (e) {
-              console.warn('QR Code generation failed:', e);
-            }
-          }
-
-          const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              asset: asset,
-              amount: amount,
-              depositAddress: depositAddress,
-              walletAddress: walletToUse,
-              network: 'TRON'
-            })
-          });
-
-          if (monitorResponse.ok) {
-            statusMsg.textContent = `📊 Monitoring TRON network for your deposit...`;
-          }
-        } else {
-          // Fallback for unsupported assets
-          statusMsg.style.color = 'var(--warning)';
-          statusMsg.textContent = `⚠️ Manual deposit required. Please send ${amount} ${asset.toUpperCase()} to: ${depositAddress}`;
-          showNotification('warning', 'Manual Deposit Required',
-            `Please send ${amount} ${asset.toUpperCase()} to the provided deposit address.`);
-
-          // Still try to monitor
-          const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
-              asset: asset,
-              amount: amount,
-              depositAddress: depositAddress,
-              walletAddress: walletToUse,
-              network: network || 'Blockchain'
-            })
-          });
         }
 
       } catch (error) {
