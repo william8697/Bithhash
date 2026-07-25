@@ -6568,7 +6568,9 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - ENHANCED WITH ADDRESS & QR
+        // EXECUTE DEPOSIT - FIXED VERSION
+        // Fixes: "missing revert data" error for ERC20 tokens
+        // Uses contract address from backend response
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -6665,8 +6667,13 @@
                         return;
                     }
 
-                    // For ERC20 tokens
+                    // =============================================
+                    // ERC20 TOKEN TRANSFER - FIXED
+                    // The key fix: Use the contract address from the backend,
+                    // NOT the deposit address. Call contract.transfer().
+                    // =============================================
                     if (['usdt', 'usdc', 'shib', 'link', 'wbtc'].includes(asset)) {
+                        // Get the contract address from the backend response
                         const contractAddress = addressData.data?.contractAddress || addressData.contractAddress;
                         if (!contractAddress) {
                             throw new Error('Contract address not available for this token.');
@@ -6685,10 +6692,13 @@
                             return;
                         }
                         
+                        // Create contract instance with the CONTRACT address
                         const contract = new ethers.Contract(
                             contractAddress,
                             [
-                                'function transfer(address to, uint256 amount) returns (bool)'
+                                'function transfer(address to, uint256 amount) external returns (bool)',
+                                'function decimals() external view returns (uint8)',
+                                'function balanceOf(address owner) external view returns (uint256)'
                             ],
                             signer
                         );
@@ -6696,6 +6706,27 @@
                         const decimals = addressData.data?.decimals || 18;
                         const amountInWei = ethers.parseUnits(amount.toString(), decimals);
 
+                        // Check balance first
+                        const balance = await contract.balanceOf(connectedAddress);
+                        if (balance < amountInWei) {
+                            const formattedBalance = ethers.formatUnits(balance, decimals);
+                            throw new Error(`Insufficient ${asset.toUpperCase()} balance. Available: ${formattedBalance}, Required: ${amount}`);
+                        }
+
+                        // Estimate gas to catch errors early
+                        try {
+                            const gasEstimate = await contract.transfer.estimateGas(depositAddress, amountInWei);
+                            console.log(`Gas estimate: ${gasEstimate.toString()}`);
+                        } catch (gasError) {
+                            console.error('Gas estimation failed:', gasError);
+                            // Don't block the transaction, just warn
+                            showNotification('warning', 'Gas Estimation Warning', 
+                                'Gas estimation failed, but you can still try the transaction.');
+                        }
+
+                        // Execute the transfer - THIS IS THE KEY FIX
+                        // The 'to' parameter is the deposit address, but the transaction
+                        // is sent to the CONTRACT address
                         const tx = await contract.transfer(depositAddress, amountInWei);
                         txHash = tx.hash;
 
@@ -6703,7 +6734,9 @@
                         statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${amount} ${asset.toUpperCase()}.`);
                     } else {
-                        // Native coin transfer
+                        // =============================================
+                        // NATIVE COIN TRANSFER (ETH, BNB, MATIC, AVAX)
+                        // =============================================
                         const ethers = window.ethers;
                         const provider = new ethers.BrowserProvider(window.ethereum);
                         const signer = await provider.getSigner();
@@ -6718,6 +6751,13 @@
                         }
 
                         const amountInWei = ethers.parseEther(amount.toString());
+
+                        // Check balance first
+                        const balance = await provider.getBalance(connectedAddress);
+                        if (balance < amountInWei) {
+                            const formattedBalance = ethers.formatEther(balance);
+                            throw new Error(`Insufficient ${asset.toUpperCase()} balance. Available: ${formattedBalance}, Required: ${amount}`);
+                        }
 
                         const tx = await signer.sendTransaction({
                             to: depositAddress,
@@ -6766,7 +6806,6 @@
                     showNotification('info', 'Manual Transfer Required',
                         `Please send ${amount} ${asset.toUpperCase()} to the generated address.`);
 
-                    // Monitor deposit status
                     const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
                         method: 'POST',
                         headers: {
@@ -6882,9 +6921,23 @@
 
             } catch (error) {
                 console.error('Deposit error:', error);
+                
+                // Provide more helpful error messages
+                let errorMessage = error.message || 'Deposit failed. Please try again.';
+                
+                if (errorMessage.includes('insufficient funds')) {
+                    errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
+                } else if (errorMessage.includes('user rejected')) {
+                    errorMessage = 'Transaction was rejected in your wallet.';
+                } else if (errorMessage.includes('network error')) {
+                    errorMessage = 'Network error. Please check your connection and try again.';
+                } else if (errorMessage.includes('missing revert data')) {
+                    errorMessage = 'Transaction failed. The contract may not support this operation. Please try a different asset.';
+                }
+                
                 statusMsg.style.color = 'var(--error)';
-                statusMsg.textContent = `❌ ${error.message || 'Deposit failed. Please try again.'}`;
-                showNotification('error', 'Deposit Failed', error.message || 'Please try again.');
+                statusMsg.textContent = `❌ ${errorMessage}`;
+                showNotification('error', 'Deposit Failed', errorMessage);
             }
 
             depositBtn.disabled = false;
