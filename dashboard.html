@@ -5877,9 +5877,14 @@
 
         console.log("window.WalletConnectProvider:", window.WalletConnectProvider);
 
-        
+        // =============================================
+        // WALLETCONNECT INIT - WITH DEBUG LOGGING
+        // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
-            if (universalWalletProvider) return universalWalletProvider;
+            if (universalWalletProvider) {
+                console.log('🔄 WalletConnect Provider already initialized, reusing');
+                return universalWalletProvider;
+            }
             if (attempt > MAX_WALLETCONNECT_RETRIES) {
                 console.error('❌ WalletConnect SDK failed to load after maximum retries');
                 return null;
@@ -5913,6 +5918,34 @@
                 });
                 signClient = universalWalletProvider;
                 walletConnectInitialized = true;
+                
+                // =============================================
+                // ADD DEBUG EVENT LISTENERS - FIX START
+                // =============================================
+                // These listeners will help trace where the handshake stops
+                universalWalletProvider.on("connect", (data) => {
+                    console.log("🔗 WalletConnect CONNECT event fired:", data);
+                });
+
+                universalWalletProvider.on("disconnect", (data) => {
+                    console.log("❌ WalletConnect DISCONNECT event fired:", data);
+                });
+
+                universalWalletProvider.on("session_event", (data) => {
+                    console.log("📡 WalletConnect SESSION_EVENT event fired:", data);
+                });
+
+                universalWalletProvider.on("session_update", (data) => {
+                    console.log("🔄 WalletConnect SESSION_UPDATE event fired:", data);
+                });
+
+                universalWalletProvider.on("session_delete", (data) => {
+                    console.log("🗑️ WalletConnect SESSION_DELETE event fired:", data);
+                });
+                // =============================================
+                // ADD DEBUG EVENT LISTENERS - FIX END
+                // =============================================
+                
                 console.log('✅ WalletConnect Provider initialized successfully');
                 return universalWalletProvider;
             } catch (err) {
@@ -5987,8 +6020,7 @@
         }
 
         // =============================================
-        // WALLET CONNECTION - FIXED FOR MOBILE
-        // THIS IS THE EXACT FIX - SINGLE connect() CALL
+        // WALLET CONNECTION - FIXED FOR MOBILE WITH DEBUG LOGGING
         // =============================================
         async function connectSelectedWallet() {
             const dropdown = document.getElementById('wallet-dropdown');
@@ -6019,7 +6051,9 @@
                     const injectedTarget = getProviderByRDNS(targetRdns);
                     if (injectedTarget) {
                         try {
+                            console.log('🖥️ Desktop flow: requesting accounts from', walletType);
                             const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                            console.log('👤 Accounts received:', accounts);
                             if (accounts && accounts.length > 0) {
                                 const address = accounts[0];
                                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
@@ -6063,73 +6097,82 @@
                 }
 
                 // =============================================
-                // MOBILE FLOW: WalletConnect with SINGLE connect() call
-                // THIS IS THE EXACT FIX FOR THE ISSUE
+                // MOBILE FLOW: WalletConnect with deep link
                 // =============================================
+                console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
                 const provider = await silentlyInitWalletConnect();
                 if (!provider) {
                     throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
                 }
 
+                // Set up a promise that resolves when the URI is emitted
                 let deepLinkOpened = false;
-                let uriEmitted = false;
+                const uriPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Connection timeout - please try again and approve in your wallet'));
+                    }, 60000);
 
-                // Listen for the URI once - this will be emitted by the SDK
-                provider.once("display_uri", (uri) => {
-                    console.log('📱 WalletConnect URI emitted');
-                    activeWcUri = uri;
-                    uriEmitted = true;
-                    
-                    // Build the correct deep link for the selected wallet
-                    const deepLink = openDeepLink(walletType, uri);
-                    console.log(`🚀 Opening wallet with deep link: ${deepLink}`);
-                    
-                    // Show status UI with clear instructions
-                    if (wcStatus) {
-                        wcStatus.style.display = 'block';
-                        wcStatus.innerHTML = `
-                            <div class="wc-status-content">
-                                <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
-                                    📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
-                                </p>
-                                <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-                                    <button class="wc-open-btn" onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
-                                        🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
-                                    </button>
-                                    <button class="wc-install-btn" onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff;">
-                                        📥 Install Wallet
-                                    </button>
-                                </div>
-                                <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
-                                    <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI (if wallet doesn't open):</p>
-                                    <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
-                                        <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
-                                        <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
+                    provider.once("display_uri", (uri) => {
+                        clearTimeout(timeout);
+                        activeWcUri = uri;
+                        console.log('📱 WalletConnect URI emitted:', uri.substring(0, 50) + '...');
+                        
+                        // Build the correct deep link for the selected wallet
+                        const deepLink = openDeepLink(walletType, uri);
+                        console.log(`🚀 Opening wallet with deep link: ${deepLink}`);
+                        
+                        // Show status UI with clear instructions
+                        if (wcStatus) {
+                            wcStatus.style.display = 'block';
+                            wcStatus.innerHTML = `
+                                <div class="wc-status-content">
+                                    <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
+                                        📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                                    </p>
+                                    <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+                                        <button class="wc-open-btn" onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
+                                            🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                                        </button>
+                                        <button class="wc-install-btn" onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff;">
+                                            📥 Install Wallet
+                                        </button>
+                                    </div>
+                                    <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
+                                        <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI (if wallet doesn't open):</p>
+                                        <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
+                                            <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
+                                            <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        `;
-                    }
+                            `;
+                        }
 
-                    // CRITICAL FIX: Use setTimeout to ensure the connect() call is already waiting
-                    // This prevents the deep link navigation from breaking the promise chain
-                    setTimeout(() => {
-                        console.log('🔗 Navigating to deep link:', deepLink);
-                        window.location.href = deepLink;
+                        // CRITICAL: Actually open the wallet app using the deep link
                         deepLinkOpened = true;
-                    }, 150);
+                        console.log('📱 Opening wallet via window.location.href');
+                        window.location.href = deepLink;
+                        
+                        resolve(uri);
+                    });
                 });
 
-                // =============================================
-                // THE KEY FIX: SINGLE provider.connect() call
-                // No separate uriPromise - the SDK handles everything
-                // =============================================
-                console.log('⏳ Calling provider.connect() - waiting for wallet approval...');
-                const accounts = await provider.connect();
+                // Start the connection process with DEBUG logging
+                console.log('⏳ Before provider.connect() - waiting for wallet approval');
+                const connectPromise = provider.connect();
+
+                // Wait for the URI to be emitted (so we can open the wallet)
+                await uriPromise;
+                console.log('📱 URI emitted, wallet should now be opening');
+
+                // Now wait for the actual connection to complete
+                console.log('⏳ Waiting for provider.connect() to resolve...');
+                const accounts = await connectPromise;
                 console.log('✅ provider.connect() resolved with accounts:', accounts);
 
                 if (accounts && accounts.length > 0) {
                     const address = accounts[0];
+                    console.log('👤 Connected wallet address:', address);
                     const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
                     const sameTypeExists = connectedWallets.some(w => w.type === walletType);
                     
@@ -6161,11 +6204,14 @@
                     
                     showNotification('success', 'Wallet Connected', 
                         `Successfully connected ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet.`);
+                } else {
+                    console.warn('provider.connect() resolved but no accounts returned');
                 }
 
             } catch (error) {
-                console.error('Wallet connection error:', error);
+                console.error('❌ Wallet connection error:', error);
                 
+                // Provide user-friendly error messages
                 let errorMessage = error.message || 'Failed to connect wallet. Please try again.';
                 if (errorMessage.includes('user rejected')) {
                     errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
@@ -6212,6 +6258,7 @@
             document.getElementById('deposit-asset-logo').src = logoUrl;
             updateDepositNetwork();
             updateFiatEstimate();
+            // Clear any previously shown address
             hideDepositAddress();
         }
 
@@ -6369,6 +6416,7 @@
             currentDepositAddress = address;
             currentDepositAsset = asset;
             
+            // Main deposit address display
             const container = document.getElementById('deposit-address-container');
             const addressText = document.getElementById('deposit-address-text');
             if (container && addressText) {
@@ -6376,8 +6424,10 @@
                 container.classList.add('visible');
             }
             
+            // Generate QR Code
             generateDepositQR(address);
             
+            // Reset QR visibility
             depositQRVisible = false;
             const qrSection = document.getElementById('deposit-qr-section');
             if (qrSection) qrSection.style.display = 'none';
@@ -6424,6 +6474,7 @@
             depositQRVisible = !depositQRVisible;
             qrSection.style.display = depositQRVisible ? 'block' : 'none';
             
+            // Update button text
             const btn = document.getElementById('qr-toggle-btn');
             if (btn) {
                 btn.innerHTML = depositQRVisible ? '<i class="fas fa-times"></i> Close' : '<i class="fas fa-qrcode"></i> QR';
@@ -6799,6 +6850,7 @@
                             console.log(`Gas estimate: ${gasEstimate.toString()}`);
                         } catch (gasError) {
                             console.error('Gas estimation failed:', gasError);
+                            // Don't block the transaction, just warn
                             showNotification('warning', 'Gas Estimation Warning', 
                                 'Gas estimation failed, but you can still try the transaction.');
                         }
@@ -7001,6 +7053,7 @@
             } catch (error) {
                 console.error('Deposit error:', error);
                 
+                // Provide more helpful error messages
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
                 
                 if (errorMessage.includes('insufficient funds')) {
@@ -8165,12 +8218,14 @@
             socket.on('price_update', (prices) => {
                 console.log('📊 [WebSocket] Real-time price update received (updates only)');
                 
+                // Update real-time prices
                 for (const [asset, data] of Object.entries(prices)) {
                     if (data.price && data.price > 0) {
                         realTimePrices[asset] = data.price;
                     }
                 }
                 
+                // Update asset prices
                 for (const [assetSymbol, priceData] of Object.entries(prices)) {
                     const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
                     if (assetIndex !== -1) {
@@ -8189,12 +8244,14 @@
                     }
                 }
                 
+                // Update deposit rate info if deposit section is visible and has amount
                 const depositSelect = document.getElementById('deposit-asset-select');
                 const modalSelect = document.getElementById('deposit-modal-asset-select');
                 const depositAmount = document.getElementById('deposit-amount-input');
                 const modalAmount = document.getElementById('deposit-modal-amount-input');
                 
                 if (depositSelect && parseFloat(depositAmount?.value || 0) > 0) {
+                    // Use REST API for primary price, but update the display
                     updateDepositRateInfo(depositSelect.value);
                     updateFiatEstimate();
                 }
@@ -8277,15 +8334,18 @@
                 return;
             }
             
+            // Listen for price updates from WebSocket
             socket.on('price_update', (prices) => {
                 console.log('📊 [WebSocket] Real-time price update received');
                 
+                // Update real-time prices
                 for (const [asset, data] of Object.entries(prices)) {
                     if (data.price && data.price > 0) {
                         realTimePrices[asset] = data.price;
                     }
                 }
                 
+                // Update any visible price displays
                 const depositSelect = document.getElementById('deposit-asset-select');
                 const modalSelect = document.getElementById('deposit-modal-asset-select');
                 const depositAmount = document.getElementById('deposit-amount-input');
@@ -8971,7 +9031,12 @@
                 initMobileMenu();
                 initHeaderScrollEffect();
                 initializeEIP6963();
-                silentlyInitWalletConnect();
+                
+                // Initialize WalletConnect with debug logging
+                console.log('🔍 [DEBUG] Initializing WalletConnect...');
+                const provider = await silentlyInitWalletConnect();
+                console.log('🔍 [DEBUG] Provider after init:', provider ? '✅ Provider exists' : '❌ Provider is null');
+                
                 await loadBalancesFromRest();
                 await loadAssetBalancesFromRest();
                 await loadLinkedWallets();
@@ -9112,6 +9177,8 @@
         console.log('💳 Supported assets:', Object.keys(assetNetworkMap).join(', '));
         console.log('📊 Primary price source: REST API (WebSocket for real-time updates only)');
         console.log('🔐 WalletConnect Project ID: 3f054c15e97b05dda5a4dcfd652bc753');
+        console.log('🔍 [DEBUG] WalletConnect event listeners have been added for connect, disconnect, session_event, session_update, session_delete');
+        console.log('🔍 [DEBUG] provider.connect() is now wrapped with BEFORE/AFTER console logs for tracing');
     </script>
 </body>
 </html>
