@@ -6019,7 +6019,10 @@
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
-       async function connectSelectedWallet() {
+
+
+
+async function connectSelectedWallet() {
     const dropdown = document.getElementById('wallet-dropdown');
     const walletType = dropdown.value;
     const connectBtn = document.getElementById('web3-connect-btn');
@@ -6094,115 +6097,160 @@
         }
 
         // =============================================
-        // MOBILE FLOW: WalletConnect with deep link
+        // MOBILE FLOW: WalletConnect 
         // =============================================
         console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
+        
+        // =============================================
+        // CRITICAL FIX: First, clean up ANY existing session
+        // =============================================
+        try {
+            // Check localStorage for any stale WC sessions
+            const wcKeys = Object.keys(localStorage).filter(k => k.includes('wc@'));
+            console.log('🧹 Found stale WC keys:', wcKeys);
+            wcKeys.forEach(key => localStorage.removeItem(key));
+            
+            // Also try to disconnect if provider exists
+            if (universalWalletProvider && universalWalletProvider.session) {
+                try {
+                    await universalWalletProvider.disconnect();
+                    console.log('✅ Disconnected existing provider session');
+                } catch (e) { console.warn('Disconnect error (ignored):', e); }
+            }
+        } catch (cleanupErr) {
+            console.warn('Cleanup error (ignored):', cleanupErr);
+        }
+
+        // Force re-initialize the provider fresh
+        universalWalletProvider = null;
+        walletConnectInitialized = false;
+        
         const provider = await silentlyInitWalletConnect();
         if (!provider) {
             throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
         }
 
         // =============================================
-        // CRITICAL FIX: Clean up stale session BEFORE connect
+        // CRITICAL FIX: Use a different approach - 
+        // Get URI, show it, but don't use location.href
+        // Let user manually open the link
         // =============================================
-        console.log('🔄 Cleaning up any stale WalletConnect session...');
-        try {
-            // Check if there's an existing session and disconnect it
-            if (provider.session) {
-                console.log('⚠️ Found existing session, disconnecting first...');
-                await provider.disconnect();
-                console.log('✅ Stale session disconnected successfully');
-            }
-        } catch (cleanupErr) {
-            console.warn('Cleanup error (ignored):', cleanupErr);
-        }
-
-        // Set up a promise that resolves when the URI is emitted
-        let deepLinkOpened = false;
+        let uriReceived = false;
+        let connectionResolved = false;
+        
         const uriPromise = new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
-                reject(new Error('Connection timeout - please try again and approve in your wallet'));
-            }, 60000);
+                if (!uriReceived) {
+                    reject(new Error('Connection timeout - wallet not responding'));
+                }
+            }, 30000);
 
-            // =============================================
-            // CRITICAL FIX: Use once() and capture URI
-            // =============================================
+            // Listen for display_uri
             provider.once("display_uri", (uri) => {
                 clearTimeout(timeout);
+                uriReceived = true;
                 activeWcUri = uri;
-                console.log('📱 WalletConnect URI emitted:', uri.substring(0, 50) + '...');
+                console.log('📱 WalletConnect URI received');
                 
-                // Build the correct deep link for the selected wallet
-                const deepLink = openDeepLink(walletType, uri);
-                console.log(`🚀 Opening wallet with deep link: ${deepLink}`);
-                
-                // Show status UI with clear instructions
+                // =============================================
+                // CRITICAL FIX: Show the QR/URI to the user
+                // Let them copy or manually open
+                // =============================================
                 if (wcStatus) {
                     wcStatus.style.display = 'block';
                     wcStatus.innerHTML = `
                         <div class="wc-status-content">
-                            <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
-                                📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                            <p style="margin: 0 0 12px 0; color: var(--accent); font-weight: 600; font-size: 1.1rem;">
+                                📱 Please approve in your wallet
                             </p>
-                            <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-                                <button class="wc-open-btn" onclick="window.open('${deepLink}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
+                            <div style="background: var(--bg-base); padding: 16px; border-radius: 12px; margin-bottom: 16px; text-align: center; border: 1px solid var(--border);">
+                                <div style="margin: 0 auto; max-width: 200px;" id="wc-mobile-qr-container"></div>
+                                <p style="font-size: 0.7rem; color: var(--text-muted); margin-top: 8px;">Scan with your wallet app</p>
+                            </div>
+                            <div style="background: var(--bg-base); padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--border);">
+                                <p style="font-size: 0.6rem; color: var(--text-muted); margin: 0 0 4px 0;">Or copy this URI:</p>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <code style="font-size: 8px; word-break: break-all; flex: 1; color: var(--text-secondary); background: var(--bg-hover); padding: 6px; border-radius: 4px;">${uri}</code>
+                                    <button onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                                <button onclick="window.location.href='${openDeepLink(walletType, uri)}'" style="flex: 1; min-width: 120px; padding: 12px 16px; border: none; border-radius: 12px; font-weight: 700; cursor: pointer; background: var(--accent); color: #000; font-size: 0.95rem;">
                                     🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
                                 </button>
-                                <button class="wc-install-btn" onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff;">
-                                    📥 Install Wallet
+                                <button onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 120px; padding: 12px 16px; border: none; border-radius: 12px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff; font-size: 0.95rem;">
+                                    📥 Install
                                 </button>
                             </div>
-                            <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
-                                <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI (if wallet doesn't open):</p>
-                                <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
-                                    <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
-                                    <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
-                                </div>
+                            <div style="margin-top: 12px; padding: 10px; background: rgba(247, 166, 0, 0.08); border-radius: 8px; border-left: 3px solid var(--accent);">
+                                <p style="font-size: 0.7rem; color: var(--text-secondary); margin: 0;">
+                                    <i class="fas fa-info-circle" style="color: var(--accent);"></i> 
+                                    After approving in your wallet, the page will automatically update.
+                                </p>
                             </div>
                         </div>
                     `;
+                    
+                    // Generate QR code
+                    try {
+                        const qrContainer = document.getElementById('wc-mobile-qr-container');
+                        if (qrContainer && typeof QRCode !== 'undefined') {
+                            qrContainer.innerHTML = '';
+                            new QRCode(qrContainer, {
+                                text: uri,
+                                width: 180,
+                                height: 180,
+                                colorDark: '#FFFFFF',
+                                colorLight: '#0B0E11',
+                                correctLevel: QRCode.CorrectLevel.H
+                            });
+                        }
+                    } catch (qrErr) {
+                        console.warn('QR generation failed:', qrErr);
+                    }
                 }
 
-                // =============================================
-                // CRITICAL FIX: Use window.open() instead of location.href
-                // This keeps the browser tab active in the background
-                // =============================================
-                deepLinkOpened = true;
-                console.log('📱 Opening wallet via window.open() to keep browser tab active');
-                // Use window.open with _blank to keep the page active
-                window.open(deepLink, '_blank');
-                
                 resolve(uri);
             });
         });
 
-        // Start the connection process
-        console.log('⏳ Before provider.connect() - waiting for wallet approval');
+        // =============================================
+        // CRITICAL FIX: Don't await connect() immediately
+        // Let the user interact with the UI first
+        // =============================================
+        console.log('⏳ Starting connection...');
         
-        // =============================================
-        // CRITICAL FIX: Wrap connect in a promise with timeout
-        // =============================================
-        const connectPromise = new Promise(async (resolve, reject) => {
-            try {
-                const result = await provider.connect();
-                resolve(result);
-            } catch (err) {
-                reject(err);
-            }
+        // Start the connect process but don't block
+        const connectPromise = provider.connect().then(accounts => {
+            connectionResolved = true;
+            console.log('✅ Connection resolved with accounts:', accounts);
+            return accounts;
+        }).catch(err => {
+            console.error('❌ Connect error:', err);
+            throw err;
         });
 
-        // Wait for the URI to be emitted
+        // Wait for URI to be emitted
         await uriPromise;
-        console.log('📱 URI emitted, wallet should now be opening');
+        console.log('📱 URI displayed to user');
 
-        // Now wait for the actual connection to complete
-        console.log('⏳ Waiting for provider.connect() to resolve...');
-        const accounts = await connectPromise;
-        console.log('✅ provider.connect() resolved with accounts:', accounts);
+        // =============================================
+        // CRITICAL FIX: Wait for connection with a longer timeout
+        // Mobile users need time to switch to wallet and approve
+        // =============================================
+        console.log('⏳ Waiting for user to approve in wallet...');
+        
+        const accounts = await Promise.race([
+            connectPromise,
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Connection timed out. Please approve in your wallet.')), 120000)
+            )
+        ]);
 
         if (accounts && accounts.length > 0) {
             const address = accounts[0];
             console.log('👤 Connected wallet address:', address);
+            
             const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
             const sameTypeExists = connectedWallets.some(w => w.type === walletType);
             
@@ -6235,7 +6283,7 @@
             showNotification('success', 'Wallet Connected', 
                 `Successfully connected ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet.`);
         } else {
-            console.warn('provider.connect() resolved but no accounts returned');
+            console.warn('No accounts returned');
         }
 
     } catch (error) {
@@ -6246,12 +6294,12 @@
             errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
         } else if (errorMessage.includes('session') || errorMessage.includes('expired') || errorMessage.includes('proposal')) {
             errorMessage = 'Connection session expired. Please try again and approve the connection in your wallet.';
-        } else if (errorMessage.includes('network')) {
-            errorMessage = 'Network error. Please check your connection and try again.';
         } else if (errorMessage.includes('timeout')) {
             errorMessage = 'Connection timed out. Please try again and ensure you approve the connection in your wallet.';
+        } else if (errorMessage.includes('network')) {
+            errorMessage = 'Network error. Please check your connection and try again.';
         } else if (errorMessage.includes('already connected')) {
-            errorMessage = 'This wallet is already connected to another session. Please disconnect and try again.';
+            errorMessage = 'This wallet is already connected. Please disconnect and try again.';
         }
         
         errorDiv.textContent = errorMessage;
@@ -6266,6 +6314,14 @@
         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
     }
 }
+
+
+
+
+
+
+
+        
         // =============================================
         // WALLET LOGO UPDATES
         // =============================================
