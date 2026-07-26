@@ -5878,40 +5878,17 @@
         console.log("window.WalletConnectProvider:", window.WalletConnectProvider);
 
         // =============================================
-        // WALLETCONNECT INIT - FIXED: No provider reuse
+        // WALLETCONNECT INIT - WITH DEBUG LOGGING
         // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
-            // =============================================
-            // FIX #1: Stop reusing providers - always destroy existing
-            // =============================================
             if (universalWalletProvider) {
-                console.log('⚠️ [WC FIX] Existing provider detected - destroying before creating new');
-                try {
-                    await universalWalletProvider.disconnect();
-                } catch (e) { /* ignore */ }
-                try {
-                    universalWalletProvider.removeAllListeners();
-                } catch (e) { /* ignore */ }
-                universalWalletProvider = null;
-                walletConnectInitialized = false;
-                signClient = null;
+                console.log('🔄 WalletConnect Provider already initialized, reusing');
+                return universalWalletProvider;
             }
-
-            // =============================================
-            // FIX #2: Clean up stale pairings
-            // =============================================
-            try {
-                if (universalWalletProvider?.client?.core?.pairing) {
-                    console.log('🧹 [WC FIX] Cleaning up stale pairings');
-                    await universalWalletProvider.client.core.pairing.cleanup();
-                }
-            } catch (e) { console.warn('Pairing cleanup failed:', e); }
-
             if (attempt > MAX_WALLETCONNECT_RETRIES) {
                 console.error('❌ WalletConnect SDK failed to load after maximum retries');
                 return null;
             }
-
             try {
                 const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
                 
@@ -5921,13 +5898,13 @@
                     return await silentlyInitWalletConnect(attempt + 1);
                 }
                 
-                console.log('🔄 [WC FIX] Creating brand new WalletConnect Provider...');
+                console.log('🔄 Initializing WalletConnect Provider...');
                 universalWalletProvider = await ProviderClass.init({
                     projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                     showQrModal: false,
                     chains: [1],
                     methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction"],
-                    events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update", "session_delete", "session_expire"],
+                    events: ["accountsChanged", "chainChanged", "disconnect"],
                     metadata: {
                         name: 'BitHash Capital',
                         description: 'Digital Asset Platform',
@@ -5943,53 +5920,33 @@
                 walletConnectInitialized = true;
                 
                 // =============================================
-                // FIX #3: Register session event listeners ONCE
+                // ADD DEBUG EVENT LISTENERS - FIX START
                 // =============================================
-                console.log('🔗 [WC FIX] Registering session lifecycle listeners');
-                
-                // Remove any existing listeners first
-                try {
-                    universalWalletProvider.removeAllListeners("display_uri");
-                    universalWalletProvider.removeAllListeners("connect");
-                    universalWalletProvider.removeAllListeners("disconnect");
-                    universalWalletProvider.removeAllListeners("session_event");
-                    universalWalletProvider.removeAllListeners("session_update");
-                    universalWalletProvider.removeAllListeners("session_delete");
-                    universalWalletProvider.removeAllListeners("session_expire");
-                } catch (e) { /* ignore */ }
-
-                universalWalletProvider.on("display_uri", (uri) => {
-                    console.log("📱 [WC FIX] display_uri emitted:", uri.substring(0, 50) + '...');
-                });
-
+                // These listeners will help trace where the handshake stops
                 universalWalletProvider.on("connect", (data) => {
-                    console.log("🔗 [WC FIX] CONNECT event fired:", data);
+                    console.log("🔗 WalletConnect CONNECT event fired:", data);
                 });
 
                 universalWalletProvider.on("disconnect", (data) => {
-                    console.log("❌ [WC FIX] DISCONNECT event fired - destroying provider");
-                    destroyWalletConnectProvider();
+                    console.log("❌ WalletConnect DISCONNECT event fired:", data);
                 });
 
                 universalWalletProvider.on("session_event", (data) => {
-                    console.log("📡 [WC FIX] SESSION_EVENT event fired");
+                    console.log("📡 WalletConnect SESSION_EVENT event fired:", data);
                 });
 
                 universalWalletProvider.on("session_update", (data) => {
-                    console.log("🔄 [WC FIX] SESSION_UPDATE event fired");
+                    console.log("🔄 WalletConnect SESSION_UPDATE event fired:", data);
                 });
 
                 universalWalletProvider.on("session_delete", (data) => {
-                    console.log("🗑️ [WC FIX] SESSION_DELETE event fired - destroying provider");
-                    destroyWalletConnectProvider();
+                    console.log("🗑️ WalletConnect SESSION_DELETE event fired:", data);
                 });
-
-                universalWalletProvider.on("session_expire", (data) => {
-                    console.log("⏰ [WC FIX] SESSION_EXPIRE event fired - destroying provider");
-                    destroyWalletConnectProvider();
-                });
+                // =============================================
+                // ADD DEBUG EVENT LISTENERS - FIX END
+                // =============================================
                 
-                console.log('✅ [WC FIX] WalletConnect Provider initialized with fresh instance');
+                console.log('✅ WalletConnect Provider initialized successfully');
                 return universalWalletProvider;
             } catch (err) {
                 console.error('❌ Provider init error:', err);
@@ -5999,24 +5956,6 @@
                 }
                 return null;
             }
-        }
-
-        // =============================================
-        // FIX #4: Destroy provider on any failure
-        // =============================================
-        function destroyWalletConnectProvider() {
-            console.log('🧹 [WC FIX] Destroying WalletConnect provider and cleaning up');
-            try {
-                if (universalWalletProvider) {
-                    universalWalletProvider.disconnect().catch(() => {});
-                    universalWalletProvider.removeAllListeners();
-                }
-            } catch (e) { /* ignore */ }
-            universalWalletProvider = null;
-            signClient = null;
-            walletConnectInitialized = false;
-            activeWcUri = null;
-            console.log('✅ [WC FIX] Provider destroyed');
         }
 
         // =============================================
@@ -6080,271 +6019,239 @@
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
-        // =============================================
-        // connectSelectedWallet - FIXED VERSION
-        // =============================================
         async function connectSelectedWallet() {
-            const dropdown = document.getElementById('wallet-dropdown');
-            const walletType = dropdown.value;
-            const connectBtn = document.getElementById('web3-connect-btn');
-            const statusDiv = document.getElementById('web3-status-indicator');
-            const errorDiv = document.getElementById('web3-error-msg');
-            const wcStatus = document.getElementById('wc-mobile-status');
+    const dropdown = document.getElementById('wallet-dropdown');
+    const walletType = dropdown.value;
+    const connectBtn = document.getElementById('web3-connect-btn');
+    const statusDiv = document.getElementById('web3-status-indicator');
+    const errorDiv = document.getElementById('web3-error-msg');
+    const wcStatus = document.getElementById('wc-mobile-status');
 
-            if (isConnecting) return;
+    if (isConnecting) return;
 
-            isConnecting = true;
-            connectBtn.disabled = true;
-            connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
-            errorDiv.style.display = 'none';
-            if (wcStatus) wcStatus.style.display = 'none';
+    isConnecting = true;
+    connectBtn.disabled = true;
+    connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+    errorDiv.style.display = 'none';
+    if (wcStatus) wcStatus.style.display = 'none';
 
-            try {
-                // Desktop Flow: EIP-6963 / Injected Provider
-                if (!isMobileDevice()) {
-                    const targetRdns = {
-                        'metamask': 'io.metamask',
-                        'trust': 'com.trustwallet.app',
-                        'phantom': 'app.phantom',
-                        'rainbow': 'me.rainbow'
-                    }[walletType] || 'io.metamask';
+    try {
+        // Desktop Flow: EIP-6963 / Injected Provider
+        if (!isMobileDevice()) {
+            const targetRdns = {
+                'metamask': 'io.metamask',
+                'trust': 'com.trustwallet.app',
+                'phantom': 'app.phantom',
+                'rainbow': 'me.rainbow'
+            }[walletType] || 'io.metamask';
 
-                    const injectedTarget = getProviderByRDNS(targetRdns);
-                    if (injectedTarget) {
-                        try {
-                            console.log('🖥️ Desktop flow: requesting accounts from', walletType);
-                            const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
-                            console.log('👤 Accounts received:', accounts);
-                            if (accounts && accounts.length > 0) {
-                                const address = accounts[0];
-                                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                                const sameTypeExists = connectedWallets.some(w => w.type === walletType);
-                                if (walletExists) {
-                                    errorDiv.textContent = 'This wallet address is already connected to your account.';
-                                    errorDiv.style.display = 'block';
-                                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
-                                    isConnecting = false;
-                                    connectBtn.disabled = false;
-                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                    return;
-                                }
-                                if (sameTypeExists && walletType !== 'rainbow') {
-                                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected. Please use a different provider.`;
-                                    errorDiv.style.display = 'block';
-                                    showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
-                                    isConnecting = false;
-                                    connectBtn.disabled = false;
-                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                    return;
-                                }
-                                await linkWalletToBackend(address, walletType, '0x1');
-                                web3Provider = injectedTarget.provider;
-                                return;
-                            }
-                        } catch (err) {
-                            console.error("Desktop provider error:", err);
-                            if (err.code === 4001) {
-                                errorDiv.textContent = 'Connection rejected by user.';
-                                errorDiv.style.display = 'block';
-                                showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
-                                isConnecting = false;
-                                connectBtn.disabled = false;
-                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                return;
-                            }
-                            throw err;
-                        }
-                    }
-                }
-
-                // =============================================
-                // MOBILE FLOW: WalletConnect with deep link - FIXED
-                // =============================================
-                console.log('📱 [WC FIX] Initializing fresh WalletConnect provider for mobile');
-                
-                // =============================================
-                // FIX #5: Ensure provider is destroyed before creating new one
-                // =============================================
-                destroyWalletConnectProvider();
-                
-                const provider = await silentlyInitWalletConnect();
-                if (!provider) {
-                    throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
-                }
-
-                // =============================================
-                // FIX #6: Register display_uri listener ONLY ONCE
-                // =============================================
-                let deepLinkOpened = false;
-                let uriResolved = false;
-
-                // Remove any existing display_uri listeners to prevent duplication
+            const injectedTarget = getProviderByRDNS(targetRdns);
+            if (injectedTarget) {
                 try {
-                    provider.removeAllListeners("display_uri");
-                } catch (e) { /* ignore */ }
-
-                const uriPromise = new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => {
-                        if (!uriResolved) {
-                            reject(new Error('Connection timeout - please try again and approve in your wallet'));
+                    console.log('🖥️ Desktop flow: requesting accounts from', walletType);
+                    const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                    console.log('👤 Accounts received:', accounts);
+                    if (accounts && accounts.length > 0) {
+                        const address = accounts[0];
+                        const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+                        const sameTypeExists = connectedWallets.some(w => w.type === walletType);
+                        if (walletExists) {
+                            errorDiv.textContent = 'This wallet address is already connected to your account.';
+                            errorDiv.style.display = 'block';
+                            showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
+                            isConnecting = false;
+                            connectBtn.disabled = false;
+                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                            return;
                         }
-                    }, 60000);
-
-                    provider.once("display_uri", (uri) => {
-                        uriResolved = true;
-                        clearTimeout(timeout);
-                        activeWcUri = uri;
-                        console.log('📱 [WC FIX] WalletConnect URI emitted:', uri.substring(0, 50) + '...');
-                        
-                        // Build the correct deep link for the selected wallet
-                        const deepLink = openDeepLink(walletType, uri);
-                        console.log(`🚀 [WC FIX] Opening wallet with deep link: ${deepLink}`);
-                        
-                        // Show status UI with clear instructions
-                        if (wcStatus) {
-                            wcStatus.style.display = 'block';
-                            wcStatus.innerHTML = `
-                                <div class="wc-status-content">
-                                    <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
-                                        📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
-                                    </p>
-                                    <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-                                        <button class="wc-open-btn" onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
-                                            🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
-                                        </button>
-                                        <button class="wc-install-btn" onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff;">
-                                            📥 Install Wallet
-                                        </button>
-                                    </div>
-                                    <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
-                                        <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI (if wallet doesn't open):</p>
-                                        <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
-                                            <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
-                                            <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
+                        if (sameTypeExists && walletType !== 'rainbow') {
+                            errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected. Please use a different provider.`;
+                            errorDiv.style.display = 'block';
+                            showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+                            isConnecting = false;
+                            connectBtn.disabled = false;
+                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                            return;
                         }
-
-                        deepLinkOpened = true;
-                        console.log('📱 [WC FIX] Opening wallet via window.location.href');
-                        window.location.href = deepLink;
-                        
-                        resolve(uri);
-                    });
-                });
-
-                // =============================================
-                // FIX #7: Connect only after URI is displayed
-                // =============================================
-                console.log('⏳ [WC FIX] Waiting for display_uri event...');
-                await uriPromise;
-                console.log('✅ [WC FIX] display_uri received, calling provider.connect()');
-
-                // =============================================
-                // FIX #8: Explicitly call connect() ONCE
-                // =============================================
-                console.log('🔄 [WC FIX] Calling provider.connect()...');
-                await provider.connect();
-                console.log('✅ [WC FIX] provider.connect() resolved');
-
-                // =============================================
-                // FIX #9: Get accounts from provider.accounts
-                // =============================================
-                console.log("🔍 [WC FIX] provider.accounts:", provider.accounts);
-                console.log("🔍 [WC FIX] provider.chainId:", provider.chainId);
-                
-                let accounts = provider.accounts;
-                
-                // If empty, explicitly request them
-                if (!accounts || accounts.length === 0) {
-                    console.log("⚠️ [WC FIX] provider.accounts is empty. Explicitly requesting accounts via eth_requestAccounts...");
-                    accounts = await provider.request({
-                        method: "eth_requestAccounts"
-                    });
-                    console.log("✅ [WC FIX] eth_requestAccounts returned:", accounts);
+                        await linkWalletToBackend(address, walletType, '0x1');
+                        web3Provider = injectedTarget.provider;
+                        return;
+                    }
+                } catch (err) {
+                    console.error("Desktop provider error:", err);
+                    if (err.code === 4001) {
+                        errorDiv.textContent = 'Connection rejected by user.';
+                        errorDiv.style.display = 'block';
+                        showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
+                        isConnecting = false;
+                        connectBtn.disabled = false;
+                        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                        return;
+                    }
+                    throw err;
                 }
-                
-                if (!accounts || accounts.length === 0) {
-                    console.error("❌ [WC FIX] No accounts found after connect and eth_requestAccounts");
-                    throw new Error("Wallet connected but no accounts returned. Please approve in wallet.");
-                }
-                
-                const address = accounts[0];
-                console.log("👤 [WC FIX] Connected wallet address:", address);
-
-                // Check if wallet already connected
-                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                const sameTypeExists = connectedWallets.some(w => w.type === walletType);
-                
-                if (walletExists) {
-                    errorDiv.textContent = 'This wallet address is already connected to your account.';
-                    errorDiv.style.display = 'block';
-                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
-                    isConnecting = false;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                    if (wcStatus) wcStatus.style.display = 'none';
-                    // Clean up provider
-                    destroyWalletConnectProvider();
-                    return;
-                }
-                
-                if (sameTypeExists && walletType !== 'rainbow') {
-                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-                    errorDiv.style.display = 'block';
-                    showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
-                    isConnecting = false;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                    if (wcStatus) wcStatus.style.display = 'none';
-                    destroyWalletConnectProvider();
-                    return;
-                }
-                
-                await linkWalletToBackend(address, walletType, '0x1');
-                web3Provider = provider;
-                if (wcStatus) wcStatus.style.display = 'none';
-                
-                showNotification('success', 'Wallet Connected', 
-                    `Successfully connected ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet.`);
-
-            } catch (error) {
-                console.error('❌ [WC FIX] Wallet connection error:', error);
-                
-                // =============================================
-                // FIX #10: Destroy provider on ANY error
-                // =============================================
-                destroyWalletConnectProvider();
-                
-                // Provide user-friendly error messages
-                let errorMessage = error.message || 'Failed to connect wallet. Please try again.';
-                if (errorMessage.includes('user rejected')) {
-                    errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
-                } else if (errorMessage.includes('session') || errorMessage.includes('expired') || errorMessage.includes('proposal')) {
-                    errorMessage = 'Connection session expired. Please try again and approve the connection in your wallet.';
-                } else if (errorMessage.includes('network')) {
-                    errorMessage = 'Network error. Please check your connection and try again.';
-                } else if (errorMessage.includes('timeout')) {
-                    errorMessage = 'Connection timed out. Please try again and ensure you approve the connection in your wallet.';
-                } else if (errorMessage.includes('already connected')) {
-                    errorMessage = 'This wallet is already connected to another session. Please disconnect and try again.';
-                }
-                
-                errorDiv.textContent = errorMessage;
-                errorDiv.style.display = 'block';
-                showNotification('error', 'Connection Failed', errorMessage);
-                if (wcStatus) wcStatus.style.display = 'none';
-            }
-
-            isConnecting = false;
-            connectBtn.disabled = false;
-            if (!web3WalletAddress) {
-                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
             }
         }
 
+        // =============================================
+        // MOBILE FLOW: WalletConnect with deep link
+        // =============================================
+        console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
+        const provider = await silentlyInitWalletConnect();
+        if (!provider) {
+            throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
+        }
+
+        // Set up a promise that resolves when the URI is emitted
+        let deepLinkOpened = false;
+        const uriPromise = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Connection timeout - please try again and approve in your wallet'));
+            }, 60000);
+
+            provider.once("display_uri", (uri) => {
+                clearTimeout(timeout);
+                activeWcUri = uri;
+                console.log('📱 WalletConnect URI emitted:', uri.substring(0, 50) + '...');
+                
+                // Build the correct deep link for the selected wallet
+                const deepLink = openDeepLink(walletType, uri);
+                console.log(`🚀 Opening wallet with deep link: ${deepLink}`);
+                
+                // Show status UI with clear instructions
+                if (wcStatus) {
+                    wcStatus.style.display = 'block';
+                    wcStatus.innerHTML = `
+                        <div class="wc-status-content">
+                            <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
+                                📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                            </p>
+                            <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+                                <button class="wc-open-btn" onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
+                                    🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                                </button>
+                                <button class="wc-install-btn" onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff;">
+                                    📥 Install Wallet
+                                </button>
+                            </div>
+                            <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
+                                <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI (if wallet doesn't open):</p>
+                                <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
+                                    <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
+                                    <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                // CRITICAL: Actually open the wallet app using the deep link
+                deepLinkOpened = true;
+                console.log('📱 Opening wallet via window.location.href');
+                window.location.href = deepLink;
+                
+                resolve(uri);
+            });
+        });
+
+        // =============================================
+        // START: THE EXACT FIX - ONLY THIS SECTION
+        // =============================================
+        
+        console.log('⏳ Before provider.connect() - waiting for wallet approval');
+        await provider.connect();
+        
+        // ===== FIX: Don't expect accounts from connect() - they come from provider.accounts =====
+        console.log("✅ provider.connect() resolved");
+        console.log("🔍 provider.accounts:", provider.accounts);
+        console.log("🔍 provider.chainId:", provider.chainId);
+        
+        // Get accounts from provider.accounts first
+        let accounts = provider.accounts;
+        
+        // If empty, explicitly request them
+        if (!accounts || accounts.length === 0) {
+            console.log("⚠️ provider.accounts is empty. Explicitly requesting accounts via eth_requestAccounts...");
+            accounts = await provider.request({
+                method: "eth_requestAccounts"
+            });
+            console.log("✅ eth_requestAccounts returned:", accounts);
+        }
+        
+        if (!accounts || accounts.length === 0) {
+            console.error("❌ No accounts found after connect and eth_requestAccounts");
+            throw new Error("Wallet connected but no accounts returned. Please approve in wallet.");
+        }
+        
+        const address = accounts[0];
+        console.log("👤 Connected wallet address:", address);
+        
+        // =============================================
+        // END OF FIX
+        // =============================================
+
+        // Check if wallet already connected
+        const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+        const sameTypeExists = connectedWallets.some(w => w.type === walletType);
+        
+        if (walletExists) {
+            errorDiv.textContent = 'This wallet address is already connected to your account.';
+            errorDiv.style.display = 'block';
+            showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
+            isConnecting = false;
+            connectBtn.disabled = false;
+            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+            if (wcStatus) wcStatus.style.display = 'none';
+            return;
+        }
+        
+        if (sameTypeExists && walletType !== 'rainbow') {
+            errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+            errorDiv.style.display = 'block';
+            showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+            isConnecting = false;
+            connectBtn.disabled = false;
+            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+            if (wcStatus) wcStatus.style.display = 'none';
+            return;
+        }
+        
+        await linkWalletToBackend(address, walletType, '0x1');
+        web3Provider = provider;
+        if (wcStatus) wcStatus.style.display = 'none';
+        
+        showNotification('success', 'Wallet Connected', 
+            `Successfully connected ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet.`);
+
+    } catch (error) {
+        console.error('❌ Wallet connection error:', error);
+        
+        // Provide user-friendly error messages
+        let errorMessage = error.message || 'Failed to connect wallet. Please try again.';
+        if (errorMessage.includes('user rejected')) {
+            errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
+        } else if (errorMessage.includes('session') || errorMessage.includes('expired') || errorMessage.includes('proposal')) {
+            errorMessage = 'Connection session expired. Please try again and approve the connection in your wallet.';
+        } else if (errorMessage.includes('network')) {
+            errorMessage = 'Network error. Please check your connection and try again.';
+        } else if (errorMessage.includes('timeout')) {
+            errorMessage = 'Connection timed out. Please try again and ensure you approve the connection in your wallet.';
+        } else if (errorMessage.includes('already connected')) {
+            errorMessage = 'This wallet is already connected to another session. Please disconnect and try again.';
+        }
+        
+        errorDiv.textContent = errorMessage;
+        errorDiv.style.display = 'block';
+        showNotification('error', 'Connection Failed', errorMessage);
+        if (wcStatus) wcStatus.style.display = 'none';
+    }
+
+    isConnecting = false;
+    connectBtn.disabled = false;
+    if (!web3WalletAddress) {
+        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+    }
+}
         // =============================================
         // WALLET LOGO UPDATES
         // =============================================
