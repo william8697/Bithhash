@@ -6097,33 +6097,25 @@ async function connectSelectedWallet() {
         }
 
         // =============================================
-        // MOBILE FLOW: WalletConnect 
+        // MOBILE FLOW: WalletConnect
         // =============================================
         console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
         
         // =============================================
-        // CRITICAL FIX: First, clean up ANY existing session
+        // FIX 1: COMPLETELY RESET WalletConnect state
         // =============================================
-        try {
-            // Check localStorage for any stale WC sessions
-            const wcKeys = Object.keys(localStorage).filter(k => k.includes('wc@'));
-            console.log('🧹 Found stale WC keys:', wcKeys);
-            wcKeys.forEach(key => localStorage.removeItem(key));
-            
-            // Also try to disconnect if provider exists
-            if (universalWalletProvider && universalWalletProvider.session) {
-                try {
-                    await universalWalletProvider.disconnect();
-                    console.log('✅ Disconnected existing provider session');
-                } catch (e) { console.warn('Disconnect error (ignored):', e); }
-            }
-        } catch (cleanupErr) {
-            console.warn('Cleanup error (ignored):', cleanupErr);
-        }
-
-        // Force re-initialize the provider fresh
+        // Remove ALL WalletConnect localStorage data
+        const wcKeys = Object.keys(localStorage).filter(k => k.includes('wc@') || k.includes('WALLETCONNECT'));
+        console.log('🧹 Clearing stale WC keys:', wcKeys);
+        wcKeys.forEach(key => localStorage.removeItem(key));
+        
+        // Force reinitialize
         universalWalletProvider = null;
         walletConnectInitialized = false;
+        signClient = null;
+        
+        // Wait a moment for localStorage to clear
+        await new Promise(r => setTimeout(r, 500));
         
         const provider = await silentlyInitWalletConnect();
         if (!provider) {
@@ -6131,121 +6123,80 @@ async function connectSelectedWallet() {
         }
 
         // =============================================
-        // CRITICAL FIX: Use a different approach - 
-        // Get URI, show it, but don't use location.href
-        // Let user manually open the link
+        // FIX 2: Set up event listeners BEFORE connect
         // =============================================
-        let uriReceived = false;
-        let connectionResolved = false;
+        let connectionComplete = false;
+        let wcUri = null;
         
-        const uriPromise = new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                if (!uriReceived) {
-                    reject(new Error('Connection timeout - wallet not responding'));
-                }
-            }, 30000);
-
-            // Listen for display_uri
-            provider.once("display_uri", (uri) => {
-                clearTimeout(timeout);
-                uriReceived = true;
-                activeWcUri = uri;
-                console.log('📱 WalletConnect URI received');
-                
-                // =============================================
-                // CRITICAL FIX: Show the QR/URI to the user
-                // Let them copy or manually open
-                // =============================================
-                if (wcStatus) {
-                    wcStatus.style.display = 'block';
-                    wcStatus.innerHTML = `
-                        <div class="wc-status-content">
-                            <p style="margin: 0 0 12px 0; color: var(--accent); font-weight: 600; font-size: 1.1rem;">
-                                📱 Please approve in your wallet
-                            </p>
-                            <div style="background: var(--bg-base); padding: 16px; border-radius: 12px; margin-bottom: 16px; text-align: center; border: 1px solid var(--border);">
-                                <div style="margin: 0 auto; max-width: 200px;" id="wc-mobile-qr-container"></div>
-                                <p style="font-size: 0.7rem; color: var(--text-muted); margin-top: 8px;">Scan with your wallet app</p>
-                            </div>
-                            <div style="background: var(--bg-base); padding: 12px; border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--border);">
-                                <p style="font-size: 0.6rem; color: var(--text-muted); margin: 0 0 4px 0;">Or copy this URI:</p>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <code style="font-size: 8px; word-break: break-all; flex: 1; color: var(--text-secondary); background: var(--bg-hover); padding: 6px; border-radius: 4px;">${uri}</code>
-                                    <button onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
-                                </div>
-                            </div>
-                            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                                <button onclick="window.location.href='${openDeepLink(walletType, uri)}'" style="flex: 1; min-width: 120px; padding: 12px 16px; border: none; border-radius: 12px; font-weight: 700; cursor: pointer; background: var(--accent); color: #000; font-size: 0.95rem;">
-                                    🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
-                                </button>
-                                <button onclick="window.open('${getAppStoreUrl(walletType)}', '_blank')" style="flex: 1; min-width: 120px; padding: 12px 16px; border: none; border-radius: 12px; font-weight: 600; cursor: pointer; background: #10B981; color: #fff; font-size: 0.95rem;">
-                                    📥 Install
-                                </button>
-                            </div>
-                            <div style="margin-top: 12px; padding: 10px; background: rgba(247, 166, 0, 0.08); border-radius: 8px; border-left: 3px solid var(--accent);">
-                                <p style="font-size: 0.7rem; color: var(--text-secondary); margin: 0;">
-                                    <i class="fas fa-info-circle" style="color: var(--accent);"></i> 
-                                    After approving in your wallet, the page will automatically update.
-                                </p>
-                            </div>
+        // Listen for display_uri
+        provider.once("display_uri", (uri) => {
+            wcUri = uri;
+            console.log('📱 WalletConnect URI received');
+            
+            // Show the URI to the user with a deep link button
+            if (wcStatus) {
+                wcStatus.style.display = 'block';
+                const deepLink = openDeepLink(walletType, uri);
+                wcStatus.innerHTML = `
+                    <div class="wc-status-content">
+                        <p style="margin: 0 0 12px 0; color: var(--accent); font-weight: 600; font-size: 1.1rem;">
+                            📱 Please approve in your wallet
+                        </p>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;">
+                            <button onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 120px; padding: 14px 20px; border: none; border-radius: 12px; font-weight: 700; cursor: pointer; background: var(--accent); color: #000; font-size: 1rem;">
+                                🔗 Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                            </button>
+                            <button onclick="navigator.clipboard.writeText('${uri}')" style="flex: 1; min-width: 80px; padding: 14px 20px; border: 1px solid var(--border); border-radius: 12px; font-weight: 600; cursor: pointer; background: var(--bg-hover); color: var(--text-secondary); font-size: 1rem;">
+                                📋 Copy URI
+                            </button>
                         </div>
-                    `;
-                    
-                    // Generate QR code
-                    try {
-                        const qrContainer = document.getElementById('wc-mobile-qr-container');
-                        if (qrContainer && typeof QRCode !== 'undefined') {
-                            qrContainer.innerHTML = '';
-                            new QRCode(qrContainer, {
-                                text: uri,
-                                width: 180,
-                                height: 180,
-                                colorDark: '#FFFFFF',
-                                colorLight: '#0B0E11',
-                                correctLevel: QRCode.CorrectLevel.H
-                            });
-                        }
-                    } catch (qrErr) {
-                        console.warn('QR generation failed:', qrErr);
-                    }
-                }
-
-                resolve(uri);
-            });
+                        <div style="padding: 10px; background: rgba(247, 166, 0, 0.08); border-radius: 8px; border-left: 3px solid var(--accent);">
+                            <p style="font-size: 0.8rem; color: var(--text-secondary); margin: 0;">
+                                <i class="fas fa-info-circle" style="color: var(--accent);"></i> 
+                                After approving in your wallet, return to this page. It will auto-connect.
+                            </p>
+                        </div>
+                    </div>
+                `;
+            }
         });
 
         // =============================================
-        // CRITICAL FIX: Don't await connect() immediately
-        // Let the user interact with the UI first
+        // FIX 3: Create a clean connect promise with proper error handling
         // =============================================
-        console.log('⏳ Starting connection...');
+        console.log('⏳ Starting WalletConnect connection...');
         
-        // Start the connect process but don't block
-        const connectPromise = provider.connect().then(accounts => {
-            connectionResolved = true;
-            console.log('✅ Connection resolved with accounts:', accounts);
-            return accounts;
-        }).catch(err => {
-            console.error('❌ Connect error:', err);
-            throw err;
-        });
-
-        // Wait for URI to be emitted
-        await uriPromise;
-        console.log('📱 URI displayed to user');
+        // Start the connect process
+        const connectPromise = provider.connect();
+        
+        // Give it time to emit the URI
+        await new Promise(r => setTimeout(r, 3000));
+        
+        // If no URI was emitted, something went wrong
+        if (!wcUri) {
+            throw new Error('Failed to generate connection URI. Please try again.');
+        }
 
         // =============================================
-        // CRITICAL FIX: Wait for connection with a longer timeout
-        // Mobile users need time to switch to wallet and approve
+        // FIX 4: Wait for the connection to complete with a long timeout
         // =============================================
-        console.log('⏳ Waiting for user to approve in wallet...');
+        console.log('⏳ Waiting for wallet approval...');
         
-        const accounts = await Promise.race([
-            connectPromise,
-            new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Connection timed out. Please approve in your wallet.')), 120000)
-            )
-        ]);
+        let accounts;
+        try {
+            // Race the connect promise against a timeout
+            accounts = await Promise.race([
+                connectPromise,
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Connection timeout. Please approve in your wallet and try again.')), 90000)
+                )
+            ]);
+        } catch (timeoutErr) {
+            console.error('Connection timeout:', timeoutErr);
+            throw new Error('Connection timed out. Please make sure you approved the connection in your wallet.');
+        }
+
+        console.log('✅ Connection resolved with accounts:', accounts);
 
         if (accounts && accounts.length > 0) {
             const address = accounts[0];
@@ -6283,23 +6234,26 @@ async function connectSelectedWallet() {
             showNotification('success', 'Wallet Connected', 
                 `Successfully connected ${walletType.charAt(0).toUpperCase()+walletType.slice(1)} wallet.`);
         } else {
-            console.warn('No accounts returned');
+            console.warn('No accounts returned from connection');
+            throw new Error('No wallet accounts found. Please make sure you approved the connection.');
         }
 
     } catch (error) {
         console.error('❌ Wallet connection error:', error);
         
         let errorMessage = error.message || 'Failed to connect wallet. Please try again.';
+        
+        // Make error messages more helpful
         if (errorMessage.includes('user rejected')) {
             errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
-        } else if (errorMessage.includes('session') || errorMessage.includes('expired') || errorMessage.includes('proposal')) {
+        } else if (errorMessage.includes('session expired')) {
             errorMessage = 'Connection session expired. Please try again and approve the connection in your wallet.';
         } else if (errorMessage.includes('timeout')) {
-            errorMessage = 'Connection timed out. Please try again and ensure you approve the connection in your wallet.';
-        } else if (errorMessage.includes('network')) {
-            errorMessage = 'Network error. Please check your connection and try again.';
+            errorMessage = 'Connection timed out. Please try again and make sure you approve the connection in your wallet.';
         } else if (errorMessage.includes('already connected')) {
             errorMessage = 'This wallet is already connected. Please disconnect and try again.';
+        } else if (errorMessage.includes('proposal')) {
+            errorMessage = 'Connection proposal expired. Please try again with a fresh connection.';
         }
         
         errorDiv.textContent = errorMessage;
@@ -6314,8 +6268,6 @@ async function connectSelectedWallet() {
         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
     }
 }
-
-
 
 
 
