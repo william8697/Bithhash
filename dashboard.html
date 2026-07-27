@@ -5881,10 +5881,28 @@
         // WALLETCONNECT INIT - WITH DEBUG LOGGING
         // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
+            // =============================================
+            // FIX 1: Always create a fresh provider - don't reuse
+            // =============================================
+            // If there's an existing provider, destroy it first
             if (universalWalletProvider) {
-                console.log('🔄 WalletConnect Provider already initialized, reusing');
-                return universalWalletProvider;
+                console.log('🔄 Destroying stale WalletConnect provider before creating new one...');
+                try {
+                    // Try to disconnect any active sessions
+                    if (universalWalletProvider.disconnect) {
+                        await universalWalletProvider.disconnect().catch(() => {});
+                    }
+                    // Remove all listeners
+                    if (universalWalletProvider.removeAllListeners) {
+                        universalWalletProvider.removeAllListeners();
+                    }
+                } catch (e) {
+                    console.warn('Error cleaning up provider:', e);
+                }
+                universalWalletProvider = null;
+                walletConnectInitialized = false;
             }
+            
             if (attempt > MAX_WALLETCONNECT_RETRIES) {
                 console.error('❌ WalletConnect SDK failed to load after maximum retries');
                 return null;
@@ -5899,12 +5917,31 @@
                 }
                 
                 console.log('🔄 Initializing WalletConnect Provider...');
+                
+                // =============================================
+                // FIX 2: Use optionalNamespaces instead of deprecated chains/methods/events
+                // =============================================
                 universalWalletProvider = await ProviderClass.init({
                     projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                     showQrModal: false,
-                    chains: [1],
-                    methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction"],
-                    events: ["accountsChanged", "chainChanged", "disconnect"],
+                    optionalNamespaces: {
+                        eip155: {
+                            chains: ['eip155:1'],
+                            methods: [
+                                'eth_requestAccounts',
+                                'eth_sendTransaction',
+                                'personal_sign',
+                                'eth_signTypedData_v4',
+                                'eth_accounts',
+                                'eth_chainId',
+                                'eth_getBalance'
+                            ],
+                            events: [
+                                'accountsChanged',
+                                'chainChanged'
+                            ]
+                        }
+                    },
                     metadata: {
                         name: 'BitHash Capital',
                         description: 'Digital Asset Platform',
@@ -5922,7 +5959,6 @@
                 // =============================================
                 // ADD DEBUG EVENT LISTENERS - FIX START
                 // =============================================
-                // These listeners will help trace where the handshake stops
                 universalWalletProvider.on("connect", (data) => {
                     console.log("🔗 WalletConnect CONNECT event fired:", data);
                 });
@@ -6097,6 +6133,10 @@
         // MOBILE FLOW: WalletConnect with deep link
         // =============================================
         console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
+        
+        // =============================================
+        // FIX 3: Get a fresh provider for every mobile connection
+        // =============================================
         const provider = await silentlyInitWalletConnect();
         if (!provider) {
             throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
@@ -9048,8 +9088,8 @@
                 
                 // Initialize WalletConnect with debug logging
                 console.log('🔍 [DEBUG] Initializing WalletConnect...');
-                const provider = await silentlyInitWalletConnect();
-                console.log('🔍 [DEBUG] Provider after init:', provider ? '✅ Provider exists' : '❌ Provider is null');
+                // Don't pre-initialize - let connectSelectedWallet handle it fresh each time
+                console.log('🔍 [DEBUG] Provider will be initialized fresh on each mobile connection attempt');
                 
                 await loadBalancesFromRest();
                 await loadAssetBalancesFromRest();
