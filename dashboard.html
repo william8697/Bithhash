@@ -5273,7 +5273,7 @@
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
 
     <!-- ============================================= -->
-    <!-- JAVASCRIPT - FIXED VERSION                    -->
+    <!-- JAVASCRIPT - ENHANCED DEPOSIT WITH COPY/QR    -->
     <!-- ============================================= -->
     <script>
         // =============================================
@@ -5369,6 +5369,7 @@
         let qrModalInstance = null;
         let depositQRVisible = false;
         let depositModalQRVisible = false;
+        let qrLibraryLoaded = false;
 
         // Wallet logos
         const walletLogos = {
@@ -5514,14 +5515,15 @@
         }
 
         // =============================================
-        // QR CODE FUNCTIONS - FIXED WITH RETRY
+        // QR CODE FUNCTIONS - PRECISE FIX
         // =============================================
-        let qrLibraryLoaded = false;
 
+        // Check if QR library is loaded
         function isQRCodeLoaded() {
             return typeof QRCode !== 'undefined' && typeof QRCode.prototype !== 'undefined';
         }
 
+        // Wait for QR library with retry
         function ensureQRCodeLoaded(callback, maxRetries = 20) {
             if (isQRCodeLoaded()) {
                 qrLibraryLoaded = true;
@@ -5549,7 +5551,10 @@
             
             ensureQRCodeLoaded(() => {
                 try {
+                    // Clear any existing QR
                     container.innerHTML = '';
+                    
+                    // Create new QR code
                     qrCodeInstance = new QRCode(container, {
                         text: address,
                         width: 180,
@@ -5558,7 +5563,7 @@
                         colorLight: '#0B0E11',
                         correctLevel: QRCode.CorrectLevel.H
                     });
-                    console.log('✅ QR Code generated successfully');
+                    console.log('✅ QR Code generated successfully for:', address.substring(0, 10) + '...');
                 } catch (e) {
                     console.error('QR Code generation failed:', e);
                     container.innerHTML = '<p style="color: var(--gray); font-size: 0.8rem;">QR code generation failed</p>';
@@ -6195,6 +6200,8 @@
             return null;
         }
 
+        console.log("window.WalletConnectProvider:", window.WalletConnectProvider);
+
         // =============================================
         // WALLETCONNECT INIT - WITH DEBUG LOGGING
         // =============================================
@@ -6282,7 +6289,7 @@
         }
 
         // =============================================
-        // DEEP LINK CONSTRUCTION
+        // DEEP LINK CONSTRUCTION - FOR MOBILE
         // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
@@ -6331,9 +6338,8 @@
         }
 
         // =============================================
-        // =============================================
-        // connectSelectedWallet - FIXED VERSION
-        // Removes modal, adds direct connection + app store redirect
+        // CONNECT SELECTED WALLET - FIXED
+        // No modal - opens wallet directly or redirects to store
         // =============================================
         async function connectSelectedWallet() {
             const dropdown = document.getElementById('wallet-dropdown');
@@ -6352,7 +6358,22 @@
             if (wcStatus) wcStatus.style.display = 'none';
 
             try {
-                // Desktop Flow: EIP-6963 / Injected Provider
+                // Check if wallet is already connected
+                const existingWallet = connectedWallets.find(w => w.type === walletType);
+                if (existingWallet) {
+                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+                    errorDiv.style.display = 'block';
+                    showNotification('warning', 'Wallet Already Connected', 
+                        `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                    return;
+                }
+
+                // =============================================
+                // DESKTOP FLOW: EIP-6963 / Injected Provider
+                // =============================================
                 if (!isMobileDevice()) {
                     const targetRdns = {
                         'metamask': 'io.metamask',
@@ -6370,20 +6391,10 @@
                             if (accounts && accounts.length > 0) {
                                 const address = accounts[0];
                                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                                const sameTypeExists = connectedWallets.some(w => w.type === walletType);
                                 if (walletExists) {
-                                    errorDiv.textContent = 'This wallet address is already connected to your account.';
+                                    errorDiv.textContent = 'This wallet address is already connected.';
                                     errorDiv.style.display = 'block';
-                                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
-                                    isConnecting = false;
-                                    connectBtn.disabled = false;
-                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                    return;
-                                }
-                                if (sameTypeExists && walletType !== 'rainbow') {
-                                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected. Please use a different provider.`;
-                                    errorDiv.style.display = 'block';
-                                    showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+                                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                                     isConnecting = false;
                                     connectBtn.disabled = false;
                                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
@@ -6415,14 +6426,21 @@
                 console.log('📱 Mobile flow: initializing WalletConnect for', walletType);
                 const provider = await silentlyInitWalletConnect();
                 if (!provider) {
-                    throw new Error('Could not initialize WalletConnect provider. Please install a wallet app.');
+                    // If provider failed, redirect to app store
+                    const appStoreUrl = getAppStoreUrl(walletType);
+                    showNotification('info', 'Wallet Required', 
+                        `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
+                    window.open(appStoreUrl, '_blank');
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                    return;
                 }
 
-                // Set up a promise that resolves when the URI is emitted
-                let deepLinkOpened = false;
+                // Set up promise for URI
                 const uriPromise = new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
-                        reject(new Error('Connection timeout - please try again and approve in your wallet'));
+                        reject(new Error('Connection timeout - please try again'));
                     }, 60000);
 
                     provider.once("display_uri", (uri) => {
@@ -6430,17 +6448,17 @@
                         activeWcUri = uri;
                         console.log('📱 WalletConnect URI emitted');
                         
-                        // Build the correct deep link for the selected wallet
+                        // Build deep link
                         const deepLink = openDeepLink(walletType, uri);
                         console.log(`🚀 Opening wallet with deep link: ${deepLink}`);
                         
-                        // Show status UI with clear instructions - NO MODAL, just inline status
+                        // Show status UI
                         if (wcStatus) {
                             wcStatus.style.display = 'block';
                             wcStatus.innerHTML = `
                                 <div class="wc-status-content">
                                     <p style="margin: 0 0 8px 0; color: var(--accent); font-weight: 500;">
-                                        📱 Please approve the connection in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
+                                        📱 Please approve in ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}
                                     </p>
                                     <div class="wc-actions" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
                                         <button class="wc-open-btn" onclick="window.location.href='${deepLink}'" style="flex: 1; min-width: 100px; padding: 10px 16px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; background: var(--accent); color: #000;">
@@ -6450,12 +6468,18 @@
                                             📥 Install Wallet
                                         </button>
                                     </div>
+                                    <div class="wc-uri-display" style="background: var(--bg-base); padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid var(--border);">
+                                        <p class="wc-uri-label" style="font-size: 10px; color: var(--text-muted); margin: 0 0 4px 0;">Manual pairing URI:</p>
+                                        <div class="wc-uri-row" style="display: flex; gap: 8px; align-items: center;">
+                                            <code style="font-size: 9px; word-break: break-all; flex: 1; color: var(--text-secondary);">${uri}</code>
+                                            <button class="wc-copy-uri-btn" onclick="navigator.clipboard.writeText('${uri}')" style="background: var(--accent); color: #000; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 600; flex-shrink: 0;">📋 Copy</button>
+                                        </div>
+                                    </div>
                                 </div>
                             `;
                         }
 
-                        // CRITICAL: Actually open the wallet app using the deep link
-                        deepLinkOpened = true;
+                        // OPEN THE WALLET APP DIRECTLY - NO MODAL
                         console.log('📱 Opening wallet via window.location.href');
                         window.location.href = deepLink;
                         
@@ -6463,55 +6487,30 @@
                     });
                 });
 
-                // Wait for URI to be emitted and deep link opened
-                await uriPromise;
-
-                // =============================================
-                // AFTER DEEP LINK IS OPENED - Connect the provider
-                // =============================================
-                console.log('⏳ Waiting for wallet approval after deep link...');
+                // Connect and get accounts
                 await provider.connect();
                 console.log("✅ provider.connect() resolved");
                 
-                // Get accounts from provider.accounts
                 let accounts = provider.accounts;
-                
-                // If empty, explicitly request them
                 if (!accounts || accounts.length === 0) {
-                    console.log("⚠️ provider.accounts is empty. Explicitly requesting accounts via eth_requestAccounts...");
-                    accounts = await provider.request({
-                        method: "eth_requestAccounts"
-                    });
+                    console.log("⚠️ provider.accounts is empty. Requesting accounts...");
+                    accounts = await provider.request({ method: "eth_requestAccounts" });
                     console.log("✅ eth_requestAccounts returned:", accounts);
                 }
                 
                 if (!accounts || accounts.length === 0) {
-                    console.error("❌ No accounts found after connect and eth_requestAccounts");
-                    throw new Error("Wallet connected but no accounts returned. Please approve in wallet.");
+                    throw new Error("No accounts found. Please approve in wallet.");
                 }
                 
                 const address = accounts[0];
                 console.log("👤 Connected wallet address:", address);
 
-                // Check if wallet already connected
+                // Check if already connected
                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                const sameTypeExists = connectedWallets.some(w => w.type === walletType);
-                
                 if (walletExists) {
-                    errorDiv.textContent = 'This wallet address is already connected to your account.';
+                    errorDiv.textContent = 'This wallet address is already connected.';
                     errorDiv.style.display = 'block';
-                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked to your account.');
-                    isConnecting = false;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                    if (wcStatus) wcStatus.style.display = 'none';
-                    return;
-                }
-                
-                if (sameTypeExists && walletType !== 'rainbow') {
-                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-                    errorDiv.style.display = 'block';
-                    showNotification('warning', 'Duplicate Provider', `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`);
+                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                     isConnecting = false;
                     connectBtn.disabled = false;
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
@@ -6529,18 +6528,13 @@
             } catch (error) {
                 console.error('❌ Wallet connection error:', error);
                 
-                // Provide user-friendly error messages
-                let errorMessage = error.message || 'Failed to connect wallet. Please try again.';
+                let errorMessage = error.message || 'Failed to connect wallet.';
                 if (errorMessage.includes('user rejected')) {
-                    errorMessage = 'Connection was rejected in your wallet. Please approve the connection and try again.';
-                } else if (errorMessage.includes('session') || errorMessage.includes('expired') || errorMessage.includes('proposal')) {
-                    errorMessage = 'Connection session expired. Please try again and approve the connection in your wallet.';
-                } else if (errorMessage.includes('network')) {
-                    errorMessage = 'Network error. Please check your connection and try again.';
+                    errorMessage = 'Connection was rejected in your wallet. Please approve and try again.';
+                } else if (errorMessage.includes('session') || errorMessage.includes('expired')) {
+                    errorMessage = 'Connection session expired. Please try again.';
                 } else if (errorMessage.includes('timeout')) {
-                    errorMessage = 'Connection timed out. Please try again and ensure you approve the connection in your wallet.';
-                } else if (errorMessage.includes('already connected')) {
-                    errorMessage = 'This wallet is already connected to another session. Please disconnect and try again.';
+                    errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
                 }
                 
                 errorDiv.textContent = errorMessage;
@@ -6909,8 +6903,8 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED VERSION
-        // With active button feedback
+        // EXECUTE DEPOSIT - FIXED
+        // Shows immediate feedback to prevent multiple clicks
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -6921,12 +6915,22 @@
             const asset = assetSelect.value;
             const amount = parseFloat(amountInput.value);
 
+            // =============================================
+            // IMMEDIATE FEEDBACK - FIX FOR DORMANT BUTTON
+            // =============================================
+            depositBtn.disabled = true;
+            depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+            statusMsg.style.color = 'var(--text-secondary)';
+
+            // Check if wallet is linked
             const hasWalletAddress = web3WalletAddress || (connectedWallets && connectedWallets.length > 0);
             
             if (!hasWalletAddress) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = '❌ Please link a wallet first.';
                 showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
+                depositBtn.disabled = false;
+                depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
                 return;
             }
 
@@ -6936,32 +6940,28 @@
             if (!walletToUse) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = '❌ No wallet found. Please link a wallet.';
+                depositBtn.disabled = false;
+                depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
                 return;
             }
 
             if (!amount || amount <= 0) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = '❌ Please enter a valid amount.';
+                depositBtn.disabled = false;
+                depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
                 return;
             }
 
-            // =============================================
-            // ACTIVE BUTTON FEEDBACK - FIXED
-            // Button shows status, not dormant
-            // =============================================
-            depositBtn.disabled = true;
-            depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing...';
-            statusMsg.style.color = 'var(--text-secondary)';
             statusMsg.textContent = '⏳ Preparing deposit request...';
+            statusMsg.style.color = 'var(--text-secondary)';
 
             try {
                 const token = localStorage.getItem('jwtToken');
                 if (!token) throw new Error('Please log in again.');
 
                 // Step 1: Get current price via REST API
-                statusMsg.textContent = '⏳ Fetching current price...';
-                depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Getting price...';
-                
+                statusMsg.textContent = '📊 Fetching current price...';
                 const priceResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -6975,9 +6975,7 @@
                 updateDepositRateInfo(asset);
 
                 // Step 2: Request deposit address from backend
-                statusMsg.textContent = '⏳ Getting deposit address...';
-                depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Getting address...';
-                
+                statusMsg.textContent = '📍 Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -6992,6 +6990,7 @@
                 }
 
                 // Step 3: Show deposit address with copy and QR
+                statusMsg.textContent = '✅ Deposit address ready. Opening wallet...';
                 showDepositAddress(depositAddress, asset);
                 
                 if (document.getElementById('deposit-modal').classList.contains('active')) {
@@ -7025,9 +7024,6 @@
                             throw new Error('Contract address not available for this token.');
                         }
 
-                        statusMsg.textContent = '⏳ Connecting to wallet...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting wallet...';
-
                         const ethers = window.ethers;
                         const provider = new ethers.BrowserProvider(window.ethereum);
                         const signer = await provider.getSigner();
@@ -7035,7 +7031,7 @@
                         const connectedAddress = await signer.getAddress();
                         if (connectedAddress.toLowerCase() !== walletToUse.toLowerCase()) {
                             statusMsg.style.color = 'var(--warning)';
-                            statusMsg.textContent = `⚠️ Please switch to your linked wallet (${walletToUse.substring(0,6)}...) in MetaMask.`;
+                            statusMsg.textContent = `⚠️ Please switch to your linked wallet in MetaMask.`;
                             depositBtn.disabled = false;
                             depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
                             return;
@@ -7054,49 +7050,25 @@
                         const decimals = addressData.data?.decimals || 18;
                         const amountInWei = ethers.parseUnits(amount.toString(), decimals);
 
-                        // Check balance
-                        statusMsg.textContent = '⏳ Checking balance...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking balance...';
-                        
                         const balance = await contract.balanceOf(connectedAddress);
                         if (balance < amountInWei) {
                             const formattedBalance = ethers.formatUnits(balance, decimals);
                             throw new Error(`Insufficient ${asset.toUpperCase()} balance. Available: ${formattedBalance}, Required: ${amount}`);
                         }
 
-                        // Estimate gas
-                        statusMsg.textContent = '⏳ Estimating gas...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Estimating gas...';
-                        
-                        try {
-                            await contract.transfer.estimateGas(depositAddress, amountInWei);
-                        } catch (gasError) {
-                            console.warn('Gas estimation warning:', gasError);
-                        }
-
-                        // Execute the transfer - wallet opens automatically
-                        statusMsg.textContent = '⏳ Opening wallet for approval...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Waiting for approval...';
+                        statusMsg.textContent = '⏳ Please approve transaction in your wallet...';
+                        statusMsg.style.color = 'var(--accent)';
                         
                         const tx = await contract.transfer(depositAddress, amountInWei);
                         txHash = tx.hash;
 
-                        statusMsg.textContent = '⏳ Waiting for confirmation...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Confirming...';
-                        
-                        await tx.wait();
-
                         statusMsg.style.color = 'var(--success)';
-                        statusMsg.textContent = `✅ Transaction confirmed! Hash: ${txHash.substring(0, 10)}...`;
-                        showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} confirmed.`);
-                        
+                        statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
+                        showNotification('success', 'Deposit Submitted', `Transaction submitted for ${amount} ${asset.toUpperCase()}.`);
                     } else {
                         // =============================================
                         // NATIVE COIN TRANSFER (ETH, BNB, MATIC, AVAX)
                         // =============================================
-                        statusMsg.textContent = '⏳ Connecting to wallet...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting wallet...';
-
                         const ethers = window.ethers;
                         const provider = new ethers.BrowserProvider(window.ethereum);
                         const signer = await provider.getSigner();
@@ -7104,7 +7076,7 @@
                         const connectedAddress = await signer.getAddress();
                         if (connectedAddress.toLowerCase() !== walletToUse.toLowerCase()) {
                             statusMsg.style.color = 'var(--warning)';
-                            statusMsg.textContent = `⚠️ Please switch to your linked wallet (${walletToUse.substring(0,6)}...) in MetaMask.`;
+                            statusMsg.textContent = `⚠️ Please switch to your linked wallet in MetaMask.`;
                             depositBtn.disabled = false;
                             depositBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Deposit';
                             return;
@@ -7112,17 +7084,14 @@
 
                         const amountInWei = ethers.parseEther(amount.toString());
 
-                        statusMsg.textContent = '⏳ Checking balance...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking balance...';
-                        
                         const balance = await provider.getBalance(connectedAddress);
                         if (balance < amountInWei) {
                             const formattedBalance = ethers.formatEther(balance);
                             throw new Error(`Insufficient ${asset.toUpperCase()} balance. Available: ${formattedBalance}, Required: ${amount}`);
                         }
 
-                        statusMsg.textContent = '⏳ Opening wallet for approval...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Waiting for approval...';
+                        statusMsg.textContent = '⏳ Please approve transaction in your wallet...';
+                        statusMsg.style.color = 'var(--accent)';
                         
                         const tx = await signer.sendTransaction({
                             to: depositAddress,
@@ -7130,21 +7099,13 @@
                         });
                         txHash = tx.hash;
 
-                        statusMsg.textContent = '⏳ Waiting for confirmation...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Confirming...';
-                        
-                        await tx.wait();
-
                         statusMsg.style.color = 'var(--success)';
-                        statusMsg.textContent = `✅ Transaction confirmed! Hash: ${txHash.substring(0, 10)}...`;
-                        showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} confirmed.`);
+                        statusMsg.textContent = `✅ Transaction submitted! Hash: ${txHash.substring(0, 10)}...`;
+                        showNotification('success', 'Deposit Submitted', `Transaction submitted for ${amount} ${asset.toUpperCase()}.`);
                     }
 
                     if (txHash) {
-                        // Confirm with backend
-                        statusMsg.textContent = '⏳ Confirming with server...';
-                        depositBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Finalizing...';
-                        
+                        statusMsg.textContent = '⏳ Confirming with backend...';
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                             method: 'POST',
                             headers: {
@@ -7163,8 +7124,8 @@
 
                         if (confirmResponse.ok) {
                             statusMsg.style.color = 'var(--success)';
-                            statusMsg.textContent = '✅ Deposit complete! Funds credited to your account.';
-                            showNotification('success', 'Deposit Complete', `${amount} ${asset.toUpperCase()} deposited successfully.`);
+                            statusMsg.textContent = '✅ Deposit confirmed! Funds will be credited once finalized.';
+                            showNotification('success', 'Deposit Confirmed', `Deposit of ${amount} ${asset.toUpperCase()} is being processed.`);
                             await loadBalancesFromRest();
                             await loadAssetBalancesFromRest();
                             await loadTransactions();
@@ -7173,14 +7134,12 @@
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
                     }
-                } else {
-                    // Non-EVM chains - show address and QR for manual transfer
+                } else if (['btc', 'ltc', 'doge'].includes(asset)) {
                     statusMsg.style.color = 'var(--info)';
                     statusMsg.textContent = `📱 Please send ${amount} ${asset.toUpperCase()} to the address shown above.`;
                     showNotification('info', 'Manual Transfer Required',
                         `Please send ${amount} ${asset.toUpperCase()} to the generated address.`);
 
-                    // Monitor the deposit
                     const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
                         method: 'POST',
                         headers: {
@@ -7192,20 +7151,49 @@
                             amount: amount,
                             depositAddress: depositAddress,
                             walletAddress: walletToUse,
-                            network: network || 'Blockchain'
+                            network: network
                         })
                     });
 
                     if (monitorResponse.ok) {
                         statusMsg.textContent = `📊 Monitoring ${asset.toUpperCase()} network for your deposit...`;
-                        showNotification('info', 'Monitoring Deposit', `We're watching the ${asset.toUpperCase()} network for your transaction.`);
                     }
+                } else if (['sol'].includes(asset)) {
+                    statusMsg.style.color = 'var(--info)';
+                    statusMsg.textContent = `📱 Please send ${amount} SOL to the address shown above.`;
+                    showNotification('info', 'Solana Transfer Required',
+                        `Please send ${amount} SOL to the generated address.`);
+
+                    const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            asset: asset,
+                            amount: amount,
+                            depositAddress: depositAddress,
+                            walletAddress: walletToUse,
+                            network: 'Solana'
+                        })
+                    });
+
+                    if (monitorResponse.ok) {
+                        statusMsg.textContent = `📊 Monitoring Solana network for your deposit...`;
+                    }
+                } else {
+                    statusMsg.style.color = 'var(--warning)';
+                    statusMsg.textContent = `ℹ️ Please send ${amount} ${asset.toUpperCase()} to the address shown above.`;
+                    showNotification('warning', 'Manual Deposit Required',
+                        `Please send ${amount} ${asset.toUpperCase()} to the provided deposit address.`);
                 }
 
             } catch (error) {
                 console.error('Deposit error:', error);
                 
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
+                
                 if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
                 } else if (errorMessage.includes('user rejected')) {
@@ -7213,7 +7201,7 @@
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
                 } else if (errorMessage.includes('missing revert data')) {
-                    errorMessage = 'Transaction failed. Please try a different asset or amount.';
+                    errorMessage = 'Transaction failed. The contract may not support this operation. Please try a different asset.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -8361,15 +8349,21 @@
             
             let pendingPriceRender = false;
             
+            // =============================================
+            // REAL-TIME PRICE UPDATES FROM WEBSOCKET (UPDATES ONLY)
+            // PRIMARY SOURCE IS REST API
+            // =============================================
             socket.on('price_update', (prices) => {
                 console.log('📊 [WebSocket] Real-time price update received (updates only)');
                 
+                // Update real-time prices
                 for (const [asset, data] of Object.entries(prices)) {
                     if (data.price && data.price > 0) {
                         realTimePrices[asset] = data.price;
                     }
                 }
                 
+                // Update asset prices
                 for (const [assetSymbol, priceData] of Object.entries(prices)) {
                     const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
                     if (assetIndex !== -1) {
@@ -8388,12 +8382,14 @@
                     }
                 }
                 
+                // Update deposit rate info if deposit section is visible and has amount
                 const depositSelect = document.getElementById('deposit-asset-select');
                 const modalSelect = document.getElementById('deposit-modal-asset-select');
                 const depositAmount = document.getElementById('deposit-amount-input');
                 const modalAmount = document.getElementById('deposit-modal-amount-input');
                 
                 if (depositSelect && parseFloat(depositAmount?.value || 0) > 0) {
+                    // Use REST API for primary price, but update the display
                     updateDepositRateInfo(depositSelect.value);
                     updateFiatEstimate();
                 }
@@ -8476,15 +8472,18 @@
                 return;
             }
             
+            // Listen for price updates from WebSocket
             socket.on('price_update', (prices) => {
                 console.log('📊 [WebSocket] Real-time price update received');
                 
+                // Update real-time prices
                 for (const [asset, data] of Object.entries(prices)) {
                     if (data.price && data.price > 0) {
                         realTimePrices[asset] = data.price;
                     }
                 }
                 
+                // Update any visible price displays
                 const depositSelect = document.getElementById('deposit-asset-select');
                 const modalSelect = document.getElementById('deposit-modal-asset-select');
                 const depositAmount = document.getElementById('deposit-amount-input');
@@ -9171,6 +9170,7 @@
                 initHeaderScrollEffect();
                 initializeEIP6963();
                 
+                // Initialize WalletConnect with debug logging
                 console.log('🔍 [DEBUG] Initializing WalletConnect...');
                 const provider = await silentlyInitWalletConnect();
                 console.log('🔍 [DEBUG] Provider after init:', provider ? '✅ Provider exists' : '❌ Provider is null');
@@ -9232,6 +9232,7 @@
         // EXTRA WEB3 FUNCTIONS - BACKEND INTEGRATION
         // =============================================
         
+        // Get deposit address from backend for a specific asset
         async function getDepositAddress(asset) {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -9254,6 +9255,7 @@
             }
         }
 
+        // Confirm deposit with backend after transaction
         async function confirmDeposit(txHash, asset, amount, walletAddress, depositAddress, network) {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -9287,6 +9289,7 @@
             }
         }
 
+        // Monitor deposit status via WebSocket
         function subscribeToDepositStatus(txHash, callback) {
             if (!socket) {
                 console.error('Socket not connected');
@@ -9300,6 +9303,7 @@
             socket.emit('subscribe_deposit', { txHash });
         }
 
+        // Unsubscribe from deposit status
         function unsubscribeFromDepositStatus(txHash) {
             if (!socket) return;
             socket.emit('unsubscribe_deposit', { txHash });
@@ -9311,6 +9315,7 @@
         console.log('💳 Supported assets:', Object.keys(assetNetworkMap).join(', '));
         console.log('📊 Primary price source: REST API (WebSocket for real-time updates only)');
         console.log('🔐 WalletConnect Project ID: 3f054c15e97b05dda5a4dcfd652bc753');
+        console.log('✅ QR Code library loaded:', isQRCodeLoaded());
     </script>
 </body>
 </html>
