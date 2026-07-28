@@ -24,7 +24,6 @@
     </script>
 
     <style>
-        /* ... (all existing styles remain unchanged) ... */
         :root {
             --bg-base: #0B0E11;
             --bg-surface: #11151C;
@@ -3888,7 +3887,10 @@
             animation: spin 1s linear infinite;
         }
         @keyframes spin {
-            to {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
                 transform: rotate(360deg);
             }
         }
@@ -5475,8 +5477,7 @@
         // =============================================
         let web3WalletAddress = null;
         let web3WalletType = null;
-        let web3Provider = null;        // This stores the EIP-1193 provider from the linked wallet
-        let web3Signer = null;          // This stores the ethers Signer instance
+        let web3Provider = null;
         let web3Network = null;
         let web3IsConnecting = false;
         let universalWalletProvider = null;
@@ -7106,7 +7107,107 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED: REUSES LINKED WALLET PROVIDER
+        // FIXED: getSigner() - Unified Signer Retrieval
+        // Reuses the linked wallet provider - NO manual switching
+        // =============================================
+        async function getLinkedWalletSigner() {
+            // Step 1: Check if we already have a valid signer
+            if (web3Signer && web3Signer.getAddress) {
+                try {
+                    await web3Signer.getAddress();
+                    return web3Signer;
+                } catch (e) {
+                    console.warn('Existing signer invalid, reconnecting...');
+                    web3Signer = null;
+                }
+            }
+
+            // Step 2: Try to get provider from linked wallet
+            let provider = null;
+            
+            // Option A: Use the existing web3Provider from linking
+            if (web3Provider) {
+                provider = web3Provider;
+            } 
+            // Option B: Find by RDNS from connected wallet type
+            else if (web3WalletType) {
+                const targetRdns = {
+                    'metamask': 'io.metamask',
+                    'trust': 'com.trustwallet.app',
+                    'phantom': 'app.phantom',
+                    'rainbow': 'me.rainbow'
+                }[web3WalletType] || 'io.metamask';
+                
+                const injectedTarget = getProviderByRDNS(targetRdns);
+                if (injectedTarget) {
+                    provider = injectedTarget.provider;
+                }
+            }
+            // Option C: Fallback to window.ethereum
+            else if (window.ethereum) {
+                provider = window.ethereum;
+            }
+            // Option D: Try WalletConnect
+            else {
+                const wcProvider = await silentlyInitWalletConnect();
+                if (wcProvider) {
+                    provider = wcProvider;
+                }
+            }
+
+            if (!provider) {
+                throw new Error('No wallet provider available. Please install a wallet or connect one.');
+            }
+
+            // Step 3: Wrap provider in BrowserProvider and get signer
+            try {
+                const ethers = window.ethers;
+                
+                // Handle different provider types
+                let browserProvider;
+                if (provider.request) {
+                    // EIP-1193 provider (MetaMask, Trust, etc.)
+                    browserProvider = new ethers.BrowserProvider(provider);
+                } else if (provider.getSigner) {
+                    // It's already an ethers provider
+                    browserProvider = provider;
+                } else {
+                    throw new Error('Unsupported provider type');
+                }
+
+                const signer = await browserProvider.getSigner();
+                
+                // Verify the signer matches the linked wallet address
+                const signerAddress = await signer.getAddress();
+                if (web3WalletAddress && signerAddress.toLowerCase() !== web3WalletAddress.toLowerCase()) {
+                    // Try to switch accounts silently
+                    if (provider.request) {
+                        try {
+                            await provider.request({ method: 'eth_requestAccounts' });
+                            const newSigner = await browserProvider.getSigner();
+                            const newAddress = await newSigner.getAddress();
+                            if (newAddress.toLowerCase() === web3WalletAddress.toLowerCase()) {
+                                web3Signer = newSigner;
+                                return web3Signer;
+                            }
+                        } catch (e) {
+                            // Silently continue - the deposit address is independent of the current account
+                            console.warn('Account mismatch, but proceeding with deposit using current account');
+                        }
+                    }
+                }
+
+                web3Signer = signer;
+                return web3Signer;
+
+            } catch (e) {
+                console.error('Failed to get signer:', e);
+                throw new Error('Could not connect to your wallet. Please make sure your wallet is unlocked.');
+            }
+        }
+
+        // =============================================
+        // EXECUTE DEPOSIT - FIXED: Uses getLinkedWalletSigner()
         // No manual wallet switching - uses the linked wallet provider directly
         // =============================================
         async function executeDeposit() {
@@ -7136,7 +7237,7 @@
                 return;
             }
 
-            // Use the linked wallet address - NO SWITCHING REQUIRED
+            // Use the linked wallet address
             const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
             const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
 
@@ -7193,70 +7294,18 @@
                 // =============================================
                 // MODE 1: ONE-CLICK DEPOSIT (EVM chains)
                 // REUSES THE LINKED WALLET PROVIDER - NO MANUAL SWITCHING
+                // Uses getLinkedWalletSigner() for unified signer retrieval
                 // =============================================
                 if (isEVM) {
-                    let signer;
-                    
-                    // =============================================
-                    // CRITICAL FIX: REUSE THE LINKED WALLET PROVIDER
-                    // Instead of creating a new BrowserProvider from window.ethereum,
-                    // we reuse the provider that was established during linking.
-                    // =============================================
-                    
-                    // Get the signer from the linked provider
                     const ethers = window.ethers;
                     
-                    // First try: use web3Provider if available and it's already an ethers provider
-                    if (web3Provider) {
-                        try {
-                            // Check if web3Provider is already an ethers provider with getSigner
-                            if (typeof web3Provider.getSigner === 'function') {
-                                signer = await web3Provider.getSigner();
-                            } else if (web3Provider.request) {
-                                // It's an injected provider (EIP-1193) - wrap it
-                                const browserProvider = new ethers.BrowserProvider(web3Provider);
-                                signer = await browserProvider.getSigner();
-                            } else {
-                                // Unknown type - try to create a new BrowserProvider
-                                const browserProvider = new ethers.BrowserProvider(web3Provider);
-                                signer = await browserProvider.getSigner();
-                            }
-                        } catch (e) {
-                            console.warn('Error getting signer from web3Provider:', e);
-                            // Fallback to reconnecting
-                            const browserProvider = new ethers.BrowserProvider(web3Provider);
-                            signer = await browserProvider.getSigner();
-                        }
-                    } else {
-                        // No provider stored - get it from EIP-6963 or window.ethereum
-                        const targetRdns = {
-                            'metamask': 'io.metamask',
-                            'trust': 'com.trustwallet.app',
-                            'phantom': 'app.phantom',
-                            'rainbow': 'me.rainbow'
-                        }[walletTypeToUse] || 'io.metamask';
-                        
-                        const injectedTarget = getProviderByRDNS(targetRdns);
-                        if (injectedTarget) {
-                            const browserProvider = new ethers.BrowserProvider(injectedTarget.provider);
-                            signer = await browserProvider.getSigner();
-                        } else if (window.ethereum) {
-                            const browserProvider = new ethers.BrowserProvider(window.ethereum);
-                            signer = await browserProvider.getSigner();
-                        } else {
-                            // Try WalletConnect
-                            const wcProvider = await silentlyInitWalletConnect();
-                            if (!wcProvider) {
-                                throw new Error('No wallet provider available. Please install a wallet or use WalletConnect.');
-                            }
-                            // WalletConnect provider might be an ethers provider or EIP-1193
-                            if (typeof wcProvider.getSigner === 'function') {
-                                signer = await wcProvider.getSigner();
-                            } else {
-                                const browserProvider = new ethers.BrowserProvider(wcProvider);
-                                signer = await browserProvider.getSigner();
-                            }
-                        }
+                    // Get the signer using the unified function
+                    statusMsg.textContent = 'Connecting to your wallet...';
+                    setButtonLoading(depositBtn, 'approving', 'Connecting...');
+                    
+                    const signer = await getLinkedWalletSigner();
+                    if (!signer) {
+                        throw new Error('Could not get wallet signer. Please reconnect your wallet.');
                     }
 
                     const isToken = ['usdt', 'usdc', 'shib', 'link', 'wbtc', 'uni'].includes(asset);
@@ -7416,6 +7465,8 @@
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
+                } else if (errorMessage.includes('No wallet provider')) {
+                    errorMessage = 'No wallet found. Please install a wallet or connect one first.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -9506,7 +9557,8 @@
         console.log('✅ Preferred fiat currency: ' + userPreferences.fiatCurrency);
         console.log('✅ Deposit input placeholder shows preferred fiat currency');
         console.log('✅ Deposit flow reuses linked wallet provider - no manual switching required');
-        console.log('✅ Signer obtained via provider.getSigner() - BrowserProvider is no longer used as signer');
+        console.log('✅ getLinkedWalletSigner() - Unified signer retrieval function added');
+        console.log('✅ Fixed: signer.sendTransaction is now a function - BrowserProvider.getSigner() used correctly');
     </script>
 </body>
 </html>
