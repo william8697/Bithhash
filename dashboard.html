@@ -5492,26 +5492,26 @@
 
         // Asset network map - EVM vs Non-EVM
         const assetNetworkMap = {
-            'btc': { network: 'Bitcoin', type: 'non-evm' },
-            'eth': { network: 'Ethereum', type: 'evm' },
-            'usdt': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'bnb': { network: 'BNB Smart Chain', type: 'evm' },
-            'sol': { network: 'Solana', type: 'non-evm' },
-            'usdc': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'xrp': { network: 'XRP Ledger', type: 'non-evm' },
-            'doge': { network: 'Dogecoin', type: 'non-evm' },
-            'ada': { network: 'Cardano', type: 'non-evm' },
-            'shib': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'avax': { network: 'Avalanche C-Chain', type: 'evm' },
-            'dot': { network: 'Polkadot', type: 'non-evm' },
-            'trx': { network: 'TRON', type: 'non-evm' },
-            'link': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'matic': { network: 'Polygon', type: 'evm' },
-            'wbtc': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'ltc': { network: 'Litecoin', type: 'non-evm' },
-            'near': { network: 'NEAR Protocol', type: 'non-evm' },
-            'uni': { network: 'Ethereum (ERC-20)', type: 'evm' },
-            'bch': { network: 'Bitcoin Cash', type: 'non-evm' }
+            'btc': { network: 'Bitcoin', type: 'non-evm', chainId: null },
+            'eth': { network: 'Ethereum', type: 'evm', chainId: '0x1' },
+            'usdt': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0xdAC17F958D2ee523a2206206994597C13D831ec7' },
+            'bnb': { network: 'BNB Smart Chain', type: 'evm', chainId: '0x38', nativeSymbol: 'BNB' },
+            'sol': { network: 'Solana', type: 'non-evm', chainId: null },
+            'usdc': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
+            'xrp': { network: 'XRP Ledger', type: 'non-evm', chainId: null },
+            'doge': { network: 'Dogecoin', type: 'non-evm', chainId: null },
+            'ada': { network: 'Cardano', type: 'non-evm', chainId: null },
+            'shib': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE' },
+            'avax': { network: 'Avalanche C-Chain', type: 'evm', chainId: '0xa86a' },
+            'dot': { network: 'Polkadot', type: 'non-evm', chainId: null },
+            'trx': { network: 'TRON', type: 'non-evm', chainId: null },
+            'link': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0x514910771AF9Ca656af840dff83E8264EcF986CA' },
+            'matic': { network: 'Polygon', type: 'evm', chainId: '0x89' },
+            'wbtc': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599' },
+            'ltc': { network: 'Litecoin', type: 'non-evm', chainId: null },
+            'near': { network: 'NEAR Protocol', type: 'non-evm', chainId: null },
+            'uni': { network: 'Ethereum (ERC-20)', type: 'evm', chainId: '0x1', contract: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984' },
+            'bch': { network: 'Bitcoin Cash', type: 'non-evm', chainId: null }
         };
 
         // EVM assets list
@@ -7119,7 +7119,9 @@
 
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
+                const requiredChainId = networkInfo.chainId || null;
 
+                // STEP 1: Get deposit address
                 statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -7177,12 +7179,44 @@
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
 
+                    // STEP 2: Switch to the required chain
+                    if (requiredChainId) {
+                        statusMsg.textContent = 'Switching wallet to ' + networkInfo.network + '...';
+                        try {
+                            await providerToUse.request({
+                                method: 'wallet_switchEthereumChain',
+                                params: [{ chainId: requiredChainId }]
+                            });
+                        } catch (switchError) {
+                            // If chain not added, try to add it
+                            if (switchError.code === 4902) {
+                                statusMsg.textContent = 'Adding ' + networkInfo.network + ' to wallet...';
+                                const chainConfig = getChainConfig(requiredChainId);
+                                if (chainConfig) {
+                                    await providerToUse.request({
+                                        method: 'wallet_addEthereumChain',
+                                        params: [chainConfig]
+                                    });
+                                    // Retry switch after adding
+                                    await providerToUse.request({
+                                        method: 'wallet_switchEthereumChain',
+                                        params: [{ chainId: requiredChainId }]
+                                    });
+                                } else {
+                                    throw new Error('Chain configuration not available for ' + networkInfo.network);
+                                }
+                            } else {
+                                throw switchError;
+                            }
+                        }
+                    }
+
                     // Build the transaction
                     const isToken = ['usdt', 'usdc', 'shib', 'link', 'wbtc', 'uni'].includes(asset);
                     let txData;
                     
                     if (isToken) {
-                        const contractAddress = addressData.data?.contractAddress || addressData.contractAddress;
+                        const contractAddress = addressData.data?.contractAddress || addressData.contractAddress || assetNetworkMap[asset]?.contract;
                         if (!contractAddress) {
                             throw new Error('Contract address not available for this token.');
                         }
@@ -7199,7 +7233,7 @@
                             from: accounts[0]
                         };
                     } else {
-                        // Native ETH transfer
+                        // Native ETH/BNB transfer
                         const amountInWei = ethers.parseEther(cryptoAmount.toString());
                         txData = {
                             to: depositAddress,
@@ -7304,6 +7338,8 @@
                     errorMessage = 'Network error. Please check your connection and try again.';
                 } else if (errorMessage.includes('Invalid RPC URL')) {
                     errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
+                } else if (errorMessage.includes('chain') || errorMessage.includes('network')) {
+                    errorMessage = 'Please ensure your wallet is on the correct network and try again.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -7311,6 +7347,59 @@
                 showNotification('error', 'Deposit Failed', errorMessage);
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
             }
+        }
+
+        // =============================================
+        // CHAIN CONFIGURATION HELPER
+        // =============================================
+        function getChainConfig(chainId) {
+            const chainConfigs = {
+                '0x1': {
+                    chainId: '0x1',
+                    chainName: 'Ethereum Mainnet',
+                    nativeCurrency: {
+                        name: 'Ether',
+                        symbol: 'ETH',
+                        decimals: 18
+                    },
+                    rpcUrls: ['https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161'],
+                    blockExplorerUrls: ['https://etherscan.io']
+                },
+                '0x38': {
+                    chainId: '0x38',
+                    chainName: 'BNB Smart Chain Mainnet',
+                    nativeCurrency: {
+                        name: 'BNB',
+                        symbol: 'BNB',
+                        decimals: 18
+                    },
+                    rpcUrls: ['https://bsc-dataseed1.binance.org'],
+                    blockExplorerUrls: ['https://bscscan.com']
+                },
+                '0x89': {
+                    chainId: '0x89',
+                    chainName: 'Polygon Mainnet',
+                    nativeCurrency: {
+                        name: 'MATIC',
+                        symbol: 'MATIC',
+                        decimals: 18
+                    },
+                    rpcUrls: ['https://polygon-rpc.com'],
+                    blockExplorerUrls: ['https://polygonscan.com']
+                },
+                '0xa86a': {
+                    chainId: '0xa86a',
+                    chainName: 'Avalanche C-Chain',
+                    nativeCurrency: {
+                        name: 'Avalanche',
+                        symbol: 'AVAX',
+                        decimals: 18
+                    },
+                    rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'],
+                    blockExplorerUrls: ['https://snowtrace.io']
+                }
+            };
+            return chainConfigs[chainId] || null;
         }
 
         // =============================================
@@ -9385,6 +9474,7 @@
         console.log('✅ Deposit input placeholder shows preferred fiat currency');
         console.log('✅ No window.ethereum fallback - uses EIP-6963 or stored provider only');
         console.log('✅ No BrowserProvider - uses raw eth_sendTransaction via provider.request()');
+        console.log('✅ Chain switching is now handled before transaction building');
     </script>
 </body>
 </html>
