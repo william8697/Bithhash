@@ -1,9 +1,20 @@
 import { EthereumProvider } from "@walletconnect/ethereum-provider";
+import SignClient from "@walletconnect/sign-client";
 
-// Make the provider available globally for your existing dashboard.js
+// Expose WalletConnect globally
+
 window.WalletConnectProvider = {
     EthereumProvider
 };
 
+window.WalletConnectSignClient = SignClient;
+
+window.WalletConnect = {
+    EthereumProvider,
+    SignClient
+};
+
 console.log("✅ WalletConnect SDK loaded successfully");
 console.log(window.WalletConnectProvider);
+console.log(window.WalletConnectSignClient);
+console.log(window.WalletConnect);

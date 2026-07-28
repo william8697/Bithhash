@@ -101761,11 +101761,19 @@ ${params.statement}
   var require_walletconnect = __commonJS({
     "src/walletconnect.js"() {
       init_dist18();
+      init_dist9();
       window.WalletConnectProvider = {
         EthereumProvider: N18
       };
+      window.WalletConnectSignClient = gt3;
+      window.WalletConnect = {
+        EthereumProvider: N18,
+        SignClient: gt3
+      };
       console.log("\u2705 WalletConnect SDK loaded successfully");
       console.log(window.WalletConnectProvider);
+      console.log(window.WalletConnectSignClient);
+      console.log(window.WalletConnect);
     }
   });
   require_walletconnect();
