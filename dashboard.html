@@ -7088,8 +7088,11 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED WITH IMMEDIATE RESPONSE
-        // No "Fetching current price..." message
+        // EXECUTE DEPOSIT - FIXED: REUSES LINKED PROVIDER
+        // =============================================
+        // =============================================
+        // EXECUTE DEPOSIT - REUSES THE LINKED WALLET PROVIDER
+        // No manual wallet switching - uses the provider from the linked wallet
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7100,9 +7103,7 @@
             const asset = assetSelect.value;
             const amountUSD = parseFloat(amountInput.value);
 
-            // =============================================
-            // IMMEDIATE FEEDBACK - FIX FOR DORMANT BUTTON
-            // =============================================
+            // IMMEDIATE FEEDBACK
             setButtonLoading(depositBtn, 'processing', 'Processing...');
             statusMsg.style.color = 'var(--text-secondary)';
             statusMsg.textContent = 'Initializing deposit...';
@@ -7173,30 +7174,84 @@
 
                 // =============================================
                 // MODE 1: ONE-CLICK DEPOSIT (EVM chains)
+                // REUSES THE LINKED PROVIDER - NO MANUAL SWITCHING
                 // =============================================
                 if (isEVM) {
                     let provider;
                     let signer;
+                    const ethers = window.ethers;
                     
-                    if (window.ethereum) {
+                    // =============================================
+                    // CRITICAL FIX: REUSE THE LINKED PROVIDER
+                    // Instead of new BrowserProvider(window.ethereum),
+                    // use the provider that was established during linking.
+                    // =============================================
+                    
+                    // First, try to use the provider from the linked wallet session
+                    if (web3Provider) {
+                        provider = web3Provider;
+                        signer = provider;
+                    } 
+                    // If web3Provider is not set, try to get it from the connected wallets
+                    else if (connectedWallets.length > 0) {
+                        // For desktop: use EIP-6963 provider if available
+                        const targetRdns = {
+                            'metamask': 'io.metamask',
+                            'trust': 'com.trustwallet.app',
+                            'phantom': 'app.phantom',
+                            'rainbow': 'me.rainbow'
+                        }[walletTypeToUse] || 'io.metamask';
+                        
+                        const injectedTarget = getProviderByRDNS(targetRdns);
+                        if (injectedTarget) {
+                            provider = injectedTarget.provider;
+                            signer = provider;
+                            web3Provider = provider;
+                        } else {
+                            // Fallback to WalletConnect if available
+                            provider = await silentlyInitWalletConnect();
+                            if (provider) {
+                                signer = provider;
+                                web3Provider = provider;
+                            }
+                        }
+                    } else if (window.ethereum) {
+                        // LAST RESORT: only use window.ethereum if no linked provider exists
+                        // This preserves the previous behavior but is the fallback path
                         try {
-                            const ethers = window.ethers;
                             provider = new ethers.BrowserProvider(window.ethereum);
                             signer = await provider.getSigner();
                             
+                            // Check if the active wallet matches the linked wallet
                             const connectedAddress = await signer.getAddress();
                             if (connectedAddress.toLowerCase() !== walletToUse.toLowerCase()) {
-                                statusMsg.style.color = 'var(--warning)';
-                                statusMsg.textContent = 'Please switch to your linked wallet.';
-                                setButtonLoading(depositBtn, 'idle', 'Deposit');
-                                return;
+                                // Instead of asking to switch, try to get the linked provider
+                                // Re-query EIP-6963 providers for the linked wallet
+                                const fallbackProvider = getProviderByRDNS(
+                                    { 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 
+                                      'phantom': 'app.phantom', 'rainbow': 'me.rainbow' }[walletTypeToUse] || 'io.metamask'
+                                );
+                                if (fallbackProvider) {
+                                    provider = fallbackProvider.provider;
+                                    signer = provider;
+                                    web3Provider = provider;
+                                } else {
+                                    // If we can't find the linked provider, the user needs to reconnect
+                                    statusMsg.style.color = 'var(--warning)';
+                                    statusMsg.textContent = 'Your linked wallet is not available. Please reconnect.';
+                                    setButtonLoading(depositBtn, 'idle', 'Deposit');
+                                    return;
+                                }
+                            } else {
+                                web3Provider = provider;
                             }
                         } catch (e) {
                             provider = await silentlyInitWalletConnect();
                             if (!provider) {
-                                throw new Error('No wallet provider available. Please install a wallet.');
+                                throw new Error('No wallet provider available. Please reconnect your wallet.');
                             }
                             signer = provider;
+                            web3Provider = provider;
                         }
                     } else {
                         provider = await silentlyInitWalletConnect();
@@ -7204,6 +7259,12 @@
                             throw new Error('No wallet provider available. Please install a wallet.');
                         }
                         signer = provider;
+                        web3Provider = provider;
+                    }
+
+                    // Ensure we have a provider
+                    if (!provider) {
+                        throw new Error('Could not establish connection to your linked wallet.');
                     }
 
                     const isToken = ['usdt', 'usdc', 'shib', 'link', 'wbtc', 'uni'].includes(asset);
@@ -7214,7 +7275,6 @@
                             throw new Error('Contract address not available for this token.');
                         }
 
-                        const ethers = window.ethers;
                         const contract = new ethers.Contract(
                             contractAddress,
                             [
@@ -7267,7 +7327,6 @@
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
                     } else {
-                        const ethers = window.ethers;
                         const amountInWei = ethers.parseEther(cryptoAmount.toString());
 
                         statusMsg.textContent = 'Approving transaction in wallet...';
@@ -7365,6 +7424,8 @@
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
+                } else if (errorMessage.includes('reconnect')) {
+                    errorMessage = 'Please reconnect your wallet and try again.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -7426,6 +7487,22 @@
             } catch (error) {
                 console.error('Link wallet error:', error);
                 throw error;
+            }
+        }
+
+        // =============================================
+        // UPDATE DEPOSIT INPUT PLACEHOLDER - PREFERRED FIAT
+        // =============================================
+        function updateDepositPlaceholder() {
+            const selectedFiat = allFiatCurrencies.find(f => f.code === userPreferences.fiatCurrency) || { code: 'USD', symbol: '$' };
+            const placeholderText = `Amount in ${selectedFiat.code}`;
+            const input = document.getElementById('deposit-amount-input');
+            if (input) {
+                input.placeholder = placeholderText;
+            }
+            const modalInput = document.getElementById('deposit-modal-amount-input');
+            if (modalInput) {
+                modalInput.placeholder = placeholderText;
             }
         }
 
@@ -8045,6 +8122,7 @@
                         renderFiatList();
                         updateFiatSelectorUI();
                         await loadSavedFiatPreference();
+                        updateDepositPlaceholder();
                         return;
                     }
                 }
@@ -8082,6 +8160,7 @@
                             userPreferences.fiatCurrency = savedCurrency;
                             updateFiatSelectorUI();
                             refreshAllBalancesWithCurrency();
+                            updateDepositPlaceholder();
                         }
                     }
                 }
@@ -8161,6 +8240,7 @@
         async function selectFiatCurrencyAndSave(fiat) {
             userPreferences.fiatCurrency = fiat.code;
             updateFiatSelectorUI();
+            updateDepositPlaceholder();
             closeFiatSelectorModal();
             refreshAllBalancesWithCurrency();
             loadReferralData();
@@ -9370,6 +9450,9 @@
                 // Pre-fetch deposit prices for instant calculation
                 await prefetchDepositPrices();
                 
+                // Update deposit placeholder with preferred fiat
+                updateDepositPlaceholder();
+                
                 if (window.innerWidth <= 768) document.querySelector('.mobile-logout').style.display = 'block';
                 filteredAssets = [...topAssets];
                 renderAssetSelectorList();
@@ -9422,6 +9505,7 @@
         console.log('✅ Live calculation: Using cached prices for real-time conversion');
         console.log('✅ Preferred fiat currency: ' + userPreferences.fiatCurrency);
         console.log('✅ Deposit input is in preferred display currency');
+        console.log('✅ Deposit flow REUSES the linked wallet provider - no manual switching');
     </script>
 </body>
 </html>
