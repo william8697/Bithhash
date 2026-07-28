@@ -2629,9 +2629,10 @@
     </script>
 
     <script>
-   // =============================================
+        // =============================================
 // PRODUCTION-GRADE WEB3 WALLET CONNECTION
 // USING walletconnect.bundle.js ONLY
+// TARGET SPECIFIC WALLET VIA EIP-6963
 // =============================================
 
 // =============================================
@@ -2658,15 +2659,16 @@ let web3Signature = null;
 let web3Message = null;
 let isConnecting = false;
 let web3Provider = null;
-let web3SignClient = null;
 let web3ActiveSession = null;
+let targetWalletProvider = null; // Store the specific wallet provider
 
-// EIP-6963 state
+// EIP-6963 state - ONLY use this for providers
 const discoveredProviders = [];
 let eip6963Initialized = false;
 
 // Auth method tracking for OTP routing
 let currentAuthMethod = 'form';
+let activeWalletRdns = null;
 
 // =============================================
 // 1. WAIT FOR WALLETCONNECT BUNDLE TO LOAD
@@ -2699,7 +2701,7 @@ async function waitForWalletConnectBundle() {
 }
 
 // =============================================
-// 2. CLIENT BOOTSTRAP USING BUNDLE
+// 2. CLIENT BOOTSTRAP USING BUNDLE - ONLY ONCE
 // =============================================
 document.addEventListener('DOMContentLoaded', function() {
     initializeEIP6963();
@@ -2759,7 +2761,7 @@ async function silentlyInitWalletConnect() {
 }
 
 // =============================================
-// 3. EIP-6963 PROVIDER DISCOVERY
+// 3. EIP-6963 PROVIDER DISCOVERY - TARGET SPECIFIC WALLET
 // =============================================
 function initializeEIP6963() {
     if (eip6963Initialized) return;
@@ -2777,26 +2779,14 @@ function initializeEIP6963() {
     console.log('✅ EIP-6963 initialized');
 }
 
+// Get provider ONLY from EIP-6963 - target specific wallet
 function getProviderByRDNS(targetRdns) {
     for (const provider of discoveredProviders) {
-        if (provider.info.rdns === targetRdns) return provider;
-    }
-
-    if (window.ethereum) {
-        if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
-            return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
-        }
-        if (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) {
-            return { provider: window.ethereum, info: { rdns: 'com.trustwallet.app', name: 'Trust Wallet' } };
-        }
-        if (targetRdns === 'app.phantom' && window.ethereum.isPhantom) {
-            return { provider: window.ethereum, info: { rdns: 'app.phantom', name: 'Phantom' } };
-        }
-        if (targetRdns === 'me.rainbow' && window.ethereum.isRainbow) {
-            return { provider: window.ethereum, info: { rdns: 'me.rainbow', name: 'Rainbow' } };
+        if (provider.info.rdns === targetRdns) {
+            console.log(`✅ Found ${provider.info.name} via EIP-6963`);
+            return provider;
         }
     }
-
     return null;
 }
 
@@ -2814,67 +2804,40 @@ function getMobileOS() {
     return 'desktop';
 }
 
-function isWalletAppInstalled(walletType) {
-    if (getMobileOS() === 'ios') {
-        const schemes = {
-            'metamask': 'metamask://',
-            'trust': 'trust://',
-            'phantom': 'phantom://',
-            'rainbow': 'rainbow://'
-        };
-        const scheme = schemes[walletType];
-        if (scheme) {
-            try {
-                const iframe = document.createElement('iframe');
-                iframe.style.display = 'none';
-                iframe.src = scheme;
-                document.body.appendChild(iframe);
-                setTimeout(() => {
-                    document.body.removeChild(iframe);
-                }, 100);
-                return true;
-            } catch (e) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 // =============================================
 // 5. DEEP LINK & FALLBACK
 // =============================================
 function openDeepLink(walletType, uri) {
     const os = getMobileOS();
     const encodedUri = encodeURIComponent(uri);
-    const isInstalled = isWalletAppInstalled(walletType);
 
     switch (walletType) {
         case 'metamask':
-            if (isInstalled && os === 'ios') {
+            if (os === 'ios') {
                 return `metamask://wc?uri=${encodedUri}`;
             }
-            if (isInstalled && os === 'android') {
+            if (os === 'android') {
                 return `intent://wc?uri=${encodedUri}#Intent;scheme=metamask;package=io.metamask;end`;
             }
             return `https://metamask.app.link/wc?uri=${encodedUri}`;
         case 'trust':
-            if (isInstalled) {
-                if (os === 'android') return `trust://wc?uri=${encodedUri}`;
-                if (os === 'ios') return `trust://wc?uri=${encodedUri}`;
+            if (os === 'android') {
+                return `trust://wc?uri=${encodedUri}`;
+            }
+            if (os === 'ios') {
+                return `trust://wc?uri=${encodedUri}`;
             }
             return `https://link.trustwallet.com/wc?uri=${encodedUri}`;
         case 'phantom':
-            if (isInstalled) {
-                if (os === 'android') return `phantom://v1/connect?uri=${encodedUri}`;
+            if (os === 'android') {
                 return `phantom://v1/connect?uri=${encodedUri}`;
             }
             return `https://phantom.app/ul/browse/connect?uri=${encodedUri}`;
         case 'rainbow':
-            if (isInstalled && os === 'android') {
+            if (os === 'android') {
                 return `rainbow://wc?uri=${encodedUri}`;
             }
-            if (isInstalled && os === 'ios') {
+            if (os === 'ios') {
                 return `rainbow://wc?uri=${encodedUri}`;
             }
             return `https://rainbow.me/wc?uri=${encodedUri}`;
@@ -2923,7 +2886,7 @@ function safeRedirectToWallet(deepLinkUrl, storeUrl) {
 }
 
 // =============================================
-// 6. GET ACTIVE SESSION - THE FIX
+// 6. GET ACTIVE SESSION - NO PROVIDER CREATION
 // =============================================
 function getActiveSession() {
     if (!signClient) return null;
@@ -2940,56 +2903,10 @@ function getActiveSession() {
 }
 
 // =============================================
-// 7. GET ETHEREUM PROVIDER FROM SESSION
-// =============================================
-async function getProviderForSession(session, targetRdns) {
-    // First try EIP-6963
-    let providerInfo = getProviderByRDNS(targetRdns);
-    if (providerInfo) {
-        return providerInfo.provider;
-    }
-
-    // Try window.ethereum
-    if (window.ethereum) {
-        return window.ethereum;
-    }
-
-    // Try WalletConnect provider
-    if (window.WalletConnectProvider) {
-        try {
-            const ProviderClass = window.WalletConnectProvider.EthereumProvider || window.WalletConnectProvider;
-            const provider = await ProviderClass.init({
-                projectId: WALLETCONNECT_PROJECT_ID,
-                chains: [1],
-                methods: ["eth_sign", "personal_sign", "eth_sendTransaction", "eth_signTypedData_v4"],
-                events: ["chainChanged", "accountsChanged"],
-                metadata: {
-                    name: 'BitHash Capital',
-                    description: 'BitHash Cloud Mining Platform',
-                    url: 'https://www.bithashcapital.live',
-                    icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
-                }
-            });
-            return provider;
-        } catch (e) {
-            console.warn('Could not create WalletConnect provider:', e);
-        }
-    }
-
-    // Last resort: use signClient's request method if available
-    if (signClient && typeof signClient.request === 'function') {
-        return signClient;
-    }
-
-    throw new Error('No Ethereum provider found. Please make sure your wallet is connected.');
-}
-
-// =============================================
-// 8. GENERATE WALLETCONNECT URI
+// 7. GENERATE WALLETCONNECT URI - NO PROVIDER CREATION
 // =============================================
 async function generateWalletConnectURI(walletType) {
     try {
-        // Check for existing active session
         const existingSession = getActiveSession();
         if (existingSession) {
             console.log('🔄 Found existing active session');
@@ -3056,7 +2973,7 @@ async function generateWalletConnectURI(walletType) {
 }
 
 // =============================================
-// 9. WAIT FOR WALLETCONNECT SESSION
+// 8. WAIT FOR WALLETCONNECT SESSION - NO PROVIDER CREATION
 // =============================================
 async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
     return new Promise(async (resolve, reject) => {
@@ -3065,7 +2982,6 @@ async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
         }, timeoutMs);
 
         try {
-            // Check for existing session first
             const existingSession = getActiveSession();
             if (existingSession) {
                 const accounts = existingSession.namespaces.eip155.accounts;
@@ -3157,7 +3073,7 @@ async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
 }
 
 // =============================================
-// 10. MAIN CONNECTION HANDLER
+// 9. MAIN CONNECTION HANDLER - TARGET SPECIFIC WALLET
 // =============================================
 async function connectWeb3Wallet(targetRdns, walletType) {
     if (isConnecting) return;
@@ -3184,7 +3100,53 @@ async function connectWeb3Wallet(targetRdns, walletType) {
         await waitForWalletConnectBundle();
         initializeEIP6963();
 
-        // CHECK FOR EXISTING SESSION FIRST
+        // STORE THE TARGET WALLET RDNS FOR LATER USE
+        activeWalletRdns = targetRdns;
+
+        // GET PROVIDER ONLY FOR THE SPECIFIC WALLET USER CLICKED
+        const providerInfo = getProviderByRDNS(targetRdns);
+
+        // Check if the specific wallet provider is available
+        if (!providerInfo) {
+            console.log(`⚠️ ${walletType} not found via EIP-6963`);
+            // For mobile, open app store
+            if (isMobileDevice()) {
+                const storeUrl = getAppStoreUrl(walletType);
+                document.getElementById('wc-mobile-status').classList.add('active');
+                document.getElementById('wc-status-text').textContent = 
+                    `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} not installed. Opening app store...`;
+                setTimeout(() => {
+                    window.location.assign(storeUrl);
+                }, 1000);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = getOriginalButtonHTML(walletType);
+                }
+                if (statusEl) {
+                    statusEl.className = 'connection-status';
+                }
+                isConnecting = false;
+                return;
+            }
+            // For desktop, open extension store
+            const storeUrl = getAppStoreUrl(walletType);
+            window.open(storeUrl, '_blank');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = getOriginalButtonHTML(walletType);
+            }
+            if (statusEl) {
+                statusEl.className = 'connection-status';
+            }
+            isConnecting = false;
+            return;
+        }
+
+        // STORE THE PROVIDER FROM THE SPECIFIC WALLET
+        targetWalletProvider = providerInfo.provider;
+        console.log(`✅ Using ${providerInfo.info.name} provider from EIP-6963`);
+
+        // Check for existing session
         const existingSession = getActiveSession();
         if (existingSession) {
             const accounts = existingSession.namespaces.eip155.accounts;
@@ -3197,25 +3159,7 @@ async function connectWeb3Wallet(targetRdns, walletType) {
                 web3WalletAddress = address;
                 web3WalletType = walletType;
                 web3ActiveSession = existingSession;
-                
-                // CRITICAL FIX: Get the provider properly
-                try {
-                    web3Provider = await getProviderForSession(existingSession, targetRdns);
-                    console.log('✅ Provider obtained for existing session');
-                } catch (providerErr) {
-                    console.error('Failed to get provider for session:', providerErr);
-                    // Try to get provider from EIP-6963 as fallback
-                    const providerInfo = getProviderByRDNS(targetRdns);
-                    if (providerInfo) {
-                        web3Provider = providerInfo.provider;
-                        console.log('✅ Using EIP-6963 provider as fallback');
-                    } else if (window.ethereum) {
-                        web3Provider = window.ethereum;
-                        console.log('✅ Using window.ethereum as fallback');
-                    } else {
-                        throw new Error('No wallet provider available. Please reconnect your wallet.');
-                    }
-                }
+                web3Provider = targetWalletProvider; // USE THE SPECIFIC WALLET PROVIDER
                 
                 await handleWeb3Connection(address);
                 updateUIAfterConnection(address, walletType);
@@ -3224,183 +3168,103 @@ async function connectWeb3Wallet(targetRdns, walletType) {
             }
         }
 
+        // No existing session - connect with the specific wallet
         const isMobile = isMobileDevice();
 
         if (isMobile) {
             const wcStatus = document.getElementById('wc-mobile-status');
             wcStatus.classList.add('active');
-            document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
+            document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
 
-            let providerInfo = getProviderByRDNS(targetRdns);
-            if (providerInfo) {
-                try {
-                    const provider = providerInfo.provider;
-                    const accounts = await provider.request({ method: "eth_requestAccounts" });
-                    if (accounts && accounts.length > 0) {
-                        web3WalletAddress = accounts[0];
-                        web3WalletType = walletType;
-                        web3Provider = provider;
-                        wcStatus.classList.remove('active');
-                        await handleWeb3Connection(accounts[0]);
-                        updateUIAfterConnection(accounts[0], walletType);
-                        isConnecting = false;
-                        return;
-                    }
-                } catch (providerErr) {
-                    console.log('Provider connection failed:', providerErr.message);
-                }
-            }
-
-            if (!signClient || !wcClientReady) {
-                document.getElementById('wc-status-text').textContent = 'Initializing WalletConnect...';
-                await silentlyInitWalletConnect();
-                if (!signClient || !wcClientReady) {
-                    throw new Error('Failed to initialize WalletConnect. Please try again.');
-                }
-            }
-
-            const wcResult = await generateWalletConnectURI(walletType);
-
-            if (wcResult.existingSession) {
-                console.log('✅ Using existing session from generate');
-                web3WalletAddress = wcResult.address;
-                web3WalletType = walletType;
-                web3ActiveSession = wcResult.session;
-                
-                try {
-                    web3Provider = await getProviderForSession(wcResult.session, targetRdns);
-                } catch (providerErr) {
-                    const providerInfo = getProviderByRDNS(targetRdns);
-                    if (providerInfo) {
-                        web3Provider = providerInfo.provider;
-                    } else if (window.ethereum) {
-                        web3Provider = window.ethereum;
-                    } else {
-                        throw new Error('No wallet provider available.');
-                    }
-                }
-                
-                await handleWeb3Connection(wcResult.address);
-                updateUIAfterConnection(wcResult.address, walletType);
-                wcStatus.classList.remove('active');
-                isConnecting = false;
-                return;
-            }
-
-            const wcUri = wcResult.uri;
-            if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
-
-            document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
-            const deepLink = openDeepLink(walletType, wcUri);
-            const storeUrl = getAppStoreUrl(walletType);
-
-            const isInstalled = isWalletAppInstalled(walletType);
-            if (isInstalled) {
-                safeRedirectToWallet(deepLink, storeUrl);
-            } else {
-                document.getElementById('wc-status-text').textContent = 'Wallet not detected. Redirecting to install...';
-                window.location.assign(storeUrl);
-                isConnecting = false;
-                return;
-            }
-
+            // Try to connect with the specific wallet provider
             try {
-                document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
-                const session = await waitForWalletConnectSession(wcUri);
-
-                if (session && session.accounts && session.accounts.length > 0) {
-                    const address = session.accounts[0];
-                    web3WalletAddress = address;
+                const accounts = await targetWalletProvider.request({ method: "eth_requestAccounts" });
+                if (accounts && accounts.length > 0) {
+                    web3WalletAddress = accounts[0];
                     web3WalletType = walletType;
-                    web3ActiveSession = session.session;
-                    
-                    try {
-                        web3Provider = await getProviderForSession(session.session, targetRdns);
-                    } catch (providerErr) {
-                        const providerInfo = getProviderByRDNS(targetRdns);
-                        if (providerInfo) {
-                            web3Provider = providerInfo.provider;
-                        } else if (window.ethereum) {
-                            web3Provider = window.ethereum;
-                        } else {
-                            web3Provider = signClient;
-                        }
-                    }
-                    
+                    web3Provider = targetWalletProvider;
                     wcStatus.classList.remove('active');
-                    await handleWeb3Connection(address);
-                    updateUIAfterConnection(address, walletType);
-                } else {
-                    throw new Error('No accounts returned from wallet');
+                    await handleWeb3Connection(accounts[0]);
+                    updateUIAfterConnection(accounts[0], walletType);
+                    isConnecting = false;
+                    return;
                 }
-            } catch (sessionError) {
-                console.error('WalletConnect session error:', sessionError);
-                wcSessionPending = false;
-                activeWcUri = null;
+            } catch (providerErr) {
+                console.log('Provider connection failed:', providerErr.message);
+                // If provider fails, use WalletConnect deep link
+                if (!signClient || !wcClientReady) {
+                    document.getElementById('wc-status-text').textContent = 'Initializing WalletConnect...';
+                    await silentlyInitWalletConnect();
+                    if (!signClient || !wcClientReady) {
+                        throw new Error('Failed to initialize WalletConnect. Please try again.');
+                    }
+                }
 
-                if (sessionError.message.includes('timeout')) {
-                    document.getElementById('wc-status-text').textContent =
-                        'Connection timed out. Please try again.';
-                } else {
-                    document.getElementById('wc-status-text').textContent =
-                        'Connection was declined or cancelled. Please try again.';
+                const wcResult = await generateWalletConnectURI(walletType);
+                if (wcResult.existingSession) {
+                    web3WalletAddress = wcResult.address;
+                    web3WalletType = walletType;
+                    web3ActiveSession = wcResult.session;
+                    web3Provider = targetWalletProvider;
+                    await handleWeb3Connection(wcResult.address);
+                    updateUIAfterConnection(wcResult.address, walletType);
+                    wcStatus.classList.remove('active');
+                    isConnecting = false;
+                    return;
                 }
-                setTimeout(() => { wcStatus.classList.remove('active'); }, 3000);
 
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = getOriginalButtonHTML(walletType);
+                const wcUri = wcResult.uri;
+                if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
+
+                document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
+                const deepLink = openDeepLink(walletType, wcUri);
+                const storeUrl = getAppStoreUrl(walletType);
+                safeRedirectToWallet(deepLink, storeUrl);
+
+                try {
+                    document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
+                    const session = await waitForWalletConnectSession(wcUri);
+
+                    if (session && session.accounts && session.accounts.length > 0) {
+                        const address = session.accounts[0];
+                        web3WalletAddress = address;
+                        web3WalletType = walletType;
+                        web3ActiveSession = session.session;
+                        web3Provider = targetWalletProvider;
+                        wcStatus.classList.remove('active');
+                        await handleWeb3Connection(address);
+                        updateUIAfterConnection(address, walletType);
+                    } else {
+                        throw new Error('No accounts returned from wallet');
+                    }
+                } catch (sessionError) {
+                    console.error('WalletConnect session error:', sessionError);
+                    wcSessionPending = false;
+                    activeWcUri = null;
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = getOriginalButtonHTML(walletType);
+                    }
+                    if (statusEl) {
+                        statusEl.className = 'connection-status';
+                    }
+                    isConnecting = false;
+                    return;
                 }
-                if (statusEl) {
-                    statusEl.className = 'connection-status';
-                }
-                isConnecting = false;
-                return;
             }
         } else {
-            // Desktop flow
-            let providerInfo = getProviderByRDNS(targetRdns);
-
-            if (!providerInfo && window.ethereum) {
-                const isTarget = (
-                    (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
-                    (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) ||
-                    (targetRdns === 'app.phantom' && window.ethereum.isPhantom) ||
-                    (targetRdns === 'me.rainbow' && window.ethereum.isRainbow)
-                );
-                if (isTarget) {
-                    providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
-                }
-            }
-
-            if (!providerInfo) {
-                const storeUrl = getAppStoreUrl(walletType);
-                window.open(storeUrl, '_blank');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = getOriginalButtonHTML(walletType);
-                }
-                if (statusEl) {
-                    statusEl.className = 'connection-status';
-                }
-                isConnecting = false;
-                return;
-            }
-
+            // Desktop - use the specific wallet provider
             try {
-                const provider = providerInfo.provider;
-                const accounts = await provider.request({ method: "eth_requestAccounts" });
-
-                if (!accounts || accounts.length === 0) {
+                const accounts = await targetWalletProvider.request({ method: "eth_requestAccounts" });
+                if (accounts && accounts.length > 0) {
+                    web3WalletAddress = accounts[0];
+                    web3WalletType = walletType;
+                    web3Provider = targetWalletProvider;
+                    await handleWeb3Connection(accounts[0]);
+                    updateUIAfterConnection(accounts[0], walletType);
+                } else {
                     throw new Error('No accounts found.');
                 }
-
-                web3WalletAddress = accounts[0];
-                web3WalletType = walletType;
-                web3Provider = provider;
-
-                await handleWeb3Connection(accounts[0]);
-                updateUIAfterConnection(accounts[0], walletType);
             } catch (err) {
                 console.error('Provider connection error:', err);
                 if (btn) {
@@ -3466,7 +3330,7 @@ function retryWalletConnect() {
 }
 
 // =============================================
-// 11. HANDLE WEB3 CONNECTION - Signup
+// 10. HANDLE WEB3 CONNECTION - Signup
 // =============================================
 async function handleWeb3Connection(address) {
     try {
@@ -3496,7 +3360,7 @@ async function handleWeb3Connection(address) {
 }
 
 // =============================================
-// 12. UI UPDATE FUNCTIONS
+// 11. UI UPDATE FUNCTIONS
 // =============================================
 function updateUIAfterConnection(address, walletType) {
     const bar = document.getElementById('web3-connection-bar');
@@ -3543,8 +3407,9 @@ function disconnectWeb3Wallet() {
     web3WalletAddress = null;
     web3WalletType = null;
     web3Provider = null;
-    web3SignClient = null;
     web3ActiveSession = null;
+    targetWalletProvider = null;
+    activeWalletRdns = null;
     activeWcUri = null;
     wcSessionPending = false;
     document.getElementById('web3-connection-bar').classList.remove('active');
@@ -3565,16 +3430,13 @@ function disconnectWeb3Wallet() {
                     try { signClient.core.pairing.disconnect({ topic: p.topic }); } catch (e) {}
                 });
             }
-            if (signClient.core && signClient.core.relayer && typeof signClient.core.relayer.disconnect === 'function') {
-                signClient.core.relayer.disconnect();
-            }
         } catch (err) { console.log('Disconnect error:', err.message); }
     }
     console.log('🔌 Wallet disconnected');
 }
 
 // =============================================
-// 13. WEB3 SIGNUP POPUP
+// 12. WEB3 SIGNUP POPUP
 // =============================================
 function showWeb3SignupPopup(address) {
     const popup = document.getElementById('web3-popup');
@@ -3613,7 +3475,7 @@ function selectWeb3AccountType(type) {
 }
 
 // =============================================
-// 14. WEB3 SIGNUP FORM SUBMIT - THE FIX
+// 13. WEB3 SIGNUP FORM SUBMIT - USE SPECIFIC PROVIDER
 // =============================================
 document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
     e.preventDefault();
@@ -3716,61 +3578,34 @@ document.getElementById('web3-signup-form').addEventListener('submit', async fun
         web3Nonce = nonceData.data.nonce;
         web3Message = nonceData.data.message;
 
-        // 2. GET SIGNATURE - THE FIX: Use the provider we already have
-        if (!web3Provider) {
-            // Try to get provider one more time
-            const rdnsMap = { 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 'phantom': 'app.phantom',
-                'rainbow': 'me.rainbow' };
-            const providerInfo = getProviderByRDNS(rdnsMap[web3WalletType] || 'io.metamask');
-            if (providerInfo) {
-                web3Provider = providerInfo.provider;
-            } else if (window.ethereum) {
-                web3Provider = window.ethereum;
-            } else {
-                throw new Error('No wallet provider found. Please reconnect your wallet.');
-            }
-        }
+        // 2. GET SIGNATURE - USE THE SPECIFIC WALLET PROVIDER
+        let provider = web3Provider || targetWalletProvider;
 
-        // Ensure the provider has a request method
-        if (!web3Provider || typeof web3Provider.request !== 'function') {
-            // Try to get a new provider using WalletConnect
-            if (signClient) {
-                const sessions = signClient.session.getAll();
-                const activeSession = sessions.find(s => s.namespaces?.eip155?.accounts?.length > 0);
-                if (activeSession) {
-                    try {
-                        // Create a new provider from the session
-                        const ProviderClass = window.WalletConnectProvider?.EthereumProvider || window.WalletConnectProvider;
-                        if (ProviderClass && typeof ProviderClass.init === 'function') {
-                            web3Provider = await ProviderClass.init({
-                                projectId: WALLETCONNECT_PROJECT_ID,
-                                chains: [1],
-                                methods: ["eth_sign", "personal_sign", "eth_sendTransaction", "eth_signTypedData_v4"],
-                                events: ["chainChanged", "accountsChanged"],
-                                metadata: {
-                                    name: 'BitHash Capital',
-                                    description: 'BitHash Cloud Mining Platform',
-                                    url: 'https://www.bithashcapital.live',
-                                    icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
-                                }
-                            });
-                            console.log('✅ Created new WalletConnect provider from session');
-                        }
-                    } catch (e) {
-                        console.warn('Could not create provider from session:', e);
-                    }
+        if (!provider) {
+            // Try to get the provider from EIP-6963 using the stored RDNS
+            if (activeWalletRdns) {
+                const providerInfo = getProviderByRDNS(activeWalletRdns);
+                if (providerInfo) {
+                    provider = providerInfo.provider;
+                    web3Provider = provider;
+                    targetWalletProvider = provider;
+                    console.log(`✅ Using ${providerInfo.info.name} provider from EIP-6963`);
                 }
             }
         }
 
-        if (!web3Provider || typeof web3Provider.request !== 'function') {
-            throw new Error('Wallet provider is not available. Please click "Connect Wallet" again.');
+        if (!provider) {
+            throw new Error('Wallet provider not found. Please click "Connect Wallet" again.');
+        }
+
+        if (typeof provider.request !== 'function') {
+            throw new Error('Wallet provider is not properly initialized. Please reconnect.');
         }
 
         console.log('✅ Provider ready, requesting signature...');
         let signature;
         try {
-            signature = await web3Provider.request({
+            signature = await provider.request({
                 method: 'personal_sign',
                 params: [web3Message, web3WalletAddress]
             });
@@ -3877,7 +3712,7 @@ document.getElementById('web3-signup-form').addEventListener('submit', async fun
 });
 
 // =============================================
-// 15. WEB3 OTP FUNCTIONS
+// 14. WEB3 OTP FUNCTIONS
 // =============================================
 async function sendWeb3OtpToEmail(email, tempToken) {
     try {
@@ -3901,7 +3736,7 @@ async function sendWeb3OtpToEmail(email, tempToken) {
 }
 
 // =============================================
-// 16. OTP MODAL FUNCTIONS
+// 15. OTP MODAL FUNCTIONS
 // =============================================
 let otpTimer, resendTimer, currentUserEmail = '',
     currentTempToken = '',
@@ -4227,7 +4062,7 @@ document.getElementById('web3-popup').addEventListener('click', function(e) {
 document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
 // =============================================
-// 17. TRADITIONAL FORM LOGIC
+// 16. TRADITIONAL FORM LOGIC
 // =============================================
 
 AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
