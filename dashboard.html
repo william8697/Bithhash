@@ -7059,7 +7059,7 @@
 
         // =============================================
         // EXECUTE DEPOSIT - FIXED: REUSES LINKED WALLET PROVIDER
-        // NO window.ethereum fallback - uses EIP-6963 or stored provider
+        // NO window.ethereum - uses provider.request() directly
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7136,30 +7136,13 @@
 
                 // =============================================
                 // MODE 1: ONE-CLICK DEPOSIT (EVM chains)
-                // REUSES THE LINKED WALLET PROVIDER - NO window.ethereum
+                // Uses provider.request() directly - NO BrowserProvider
                 // =============================================
                 if (isEVM) {
-                    let signer;
-                    const ethers = window.ethers;
+                    // Get the provider - either from stored web3Provider or via EIP-6963
+                    let providerToUse = web3Provider;
                     
-                    // Attempt to get signer from the stored provider
-                    if (web3Provider) {
-                        try {
-                            if (typeof web3Provider.getSigner === 'function') {
-                                signer = await web3Provider.getSigner();
-                            } else if (web3Provider.request) {
-                                const browserProvider = new ethers.BrowserProvider(web3Provider);
-                                signer = await browserProvider.getSigner();
-                            } else {
-                                const browserProvider = new ethers.BrowserProvider(web3Provider);
-                                signer = await browserProvider.getSigner();
-                            }
-                        } catch (e) {
-                            console.warn('Error getting signer from web3Provider:', e);
-                            const browserProvider = new ethers.BrowserProvider(web3Provider);
-                            signer = await browserProvider.getSigner();
-                        }
-                    } else {
+                    if (!providerToUse) {
                         // No stored provider - resolve via EIP-6963 only (no window.ethereum fallback)
                         const targetRdns = {
                             'metamask': 'io.metamask',
@@ -7170,126 +7153,101 @@
                         
                         const injectedTarget = getProviderByRDNS(targetRdns);
                         if (injectedTarget) {
-                            const browserProvider = new ethers.BrowserProvider(injectedTarget.provider);
-                            signer = await browserProvider.getSigner();
+                            providerToUse = injectedTarget.provider;
                         } else {
                             // Try WalletConnect as last resort
                             const wcProvider = await silentlyInitWalletConnect();
                             if (!wcProvider) {
-                                throw new Error('No wallet provider available. Please install a wallet or use WalletConnect.');
+                                throw new Error('No wallet provider available. Please install a wallet.');
                             }
-                            if (typeof wcProvider.getSigner === 'function') {
-                                signer = await wcProvider.getSigner();
-                            } else {
-                                const browserProvider = new ethers.BrowserProvider(wcProvider);
-                                signer = await browserProvider.getSigner();
-                            }
+                            providerToUse = wcProvider;
                         }
                     }
 
+                    // Get accounts and ensure we're connected
+                    let accounts;
+                    try {
+                        accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
+                    } catch (e) {
+                        // If eth_requestAccounts fails, try eth_accounts
+                        accounts = await providerToUse.request({ method: 'eth_accounts' });
+                    }
+                    
+                    if (!accounts || accounts.length === 0) {
+                        throw new Error('No accounts found. Please unlock your wallet.');
+                    }
+
+                    // Build the transaction
                     const isToken = ['usdt', 'usdc', 'shib', 'link', 'wbtc', 'uni'].includes(asset);
+                    let txData;
                     
                     if (isToken) {
                         const contractAddress = addressData.data?.contractAddress || addressData.contractAddress;
                         if (!contractAddress) {
                             throw new Error('Contract address not available for this token.');
                         }
-
-                        const contract = new ethers.Contract(
-                            contractAddress,
-                            [
-                                'function transfer(address to, uint256 amount) external returns (bool)',
-                                'function decimals() external view returns (uint8)',
-                                'function balanceOf(address owner) external view returns (uint256)'
-                            ],
-                            signer
-                        );
-
+                        
                         const decimals = addressData.data?.decimals || 18;
                         const amountInWei = ethers.parseUnits(cryptoAmount.toString(), decimals);
-
-                        statusMsg.textContent = 'Approving transaction in wallet...';
-                        setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                         
-                        const tx = await contract.transfer(depositAddress, amountInWei);
-                        const txHash = tx.hash;
-
-                        statusMsg.textContent = 'Transaction submitted!';
-                        setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                        showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
-
-                        statusMsg.textContent = 'Confirming with backend...';
-                        const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${token}`
-                            },
-                            body: JSON.stringify({
-                                txHash: txHash,
-                                asset: asset,
-                                amount: cryptoAmount,
-                                walletAddress: walletToUse,
-                                depositAddress: depositAddress,
-                                network: networkInfo.network
-                            })
-                        });
-
-                        if (confirmResponse.ok) {
-                            statusMsg.style.color = 'var(--success)';
-                            statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
-                            showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
-                            await loadBalancesFromRest();
-                            await loadAssetBalancesFromRest();
-                            await loadTransactions();
-                        } else {
-                            const err = await confirmResponse.json();
-                            throw new Error(err.message || 'Failed to confirm deposit.');
-                        }
+                        // Build ERC-20 transfer transaction
+                        const transferData = `0xa9059cbb000000000000000000000000${depositAddress.slice(2)}${amountInWei.toString(16).padStart(64, '0')}`;
+                        
+                        txData = {
+                            to: contractAddress,
+                            data: transferData,
+                            from: accounts[0]
+                        };
                     } else {
+                        // Native ETH transfer
                         const amountInWei = ethers.parseEther(cryptoAmount.toString());
-
-                        statusMsg.textContent = 'Approving transaction in wallet...';
-                        setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
-                        
-                        const tx = await signer.sendTransaction({
+                        txData = {
                             to: depositAddress,
-                            value: amountInWei
-                        });
-                        const txHash = tx.hash;
+                            value: '0x' + amountInWei.toString(16),
+                            from: accounts[0]
+                        };
+                    }
 
-                        statusMsg.textContent = 'Transaction submitted!';
-                        setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                        showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
+                    statusMsg.textContent = 'Approving transaction in wallet...';
+                    setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
+                    
+                    // Send transaction directly via provider.request()
+                    const txHash = await providerToUse.request({
+                        method: 'eth_sendTransaction',
+                        params: [txData]
+                    });
 
-                        statusMsg.textContent = 'Confirming with backend...';
-                        const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${token}`
-                            },
-                            body: JSON.stringify({
-                                txHash: txHash,
-                                asset: asset,
-                                amount: cryptoAmount,
-                                walletAddress: walletToUse,
-                                depositAddress: depositAddress,
-                                network: networkInfo.network
-                            })
-                        });
+                    statusMsg.textContent = 'Transaction submitted!';
+                    setButtonLoading(depositBtn, 'submitted', 'Submitted');
+                    showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
 
-                        if (confirmResponse.ok) {
-                            statusMsg.style.color = 'var(--success)';
-                            statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
-                            showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
-                            await loadBalancesFromRest();
-                            await loadAssetBalancesFromRest();
-                            await loadTransactions();
-                        } else {
-                            const err = await confirmResponse.json();
-                            throw new Error(err.message || 'Failed to confirm deposit.');
-                        }
+                    statusMsg.textContent = 'Confirming with backend...';
+                    const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            txHash: txHash,
+                            asset: asset,
+                            amount: cryptoAmount,
+                            walletAddress: walletToUse,
+                            depositAddress: depositAddress,
+                            network: networkInfo.network
+                        })
+                    });
+
+                    if (confirmResponse.ok) {
+                        statusMsg.style.color = 'var(--success)';
+                        statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
+                        showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
+                        await loadBalancesFromRest();
+                        await loadAssetBalancesFromRest();
+                        await loadTransactions();
+                    } else {
+                        const err = await confirmResponse.json();
+                        throw new Error(err.message || 'Failed to confirm deposit.');
                     }
 
                     hideDepositAddress();
@@ -7344,6 +7302,8 @@
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
+                } else if (errorMessage.includes('Invalid RPC URL')) {
+                    errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -9411,8 +9371,8 @@
         checkAuthAndRedirect();
 
         console.log('Web3 Wallet & Deposit system initialized - NO window.ethereum fallback');
-        console.log('✅ Deposit flow reuses linked wallet provider - no manual switching');
-        console.log('✅ EVM deposits: signer obtained via provider.getSigner() from stored provider');
+        console.log('✅ Deposit flow uses provider.request() directly - NO BrowserProvider');
+        console.log('✅ EVM deposits: eth_sendTransaction via provider.request()');
         console.log('✅ Non-EVM deposits: manual address generation with QR code');
         console.log('Connected wallets:', connectedWallets.length);
         console.log('Supported assets:', Object.keys(assetNetworkMap).join(', '));
@@ -9424,6 +9384,7 @@
         console.log('✅ Preferred fiat currency: ' + userPreferences.fiatCurrency);
         console.log('✅ Deposit input placeholder shows preferred fiat currency');
         console.log('✅ No window.ethereum fallback - uses EIP-6963 or stored provider only');
+        console.log('✅ No BrowserProvider - uses raw eth_sendTransaction via provider.request()');
     </script>
 </body>
 </html>
