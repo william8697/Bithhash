@@ -1845,7 +1845,8 @@
                         <div id="g_id_onload" data-client_id="634814462335-9o4t8q95c4orcsd9sijjl52374g6vm85.apps.googleusercontent.com" data-context="signin" data-ux_mode="popup" data-callback="handleGoogleSignIn" data-auto_prompt="false">
                         </div>
 
-                        <div class="g_id_signin" data-type="standard" data-shape="rectangular" data-theme="outline" data-text="signin_with" data-size="large" data-logo_alignment="left" data-width="100%">
+                        <!-- FIX 6: Google Sign-In width fixed to 400 instead of "100%" -->
+                        <div class="g_id_signin" data-type="standard" data-shape="rectangular" data-theme="outline" data-text="signin_with" data-size="large" data-logo_alignment="left" data-width="400">
                         </div>
 
                         <div class="divider">OR</div>
@@ -2122,14 +2123,15 @@
                 // Use the bundle's SignClient - MATCHES DASHBOARD.HTML APPROACH
                 const SignClient = window.WalletConnectSignClient.default || window.WalletConnectSignClient;
 
+                // FIX 6: Use HTTPS URL instead of window.location.origin for local dev
                 const config = {
                     projectId: WALLETCONNECT_PROJECT_ID,
                     // Note: Dashboard.html doesn't explicitly set relayUrl, using default
                     metadata: {
                         name: 'BitHash Capital',
                         description: 'BitHash Cloud Mining Platform',
-                        url: window.location.origin,
-                        icons: [`${window.location.origin}/icon.png`]
+                        url: 'https://www.bithashcapital.live',
+                        icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
                     }
                 };
 
@@ -2141,9 +2143,6 @@
                 wcClientReady = true;
                 console.log('✅ WalletConnect SignClient initialized from bundle and ready');
 
-                // Clean up old pairings
-                await pruneStalePairings();
-
                 return signClient;
 
             } catch (err) {
@@ -2153,23 +2152,6 @@
                 wcInitializationStarted = false;
                 wcClientReady = false;
                 throw err;
-            }
-        }
-
-        async function pruneStalePairings() {
-            if (!signClient || !signClient.core || !signClient.core.pairing) return;
-            try {
-                const activePairings = signClient.core.pairing.getPairings();
-                if (activePairings && activePairings.length > 0) {
-                    console.log(`🧹 Purging ${activePairings.length} legacy pairing configurations...`);
-                    await Promise.all(
-                        activePairings.map(pairing =>
-                            signClient.core.pairing.disconnect({ topic: pairing.topic })
-                        )
-                    );
-                }
-            } catch (e) {
-                console.warn('Pairing cleanup warning:', e.message);
             }
         }
 
@@ -2296,6 +2278,7 @@
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
+        // FIX 5: Use window.location.assign instead of href to avoid BFCache issues
         function safeRedirectToWallet(deepLinkUrl, storeUrl) {
             const pageVisibilityPromise = new Promise((resolve) => {
                 const handleVisibilityChange = () => {
@@ -2305,19 +2288,20 @@
                 };
                 document.addEventListener('visibilitychange', handleVisibilityChange, { once: true });
 
-                // FIX 3: Increased timeout from 2500ms to 8000ms to prevent false positive App Store redirects
+                // FIX 3: Increased timeout from 2500ms to 8000ms
                 setTimeout(() => {
                     document.removeEventListener('visibilitychange', handleVisibilityChange);
                     resolve(false);
                 }, 8000);
             });
 
-            window.location.href = deepLinkUrl;
+            // FIX 5: Use assign instead of href to avoid BFCache issues
+            window.location.assign(deepLinkUrl);
 
             pageVisibilityPromise.then((appOpened) => {
                 if (!appOpened) {
                     console.log('Redirecting to App Store fallback...');
-                    window.location.href = storeUrl;
+                    window.location.assign(storeUrl);
                 }
             });
         }
@@ -2325,6 +2309,9 @@
         // =============================================
         // 6. URI GENERATION USING BUNDLE - MATCHES DASHBOARD
         // FIX 1: Changed requiredNamespaces to optionalNamespaces
+        // FIX 2: Added multiple chains
+        // FIX 3: Added sessionProperties
+        // FIX 4: Removed pruneStalePairings() call
         // =============================================
         async function generateWalletConnectURI(walletType) {
             try {
@@ -2339,11 +2326,15 @@
                     throw new Error('WalletConnect engine is offline or failed to start.');
                 }
 
-                await pruneStalePairings();
+                // FIX 4: REMOVED await pruneStalePairings(); - Only cleanup on logout
 
                 // FIX 1: Using optionalNamespaces instead of requiredNamespaces
-                // This avoids the "requiredNamespaces are deprecated" warning
+                // FIX 2: Added multiple chains (Ethereum, Polygon, BNB Chain)
+                // FIX 3: Added sessionProperties with 24h expiry
                 const connectParams = {
+                    sessionProperties: {
+                        expiry: Math.floor(Date.now() / 1000) + 86400
+                    },
                     optionalNamespaces: {
                         eip155: {
                             methods: [
@@ -2352,7 +2343,11 @@
                                 'eth_signTypedData_v4',
                                 'eth_requestAccounts'
                             ],
-                            chains: ['eip155:1'],
+                            chains: [
+                                'eip155:1',
+                                'eip155:137',
+                                'eip155:56'
+                            ],
                             events: ['chainChanged', 'accountsChanged']
                         }
                     }
@@ -2375,71 +2370,91 @@
         }
 
         // =============================================
-        // 7. WAIT FOR WALLETCONNECT SESSION
-        // FIX 2: Improved account extraction with detailed logging
+        // 7. WAIT FOR WALLETCONNECT SESSION - COMPLETELY REWRITTEN
+        // FIX 1: Proper session extraction with fallback to existing sessions
         // =============================================
         async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
             return new Promise(async (resolve, reject) => {
                 const timeout = setTimeout(() => {
-                    wcSessionPending = false;
-                    reject(new Error('WalletConnect session timeout. Please try again.'));
+                    reject(new Error('WalletConnect session timeout'));
                 }, timeoutMs);
 
                 try {
                     const approval = window._wcApproval;
+
                     if (!approval) {
                         clearTimeout(timeout);
-                        wcSessionPending = false;
-                        reject(new Error('No active approval session found'));
+                        reject(new Error('No approval request found'));
                         return;
                     }
 
-                    const session = await approval;
-                    clearTimeout(timeout);
-                    wcSessionPending = false;
+                    // Listen for session events for debugging
+                    signClient.once('session_event', event => {
+                        console.log('📡 Session event:', event);
+                    });
 
-                    console.log('📦 WalletConnect session received:', JSON.stringify(session, null, 2));
+                    signClient.once('session_update', ({ topic, params }) => {
+                        console.log('🔄 Session updated:', params);
+                    });
 
-                    // FIX 2: Extract accounts from session safely with proper path
-                    const accounts = session?.namespaces?.eip155?.accounts || [];
-                    console.log('📋 WalletConnect accounts from session:', accounts);
+                    // Wait for approval
+                    let session = await approval;
+                    console.log('RAW APPROVAL RESULT:', session);
 
-                    if (accounts && accounts.length > 0) {
-                        const account = accounts[0];
-                        const parts = account.split(':');
+                    // FIX 1: Some mobile wallets return undefined - check existing sessions
+                    if (!session) {
+                        console.log('Searching existing sessions...');
+                        const sessions = signClient.session.getAll();
+                        console.log('Existing sessions:', sessions);
 
-                        if (parts.length >= 3) {
-                            const chainId = parseInt(parts[1]) || 1;
-                            const address = parts[2];
-
-                            console.log('✅ WalletConnect account found:', address);
-                            console.log('✅ Chain ID:', chainId);
-
-                            resolve({
-                                accounts: [address],
-                                chainId: chainId,
-                                session: session
-                            });
-                            return;
-                        } else {
-                            // Handle case where account is already just the address
-                            console.log('📋 Account format detected as address only:', account);
-                            if (/^0x[a-fA-F0-9]{40}$/.test(account)) {
-                                resolve({
-                                    accounts: [account],
-                                    chainId: 1,
-                                    session: session
-                                });
-                                return;
-                            }
+                        if (sessions && sessions.length > 0) {
+                            // Get the most recent session
+                            session = sessions[sessions.length - 1];
+                            console.log('Using existing session:', session);
                         }
                     }
 
-                    reject(new Error('Wallet connected but no accounts returned'));
-                } catch (err) {
                     clearTimeout(timeout);
-                    wcSessionPending = false;
-                    reject(err);
+
+                    if (!session) {
+                        reject(new Error('Wallet approved but no session was created'));
+                        return;
+                    }
+
+                    console.log('FINAL WC SESSION:', session);
+
+                    // Extract accounts from session
+                    const accounts = session.namespaces?.eip155?.accounts || [];
+                    console.log('WC ACCOUNTS:', accounts);
+
+                    if (!accounts || accounts.length === 0) {
+                        reject(new Error('Session created but no accounts returned'));
+                        return;
+                    }
+
+                    const account = accounts[0];
+                    const parts = account.split(':');
+
+                    // Handle both full format "eip155:1:0x..." and plain address
+                    if (parts.length >= 3) {
+                        resolve({
+                            accounts: [parts[2]],
+                            chainId: Number(parts[1]),
+                            session: session
+                        });
+                    } else if (/^0x[a-fA-F0-9]{40}$/.test(account)) {
+                        resolve({
+                            accounts: [account],
+                            chainId: 1,
+                            session: session
+                        });
+                    } else {
+                        reject(new Error('Invalid account format: ' + account));
+                    }
+
+                } catch (error) {
+                    clearTimeout(timeout);
+                    reject(error);
                 }
             });
         }
@@ -2847,6 +2862,24 @@
             return `<span class="wallet-icon">${iconMap[walletType] || ''}</span><span class="wallet-name" style="color: ${colorMap[walletType] || '#FFFFFF'};">${nameMap[walletType] || walletType}</span>`;
         }
 
+        // FIX 4: Cleanup only on disconnect/logout
+        async function cleanupPairings() {
+            if (!signClient || !signClient.core || !signClient.core.pairing) return;
+            try {
+                const activePairings = signClient.core.pairing.getPairings();
+                if (activePairings && activePairings.length > 0) {
+                    console.log(`🧹 Purging ${activePairings.length} legacy pairing configurations...`);
+                    await Promise.all(
+                        activePairings.map(pairing =>
+                            signClient.core.pairing.disconnect({ topic: pairing.topic })
+                        )
+                    );
+                }
+            } catch (e) {
+                console.warn('Pairing cleanup warning:', e.message);
+            }
+        }
+
         function disconnectWeb3Wallet() {
             web3WalletAddress = null;
             web3WalletType = null;
@@ -2864,7 +2897,11 @@
                 if (statusEl) { statusEl.className = 'connection-status'; }
             });
             if (signClient) {
-                try { signClient.core.relayer.disconnect(); } catch (err) { console.log('Disconnect error:', err.message); }
+                try {
+                    // FIX 4: Cleanup pairings on disconnect
+                    cleanupPairings();
+                    signClient.core.relayer.disconnect();
+                } catch (err) { console.log('Disconnect error:', err.message); }
             }
             console.log('🔌 Wallet disconnected');
         }
