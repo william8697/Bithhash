@@ -16,6 +16,11 @@
     <title>Create Account - BitHash Cloud Mining</title>
     <meta name="description" content="Join BitHash Capital to start investing in Bitcoin Cloud mining with enterprise security standards.">
 
+    <!-- PREVENT BFCACHE - Critical for WalletConnect -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -59,7 +64,6 @@
             version: 'v16.0.0'
         };
 
-        // High-fidelity cryptographic Buffer polyfill
         (function() {
             function SafeBuffer(arr) {
                 const u8 = new Uint8Array(arr);
@@ -93,9 +97,8 @@
         })();
     </script>
 
-    <!-- ====== SINGLE WALLETCONNECT BUNDLE - MUST LOAD FIRST ====== -->
-    <!-- This is the ONLY WalletConnect script we use. No other CDN URLs. -->
-    <script src="walletconnect.bundle.js?v=4"></script>
+    <!-- ====== SINGLE WALLETCONNECT BUNDLE ====== -->
+    <script src="walletconnect.bundle.js?v=7"></script>
 
     <!-- ====== ETHERS.JS FOR WEB3 ====== -->
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js">
@@ -195,15 +198,6 @@
             overflow-x: hidden;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
-        }
-
-        .bitcoin-animation {
-            display: inline-block;
-            margin-right: 5px;
-            vertical-align: middle;
-            color: var(--gold);
-            font-weight: bold;
-            animation: none;
         }
 
         .security-badge {
@@ -2471,7 +2465,6 @@
                         <div id="g_id_onload" data-client_id="634814462335-9o4t8q95c4orcsd9sijjl52374g6vm85.apps.googleusercontent.com" data-context="signup" data-ux_mode="popup" data-callback="handleGoogleSignIn" data-auto_prompt="false">
                         </div>
 
-                        <!-- FIX: Changed width from "100%" to 400 to fix GSI warning -->
                         <div class="g_id_signin" data-type="standard" data-shape="rectangular" data-theme="outline" data-text="signup_with" data-size="large" data-logo_alignment="left" data-width="400">
                         </div>
 
@@ -2639,7 +2632,7 @@
         // =============================================
         // PRODUCTION-GRADE WEB3 WALLET CONNECTION
         // USING walletconnect.bundle.js ONLY
-        // MATCHES LOGIN.HTML EXACTLY
+        // WITH FIX FOR BFCACHE AND EXISTING SESSIONS
         // =============================================
 
         // =============================================
@@ -2686,21 +2679,12 @@
             console.log('⏳ Waiting for walletconnect.bundle.js to load...');
 
             while (true) {
-                // Check for BOTH globals that the bundle should provide
                 const hasProvider = typeof window.WalletConnectProvider !== 'undefined';
                 const hasSignClient = typeof window.WalletConnectSignClient !== 'undefined';
 
                 if (hasProvider && hasSignClient) {
                     console.log('✅ WalletConnect bundle ready (Provider + SignClient)');
                     return true;
-                }
-
-                if (hasProvider && !hasSignClient) {
-                    console.log('⚠️ WalletConnectProvider found, waiting for SignClient...');
-                }
-
-                if (!hasProvider && hasSignClient) {
-                    console.log('⚠️ WalletConnectSignClient found, waiting for Provider...');
                 }
 
                 if (Date.now() - start > timeout) {
@@ -2719,7 +2703,6 @@
         // =============================================
         document.addEventListener('DOMContentLoaded', function() {
             initializeEIP6963();
-            // Start initialization but don't block DOM rendering
             wcInitPromise = silentlyInitWalletConnect().catch(err => {
                 console.error('Initial WalletConnect init failed:', err);
                 return null;
@@ -2733,10 +2716,8 @@
             wcInitializationStarted = true;
 
             try {
-                // Wait for the bundle to load
                 await waitForWalletConnectBundle();
 
-                // Check again after wait
                 if (typeof window.WalletConnectSignClient === 'undefined') {
                     throw new Error('WalletConnect bundle not available after wait');
                 }
@@ -2745,10 +2726,8 @@
                     return signClient;
                 }
 
-                // Use the bundle's SignClient
                 const SignClient = window.WalletConnectSignClient.default || window.WalletConnectSignClient;
 
-                // FIX: Use HTTPS URL instead of window.location.origin for local dev
                 const config = {
                     projectId: WALLETCONNECT_PROJECT_ID,
                     metadata: {
@@ -2822,7 +2801,7 @@
         }
 
         // =============================================
-        // 4. DEVICE DETECTION
+        // 4. DEVICE DETECTION WITH APP INSTALL CHECK
         // =============================================
         function isMobileDevice() {
             return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -2835,28 +2814,87 @@
             return 'desktop';
         }
 
+        // Check if a specific wallet app is installed via deep link detection
+        function isWalletAppInstalled(walletType) {
+            // For iOS: Check if the app scheme is registered
+            if (getMobileOS() === 'ios') {
+                const schemes = {
+                    'metamask': 'metamask://',
+                    'trust': 'trust://',
+                    'phantom': 'phantom://',
+                    'rainbow': 'rainbow://'
+                };
+                const scheme = schemes[walletType];
+                if (scheme) {
+                    try {
+                        // iOS: Use window.open to detect if the scheme opens
+                        const iframe = document.createElement('iframe');
+                        iframe.style.display = 'none';
+                        iframe.src = scheme;
+                        document.body.appendChild(iframe);
+                        // Check if the app opened by checking if the page remains visible
+                        // If the app is installed, the iframe will attempt to open it
+                        setTimeout(() => {
+                            document.body.removeChild(iframe);
+                        }, 100);
+                        return true; // Assume installed if we try to open it
+                    } catch (e) {
+                        return false;
+                    }
+                }
+            }
+            // For Android: Check if the intent URL would work
+            if (getMobileOS() === 'android') {
+                const intentUrls = {
+                    'metamask': 'intent://wc#Intent;scheme=metamask;package=io.metamask;end',
+                    'trust': 'intent://wc#Intent;scheme=trust;package=com.wallet.crypto.trustapp;end',
+                    'phantom': 'intent://wc#Intent;scheme=phantom;package=app.phantom;end',
+                    'rainbow': 'intent://wc#Intent;scheme=rainbow;package=me.rainbow;end'
+                };
+                // We can't reliably detect on Android without attempting the intent
+                return true; // Assume installed and let the intent handle it
+            }
+            return false;
+        }
+
         // =============================================
-        // 5. STABLE DEEP LINK & FALLBACK
+        // 5. STABLE DEEP LINK & FALLBACK WITH DIRECT APP LAUNCH
         // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
             const encodedUri = encodeURIComponent(uri);
 
+            // First check if app is installed - use direct deep link if so
+            const isInstalled = isWalletAppInstalled(walletType);
+
             switch (walletType) {
                 case 'metamask':
+                    if (isInstalled && os === 'ios') {
+                        return `metamask://wc?uri=${encodedUri}`;
+                    }
+                    if (isInstalled && os === 'android') {
+                        return `intent://wc?uri=${encodedUri}#Intent;scheme=metamask;package=io.metamask;end`;
+                    }
                     return `https://metamask.app.link/wc?uri=${encodedUri}`;
                 case 'trust':
-                    if (os === 'android') {
+                    if (isInstalled && os === 'android') {
+                        return `trust://wc?uri=${encodedUri}`;
+                    }
+                    if (isInstalled && os === 'ios') {
                         return `trust://wc?uri=${encodedUri}`;
                     }
                     return `https://link.trustwallet.com/wc?uri=${encodedUri}`;
                 case 'phantom':
-                    if (os === 'android') {
+                    if (isInstalled) {
+                        if (os === 'android') return `phantom://v1/connect?uri=${encodedUri}`;
                         return `phantom://v1/connect?uri=${encodedUri}`;
                     }
                     return `https://phantom.app/ul/browse/connect?uri=${encodedUri}`;
                 case 'rainbow':
-                    if (os === 'android') {
+                    if (isInstalled && os === 'android') {
+                        return `rainbow://wc?uri=${encodedUri}`;
+                    }
+                    if (isInstalled && os === 'ios') {
                         return `rainbow://wc?uri=${encodedUri}`;
                     }
                     return `https://rainbow.me/wc?uri=${encodedUri}`;
@@ -2900,43 +2938,75 @@
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
-        // FIX: Use window.location.assign instead of href to avoid BFCache issues
+        // FIX: Better BFCache handling with pagehide event
         function safeRedirectToWallet(deepLinkUrl, storeUrl) {
-            const pageVisibilityPromise = new Promise((resolve) => {
-                const handleVisibilityChange = () => {
-                    if (document.hidden) {
-                        resolve(true);
-                    }
-                };
-                document.addEventListener('visibilitychange', handleVisibilityChange, { once: true });
+            // Use a direct location change with a timeout
+            const isInstalled = isWalletAppInstalled(
+                Object.keys({ 'metamask': 'io.metamask', 'trust': 'com.trustwallet.app', 'phantom': 'app.phantom',
+                    'rainbow': 'me.rainbow' }).find(k => deepLinkUrl.includes(k)) || 'metamask'
+            );
 
-                // Increased timeout from 2500ms to 8000ms
+            // If app is installed, use direct deep link
+            if (isInstalled) {
+                window.location.assign(deepLinkUrl);
+                // If the app doesn't open after 3 seconds, show a button to retry
                 setTimeout(() => {
-                    document.removeEventListener('visibilitychange', handleVisibilityChange);
-                    resolve(false);
-                }, 8000);
-            });
+                    const wcStatus = document.getElementById('wc-mobile-status');
+                    if (wcStatus) {
+                        wcStatus.innerHTML = `
+                            <div style="text-align: left; padding: 8px;">
+                                <p style="margin: 0 0 8px 0; color: #F7A600;">⏳ Still waiting for wallet...</p>
+                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                    <button onclick="window.location.assign('${deepLinkUrl}')" 
+                                            style="background: #F7A600; color: #000; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
+                                        🔗 Open Wallet Again
+                                    </button>
+                                    <button onclick="window.location.assign('${storeUrl}')" 
+                                            style="background: #10B981; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; flex: 1;">
+                                        📥 Install Wallet
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                        wcStatus.classList.add('active');
+                    }
+                }, 3000);
+                return;
+            }
 
-            // FIX: Use assign instead of href to avoid BFCache issues
-            window.location.assign(deepLinkUrl);
-
-            pageVisibilityPromise.then((appOpened) => {
-                if (!appOpened) {
-                    console.log('Redirecting to App Store fallback...');
-                    window.location.assign(storeUrl);
-                }
-            });
+            // If app not installed, go to store
+            window.location.assign(storeUrl);
         }
 
         // =============================================
-        // 6. URI GENERATION USING BUNDLE
-        // FIX: Changed requiredNamespaces to optionalNamespaces
-        // FIX: Added multiple chains
-        // FIX: Added sessionProperties
-        // FIX: Removed pruneStalePairings() call
+        // 6. URI GENERATION WITH EXISTING SESSION CHECK
         // =============================================
         async function generateWalletConnectURI(walletType) {
             try {
+                // FIX: First check if we already have an active session
+                if (signClient) {
+                    const sessions = signClient.session.getAll();
+                    const activeSession = sessions.find(s =>
+                        s.namespaces?.eip155?.accounts?.length > 0
+                    );
+                    if (activeSession) {
+                        console.log('🔄 Found existing active session, using it instead of creating new one');
+                        const accounts = activeSession.namespaces.eip155.accounts;
+                        if (accounts && accounts.length > 0) {
+                            const account = accounts[0];
+                            const parts = account.split(':');
+                            const address = parts.length >= 3 ? parts[2] : account;
+                            console.log('✅ Using existing session with address:', address);
+                            // Return a special marker that we already have a session
+                            return {
+                                existingSession: true,
+                                address: address,
+                                session: activeSession
+                            };
+                        }
+                    }
+                }
+
                 if (wcInitPromise) {
                     await wcInitPromise;
                 } else {
@@ -2948,9 +3018,6 @@
                     throw new Error('WalletConnect engine is offline or failed to start.');
                 }
 
-                // FIX: Using optionalNamespaces instead of requiredNamespaces
-                // FIX: Added multiple chains (Ethereum, Polygon, BNB Chain)
-                // FIX: Added sessionProperties with 24h expiry
                 const connectParams = {
                     sessionProperties: {
                         expiry: Math.floor(Date.now() / 1000) + 86400
@@ -2980,7 +3047,7 @@
                 wcSessionPending = true;
                 window._wcApproval = approval;
 
-                return uri;
+                return { uri: uri };
             } catch (err) {
                 console.error('Error generating WalletConnect URI:', err);
                 wcSessionPending = false;
@@ -2990,9 +3057,7 @@
         }
 
         // =============================================
-        // 7. WAIT FOR WALLETCONNECT SESSION - COMPLETELY REWRITTEN
-        // FIX: Proper session extraction with fallback to existing sessions
-        // FIX: Handles approval being a function (pending promise)
+        // 7. WAIT FOR WALLETCONNECT SESSION
         // =============================================
         async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
             return new Promise(async (resolve, reject) => {
@@ -3001,6 +3066,30 @@
                 }, timeoutMs);
 
                 try {
+                    // FIX: First check if we already have an active session
+                    if (signClient) {
+                        const sessions = signClient.session.getAll();
+                        const activeSession = sessions.find(s =>
+                            s.namespaces?.eip155?.accounts?.length > 0
+                        );
+                        if (activeSession) {
+                            const accounts = activeSession.namespaces.eip155.accounts;
+                            if (accounts && accounts.length > 0) {
+                                const account = accounts[0];
+                                const parts = account.split(':');
+                                const address = parts.length >= 3 ? parts[2] : account;
+                                console.log('✅ Found existing active session in waitForWalletConnectSession');
+                                clearTimeout(timeout);
+                                resolve({
+                                    accounts: [address],
+                                    chainId: parts.length >= 3 ? Number(parts[1]) : 1,
+                                    session: activeSession
+                                });
+                                return;
+                            }
+                        }
+                    }
+
                     const approval = window._wcApproval;
 
                     if (!approval) {
@@ -3018,22 +3107,18 @@
                         console.log('🔄 Session updated:', params);
                     });
 
-                    // CRITICAL FIX: The approval might be a function (pending promise)
-                    // or it might already be resolved. We need to handle both cases.
+                    // CRITICAL FIX: Handle approval being a function
                     let session = null;
 
                     try {
-                        // If approval is a function, call it to get the promise
                         if (typeof approval === 'function') {
                             console.log('📞 Approval is a function, calling it...');
                             session = await approval();
                         } else {
-                            // Otherwise, await it directly
                             session = await approval;
                         }
                     } catch (approvalError) {
                         console.error('Approval error:', approvalError);
-                        // If approval fails, try to get existing sessions
                         session = null;
                     }
 
@@ -3046,7 +3131,6 @@
                         console.log('Existing sessions:', sessions);
 
                         if (sessions && sessions.length > 0) {
-                            // Get the most recent active session
                             const activeSession = sessions.find(s =>
                                 s.namespaces?.eip155?.accounts?.length > 0
                             );
@@ -3066,7 +3150,6 @@
 
                     console.log('FINAL WC SESSION:', session);
 
-                    // Extract accounts from session
                     const accounts = session.namespaces?.eip155?.accounts || [];
                     console.log('WC ACCOUNTS:', accounts);
 
@@ -3078,7 +3161,6 @@
                     const account = accounts[0];
                     const parts = account.split(':');
 
-                    // Handle both full format "eip155:1:0x..." and plain address
                     if (parts.length >= 3) {
                         resolve({
                             accounts: [parts[2]],
@@ -3127,10 +3209,31 @@
             document.getElementById('wc-mobile-status').classList.remove('active');
 
             try {
-                // Ensure the bundle is loaded before proceeding
                 await waitForWalletConnectBundle();
-
                 initializeEIP6963();
+
+                // FIX: First check if we already have an active session
+                if (signClient) {
+                    const sessions = signClient.session.getAll();
+                    const activeSession = sessions.find(s =>
+                        s.namespaces?.eip155?.accounts?.length > 0
+                    );
+                    if (activeSession) {
+                        const accounts = activeSession.namespaces.eip155.accounts;
+                        if (accounts && accounts.length > 0) {
+                            const account = accounts[0];
+                            const parts = account.split(':');
+                            const address = parts.length >= 3 ? parts[2] : account;
+                            console.log('✅ Found existing active session, using it directly');
+                            web3WalletAddress = address;
+                            web3WalletType = walletType;
+                            await handleWeb3Connection(address);
+                            updateUIAfterConnection(address, walletType);
+                            isConnecting = false;
+                            return;
+                        }
+                    }
+                }
 
                 const isMobile = isMobileDevice();
 
@@ -3139,7 +3242,7 @@
                     wcStatus.classList.add('active');
                     document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
 
-                    // Try injected provider first (some mobile browsers have extensions)
+                    // Try injected provider first
                     let providerInfo = getProviderByRDNS(targetRdns);
                     if (providerInfo) {
                         try {
@@ -3160,7 +3263,7 @@
                         }
                     }
 
-                    // Ensure signClient is initialized before generating URI
+                    // Ensure signClient is initialized
                     if (!signClient || !wcClientReady) {
                         document.getElementById('wc-status-text').textContent = 'Initializing WalletConnect...';
                         await silentlyInitWalletConnect();
@@ -3169,16 +3272,39 @@
                         }
                     }
 
-                    // Generate WalletConnect URI using the bundle
-                    const wcUri = await generateWalletConnectURI(walletType);
+                    // Generate WalletConnect URI
+                    const wcResult = await generateWalletConnectURI(walletType);
+
+                    // Check if we got an existing session
+                    if (wcResult.existingSession) {
+                        console.log('✅ Using existing session from generateWalletConnectURI');
+                        web3WalletAddress = wcResult.address;
+                        web3WalletType = walletType;
+                        await handleWeb3Connection(wcResult.address);
+                        updateUIAfterConnection(wcResult.address, walletType);
+                        wcStatus.classList.remove('active');
+                        isConnecting = false;
+                        return;
+                    }
+
+                    const wcUri = wcResult.uri;
                     if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
 
                     document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
                     const deepLink = openDeepLink(walletType, wcUri);
                     const storeUrl = getAppStoreUrl(walletType);
-                    document.getElementById('wc-status-text').textContent = 'Opening wallet app... Please approve the connection.';
 
-                    safeRedirectToWallet(deepLink, storeUrl);
+                    // Check if wallet is installed
+                    const isInstalled = isWalletAppInstalled(walletType);
+                    if (isInstalled) {
+                        document.getElementById('wc-status-text').textContent = 'Opening wallet app... Please approve the connection.';
+                        safeRedirectToWallet(deepLink, storeUrl);
+                    } else {
+                        document.getElementById('wc-status-text').textContent = 'Wallet not detected. Redirecting to install...';
+                        window.location.assign(storeUrl);
+                        isConnecting = false;
+                        return;
+                    }
 
                     try {
                         document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
@@ -3221,7 +3347,7 @@
                         return;
                     }
                 } else {
-                    // Desktop: use injected provider if available
+                    // Desktop: use injected provider
                     let providerInfo = getProviderByRDNS(targetRdns);
 
                     if (!providerInfo && window.ethereum) {
@@ -3417,24 +3543,6 @@
             return `<span class="wallet-icon">${iconMap[walletType] || ''}</span><span class="wallet-name" style="color: ${colorMap[walletType] || '#FFFFFF'};">${nameMap[walletType] || walletType}</span>`;
         }
 
-        // FIX: Cleanup only on disconnect/logout
-        async function cleanupPairings() {
-            if (!signClient || !signClient.core || !signClient.core.pairing) return;
-            try {
-                const activePairings = signClient.core.pairing.getPairings();
-                if (activePairings && activePairings.length > 0) {
-                    console.log(`🧹 Purging ${activePairings.length} legacy pairing configurations...`);
-                    await Promise.all(
-                        activePairings.map(pairing =>
-                            signClient.core.pairing.disconnect({ topic: pairing.topic })
-                        )
-                    );
-                }
-            } catch (e) {
-                console.warn('Pairing cleanup warning:', e.message);
-            }
-        }
-
         function disconnectWeb3Wallet() {
             web3WalletAddress = null;
             web3WalletType = null;
@@ -3454,8 +3562,12 @@
             });
             if (signClient) {
                 try {
-                    // FIX: Cleanup pairings on disconnect
-                    cleanupPairings();
+                    const pairings = signClient.core.pairing.getPairings();
+                    if (pairings && pairings.length > 0) {
+                        pairings.forEach(p => {
+                            try { signClient.core.pairing.disconnect({ topic: p.topic }); } catch (e) {}
+                        });
+                    }
                     signClient.core.relayer.disconnect();
                 } catch (err) { console.log('Disconnect error:', err.message); }
             }
