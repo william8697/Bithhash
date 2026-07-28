@@ -9,9 +9,12 @@ esbuild.build({
     target: ["es2020"],
     sourcemap: false,
     minify: false,
-}).then(() => {
+    keepNames: true
+})
+.then(() => {
     console.log("✅ WalletConnect bundle built successfully!");
-}).catch((err) => {
+})
+.catch((err) => {
     console.error("❌ Build failed:", err);
     process.exit(1);
 });
