@@ -33,14 +33,15 @@
     <!-- Google Identity Services -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 
-    <!-- ====== WALLETCONNECT BUNDLE (MIGRATED FROM CDN) ====== -->
+    <!-- ====== SINGLE WALLETCONNECT BUNDLE ====== -->
+    <!-- This is the ONLY WalletConnect script we use. No other CDN URLs. -->
     <script src="walletconnect.bundle.js"></script>
 
     <!-- ====== ETHERS.JS FOR WEB3 ====== -->
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.15.0/dist/ethers.umd.min.js">
     </script>
 
-    <!-- ====== ALL OTHER WEB3 DEPENDENCIES IMPORTED VIA IMPORT MAP ====== -->
+    <!-- ====== OTHER DEPENDENCIES (non-WalletConnect) ====== -->
     <script type="importmap">
         {
             "imports": {
@@ -1849,7 +1850,8 @@
 
                         <div class="divider">OR</div>
 
-                        <!-- ===== WEB3 SECTION (MIGRATED TO WALLETCONNECT.BUNDLE.JS) ===== -->
+                        <!-- ===== WEB3 SECTION (PRODUCTION GRADE IMPLEMENTATION) ===== -->
+                        <!-- Uses ONLY walletconnect.bundle.js via window.WalletConnectSignClient -->
                         <div class="web3-section">
                             <div class="web3-section-title">
                                 <i class="fas fa-link" style="margin-right: 8px;"></i>
@@ -2008,9 +2010,8 @@
 
     <script>
         // =============================================
-        // PRODUCTION-GRADE WEB3 WALLET CONNECTION - MIGRATED TO WALLETCONNECT.BUNDLE.JS
-        // EXACT CAUSE: The CDN URL was wrong (index.umd.min.js doesn't exist)
-        // FIX: Migrated to walletconnect.bundle.js (bundle version)
+        // PRODUCTION-GRADE WEB3 WALLET CONNECTION
+        // USING walletconnect.bundle.js ONLY
         // =============================================
 
         // =============================================
@@ -2028,6 +2029,7 @@
         let wcSessionPending = false;
         let wcInitializationStarted = false;
         let wcInitPromise = null;
+        let wcClientReady = false;
 
         let web3WalletAddress = null;
         let web3WalletType = null;
@@ -2047,25 +2049,25 @@
         let currentAuthMethod = 'form';
 
         // =============================================
-        // 1. SIMPLE SCRIPT LOAD DETECTION (walletconnect.bundle.js)
+        // 1. WAIT FOR WALLETCONNECT BUNDLE TO LOAD
         // =============================================
-        function waitForWalletConnectScript() {
+        function waitForWalletConnectBundle() {
             return new Promise((resolve, reject) => {
-                // Check if already loaded (bundle exposes WalletConnect global)
-                if (typeof window.WalletConnect !== 'undefined' && typeof window.WalletConnect.SignClient !== 'undefined') {
-                    console.log('✅ WalletConnect bundle already available');
+                // Check if already loaded via the bundle
+                if (typeof window.WalletConnectSignClient !== 'undefined') {
+                    console.log('✅ WalletConnect bundle already loaded');
                     resolve();
                     return;
                 }
 
-                console.log('⏳ Waiting for WalletConnect bundle to load...');
+                console.log('⏳ Waiting for walletconnect.bundle.js to load...');
 
                 // Poll for the global
                 let attempts = 0;
-                const maxAttempts = 60; // 60 * 200ms = 12 seconds
+                const maxAttempts = 60;
                 const interval = setInterval(() => {
                     attempts++;
-                    if (typeof window.WalletConnect !== 'undefined' && typeof window.WalletConnect.SignClient !== 'undefined') {
+                    if (typeof window.WalletConnectSignClient !== 'undefined') {
                         clearInterval(interval);
                         console.log('✅ WalletConnect bundle detected');
                         resolve();
@@ -2086,7 +2088,7 @@
         }
 
         // =============================================
-        // 2. CLIENT BOOTSTRAP (USING BUNDLE)
+        // 2. CLIENT BOOTSTRAP USING BUNDLE
         // =============================================
         document.addEventListener('DOMContentLoaded', function() {
             initializeEIP6963();
@@ -2101,18 +2103,19 @@
 
             try {
                 // Wait for the bundle to load
-                await waitForWalletConnectScript();
+                await waitForWalletConnectBundle();
 
-                // Get SignClient from the bundle global
-                const SignClient = window.WalletConnect.SignClient;
-
-                if (typeof SignClient === 'undefined') {
-                    throw new Error('WalletConnect bundle not available');
+                // Check again after wait
+                if (typeof window.WalletConnectSignClient === 'undefined') {
+                    throw new Error('WalletConnect bundle not available after wait');
                 }
 
                 if (walletConnectInitialized && signClient) {
                     return signClient;
                 }
+
+                // Use the bundle's SignClient
+                const SignClient = window.WalletConnectSignClient.default || window.WalletConnectSignClient;
 
                 const config = {
                     projectId: WALLETCONNECT_PROJECT_ID,
@@ -2130,9 +2133,12 @@
 
                 signClient = clientInstance;
                 walletConnectInitialized = true;
-                console.log('✅ WalletConnect SignClient initialized and ready (bundle)');
+                wcClientReady = true;
+                console.log('✅ WalletConnect SignClient initialized from bundle and ready');
 
+                // Clean up old pairings
                 await pruneStalePairings();
+
                 return signClient;
 
             } catch (err) {
@@ -2140,6 +2146,7 @@
                 walletConnectInitialized = false;
                 signClient = null;
                 wcInitializationStarted = false;
+                wcClientReady = false;
                 throw err;
             }
         }
@@ -2181,10 +2188,12 @@
         }
 
         function getProviderByRDNS(targetRdns) {
+            // Check discovered providers first
             for (const provider of discoveredProviders) {
                 if (provider.info.rdns === targetRdns) return provider;
             }
 
+            // Fallback: check window.ethereum
             if (window.ethereum) {
                 if (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) {
                     return { provider: window.ethereum, info: { rdns: 'io.metamask', name: 'MetaMask' } };
@@ -2308,7 +2317,7 @@
         }
 
         // =============================================
-        // 6. URI GENERATION (USING BUNDLE)
+        // 6. URI GENERATION USING BUNDLE
         // =============================================
         async function generateWalletConnectURI(walletType) {
             try {
@@ -2319,7 +2328,7 @@
                     await wcInitPromise;
                 }
 
-                if (!signClient) {
+                if (!signClient || !wcClientReady) {
                     throw new Error('WalletConnect engine is offline or failed to start.');
                 }
 
@@ -2433,6 +2442,7 @@
                     wcStatus.classList.add('active');
                     document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
 
+                    // Try injected provider first (some mobile browsers have extensions)
                     let providerInfo = getProviderByRDNS(targetRdns);
                     if (providerInfo) {
                         try {
@@ -2453,6 +2463,7 @@
                         }
                     }
 
+                    // Generate WalletConnect URI using the bundle
                     const wcUri = await generateWalletConnectURI(walletType);
                     if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
 
@@ -2504,6 +2515,7 @@
                         return;
                     }
                 } else {
+                    // Desktop: use injected provider if available
                     let providerInfo = getProviderByRDNS(targetRdns);
 
                     if (!providerInfo && window.ethereum) {
@@ -2608,6 +2620,20 @@
             const targetRdns = rdnsMap[walletType] || 'io.metamask';
             wcSessionPending = false;
             activeWcUri = null;
+
+            // Reset signClient if needed
+            if (signClient) {
+                try {
+                    signClient = null;
+                    walletConnectInitialized = false;
+                    wcClientReady = false;
+                    wcInitializationStarted = false;
+                    wcInitPromise = null;
+                } catch (e) {
+                    console.warn('Reset error:', e);
+                }
+            }
+
             connectWeb3Wallet(targetRdns, walletType);
         }
 
