@@ -6824,8 +6824,27 @@
 
         // =============================================
         // UPDATE FIAT ESTIMATE - REAL-TIME CONVERSION
+        // Uses cached price data for instant updates
         // =============================================
         let fiatEstimateTimeout = null;
+        let cachedPriceData = {};
+
+        // Pre-fetch prices for all deposit assets
+        async function prefetchDepositPrices() {
+            const assetSelect = document.getElementById('deposit-asset-select');
+            if (!assetSelect) return;
+            
+            const options = assetSelect.options;
+            for (let i = 0; i < options.length; i++) {
+                const asset = options[i].value;
+                if (!cachedPriceData[asset]) {
+                    const price = await fetchPriceFromRest(asset);
+                    if (price && price > 0) {
+                        cachedPriceData[asset] = price;
+                    }
+                }
+            }
+        }
 
         async function updateFiatEstimate() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -6834,15 +6853,23 @@
             const asset = assetSelect.value;
             const amountUSD = parseFloat(amountInput.value) || 0;
             
-            if (amountUSD > 0) {
-                const price = await fetchPriceFromRest(asset);
+            // Use cached price if available, otherwise fetch fresh
+            let price = cachedPriceData[asset];
+            if (!price || price === 0) {
+                price = await fetchPriceFromRest(asset);
                 if (price && price > 0) {
-                    const cryptoAmount = amountUSD / price;
-                    const assetUpper = asset.toUpperCase();
-                    fiatDisplay.textContent = `≈ ${formatNumberWithCommas(cryptoAmount, 8)} ${assetUpper}`;
-                    updateDepositRateInfo(asset);
-                } else {
-                    fiatDisplay.textContent = '≈ ...';
+                    cachedPriceData[asset] = price;
+                }
+            }
+            
+            if (amountUSD > 0 && price && price > 0) {
+                const cryptoAmount = amountUSD / price;
+                const assetUpper = asset.toUpperCase();
+                fiatDisplay.textContent = `≈ ${formatNumberWithCommas(cryptoAmount, 8)} ${assetUpper}`;
+                // Update rate info silently
+                const rateInfo = document.getElementById('deposit-rate-info');
+                if (rateInfo) {
+                    rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
@@ -6856,15 +6883,22 @@
             const asset = assetSelect.value;
             const amountUSD = parseFloat(amountInput.value) || 0;
             
-            if (amountUSD > 0) {
-                const price = await fetchPriceFromRest(asset);
+            // Use cached price if available
+            let price = cachedPriceData[asset];
+            if (!price || price === 0) {
+                price = await fetchPriceFromRest(asset);
                 if (price && price > 0) {
-                    const cryptoAmount = amountUSD / price;
-                    const assetUpper = asset.toUpperCase();
-                    fiatDisplay.textContent = `≈ ${formatNumberWithCommas(cryptoAmount, 8)} ${assetUpper}`;
-                    updateDepositModalRateInfo(asset);
-                } else {
-                    fiatDisplay.textContent = '≈ ...';
+                    cachedPriceData[asset] = price;
+                }
+            }
+            
+            if (amountUSD > 0 && price && price > 0) {
+                const cryptoAmount = amountUSD / price;
+                const assetUpper = asset.toUpperCase();
+                fiatDisplay.textContent = `≈ ${formatNumberWithCommas(cryptoAmount, 8)} ${assetUpper}`;
+                const rateInfo = document.getElementById('deposit-modal-rate-info');
+                if (rateInfo) {
+                    rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
@@ -7055,6 +7089,7 @@
 
         // =============================================
         // EXECUTE DEPOSIT - FIXED WITH IMMEDIATE RESPONSE
+        // No "Fetching current price..." message
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7104,19 +7139,24 @@
                 const token = localStorage.getItem('jwtToken');
                 if (!token) throw new Error('Please log in again.');
 
-                // Step 1: Get current price via REST API
-                statusMsg.textContent = 'Fetching current price...';
-                const price = await fetchPriceFromRest(asset);
+                // Use cached price if available, otherwise fetch
+                let price = cachedPriceData[asset];
+                if (!price || price === 0) {
+                    price = await fetchPriceFromRest(asset);
+                    if (price && price > 0) {
+                        cachedPriceData[asset] = price;
+                    }
+                }
                 if (!price || price === 0) throw new Error('Price not available for this asset.');
                 
                 const cryptoAmount = amountUSD / price;
                 statusMsg.textContent = `Amount: ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()}`;
 
-                // Step 2: Check if EVM or non-EVM
+                // Check if EVM or non-EVM
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
 
-                // Step 3: Request deposit address from backend
+                // Request deposit address from backend
                 statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -7135,7 +7175,6 @@
                 // MODE 1: ONE-CLICK DEPOSIT (EVM chains)
                 // =============================================
                 if (isEVM) {
-                    // Check if we have an injected provider
                     let provider;
                     let signer;
                     
@@ -7153,7 +7192,6 @@
                                 return;
                             }
                         } catch (e) {
-                            // Fallback to WalletConnect
                             provider = await silentlyInitWalletConnect();
                             if (!provider) {
                                 throw new Error('No wallet provider available. Please install a wallet.');
@@ -7161,7 +7199,6 @@
                             signer = provider;
                         }
                     } else {
-                        // Use WalletConnect
                         provider = await silentlyInitWalletConnect();
                         if (!provider) {
                             throw new Error('No wallet provider available. Please install a wallet.');
@@ -7169,7 +7206,6 @@
                         signer = provider;
                     }
 
-                    // Check if it's an ERC20 token
                     const isToken = ['usdt', 'usdc', 'shib', 'link', 'wbtc', 'uni'].includes(asset);
                     
                     if (isToken) {
@@ -7202,7 +7238,6 @@
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
 
-                        // Confirm with backend
                         statusMsg.textContent = 'Confirming with backend...';
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                             method: 'POST',
@@ -7232,7 +7267,6 @@
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
                     } else {
-                        // Native coin transfer (ETH, BNB, MATIC, AVAX)
                         const ethers = window.ethers;
                         const amountInWei = ethers.parseEther(cryptoAmount.toString());
 
@@ -7249,7 +7283,6 @@
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
 
-                        // Confirm with backend
                         statusMsg.textContent = 'Confirming with backend...';
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                             method: 'POST',
@@ -7280,7 +7313,6 @@
                         }
                     }
 
-                    // Hide address for EVM (one-click mode)
                     hideDepositAddress();
                     
                 } else {
@@ -7290,7 +7322,6 @@
                     statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
                     showDepositAddress(depositAddress, asset);
                     
-                    // Show address in modal if open
                     if (document.getElementById('deposit-modal').classList.contains('active')) {
                         showDepositModalAddress(depositAddress, asset);
                     }
@@ -7298,7 +7329,6 @@
                     showNotification('info', 'Manual Transfer Required',
                         `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the generated address.`);
 
-                    // Monitor deposit
                     const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
                         method: 'POST',
                         headers: {
@@ -8543,20 +8573,25 @@
             socket.on('price_update', (prices) => {
                 // Update prices in background - no user-facing messages
                 for (const [assetSymbol, priceData] of Object.entries(prices)) {
-                    const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
-                    if (assetIndex !== -1 && priceData.price > 0) {
-                        fullAssetsList[assetIndex].currentPrice = priceData.price;
-                        fullAssetsList[assetIndex].change24h = priceData.change24h || 0;
-                        fullAssetsList[assetIndex].currentValue = fullAssetsList[assetIndex].totalAmount * priceData.price;
-                        if (fullAssetsList[assetIndex].unrealizedProfitLoss !== undefined) {
-                            fullAssetsList[assetIndex].unrealizedProfitLoss = fullAssetsList[assetIndex]
-                                .currentValue - (fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[
-                                    assetIndex].totalAmount);
-                            fullAssetsList[assetIndex].unrealizedPercentage = (fullAssetsList[assetIndex]
-                                .averageBuyingPrice > 0) ? (fullAssetsList[assetIndex].unrealizedProfitLoss / (
-                                    fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[assetIndex]
-                                    .totalAmount)) * 100 : 0;
+                    if (priceData.price > 0) {
+                        const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
+                        if (assetIndex !== -1) {
+                            fullAssetsList[assetIndex].currentPrice = priceData.price;
+                            fullAssetsList[assetIndex].change24h = priceData.change24h || 0;
+                            fullAssetsList[assetIndex].currentValue = fullAssetsList[assetIndex].totalAmount * priceData.price;
+                            if (fullAssetsList[assetIndex].unrealizedProfitLoss !== undefined) {
+                                fullAssetsList[assetIndex].unrealizedProfitLoss = fullAssetsList[assetIndex]
+                                    .currentValue - (fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[
+                                        assetIndex].totalAmount);
+                                fullAssetsList[assetIndex].unrealizedPercentage = (fullAssetsList[assetIndex]
+                                    .averageBuyingPrice > 0) ? (fullAssetsList[assetIndex].unrealizedProfitLoss / (
+                                        fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[assetIndex]
+                                        .totalAmount)) * 100 : 0;
+                            }
                         }
+                        
+                        // Update cached price for deposit calculations
+                        cachedPriceData[assetSymbol.toLowerCase()] = priceData.price;
                     }
                 }
                 
@@ -8666,7 +8701,14 @@
                 const assetSelect = document.getElementById('deposit-asset-select');
                 if (assetSelect) {
                     const asset = assetSelect.value;
-                    await updateDepositRateInfo(asset);
+                    const price = await fetchPriceFromRest(asset);
+                    if (price && price > 0) {
+                        cachedPriceData[asset] = price;
+                        const rateInfo = document.getElementById('deposit-rate-info');
+                        if (rateInfo) {
+                            rateInfo.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                        }
+                    }
                     
                     const amountInput = document.getElementById('deposit-amount-input');
                     if (amountInput && parseFloat(amountInput.value) > 0) {
@@ -8677,7 +8719,14 @@
                 const modalSelect = document.getElementById('deposit-modal-asset-select');
                 if (modalSelect) {
                     const asset = modalSelect.value;
-                    await updateDepositModalRateInfo(asset);
+                    const price = await fetchPriceFromRest(asset);
+                    if (price && price > 0) {
+                        cachedPriceData[asset] = price;
+                        const rateInfo = document.getElementById('deposit-modal-rate-info');
+                        if (rateInfo) {
+                            rateInfo.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                        }
+                    }
                     
                     const modalAmount = document.getElementById('deposit-modal-amount-input');
                     if (modalAmount && parseFloat(modalAmount.value) > 0) {
@@ -9317,6 +9366,10 @@
                 initSocketIO();
                 startBackgroundPriceRefresh();
                 initDonutChart();
+                
+                // Pre-fetch deposit prices for instant calculation
+                await prefetchDepositPrices();
+                
                 if (window.innerWidth <= 768) document.querySelector('.mobile-logout').style.display = 'block';
                 filteredAssets = [...topAssets];
                 renderAssetSelectorList();
@@ -9366,6 +9419,9 @@
         console.log('EVM assets:', evmAssets.join(', '));
         console.log('Non-EVM assets:', nonEvmAssets.join(', '));
         console.log('QR Code library loaded:', isQRCodeLoaded());
+        console.log('✅ Live calculation: Using cached prices for real-time conversion');
+        console.log('✅ Preferred fiat currency: ' + userPreferences.fiatCurrency);
+        console.log('✅ Deposit input is in preferred display currency');
     </script>
 </body>
 </html>
