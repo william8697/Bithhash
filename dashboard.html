@@ -7081,6 +7081,9 @@
 // NATIVE assets: ETH, BNB, MATIC, AVAX - use native transfer
 // ERC-20 tokens: USDT, USDC, SHIB, LINK, UNI, WBTC - use contract transfer
 // =============================================
+// =============================================
+// EXECUTE DEPOSIT - COMPLETE FIX FOR ALL TOKENS
+// =============================================
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
     const amountInput = document.getElementById('deposit-amount-input');
@@ -7156,10 +7159,8 @@ async function executeDeposit() {
 
         // =============================================
         // MODE 1: ONE-CLICK DEPOSIT (EVM chains)
-        // Uses provider.request() directly - NO BrowserProvider
         // =============================================
         if (isEVM) {
-            // Get the provider - either from stored web3Provider or via EIP-6963
             let providerToUse = web3Provider;
             
             if (!providerToUse) {
@@ -7182,7 +7183,6 @@ async function executeDeposit() {
                 }
             }
 
-            // Get accounts and ensure we're connected
             let accounts;
             try {
                 accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
@@ -7194,9 +7194,6 @@ async function executeDeposit() {
                 throw new Error('No accounts found. Please unlock your wallet.');
             }
 
-            // =============================================
-            // STEP 1: Determine required chain from selected asset
-            // =============================================
             const chainConfig = CHAIN_CONFIG[asset];
             if (!chainConfig) {
                 throw new Error(`No chain configuration found for asset: ${asset}`);
@@ -7207,9 +7204,6 @@ async function executeDeposit() {
             
             statusMsg.textContent = `Checking network: ${requiredChainName}...`;
             
-            // =============================================
-            // STEP 2: Get current chain from wallet
-            // =============================================
             let currentChainId;
             try {
                 currentChainId = await providerToUse.request({ method: 'eth_chainId' });
@@ -7218,9 +7212,6 @@ async function executeDeposit() {
                 currentChainId = '0x1';
             }
             
-            // =============================================
-            // STEP 3: Switch to required chain if needed
-            // =============================================
             if (currentChainId.toLowerCase() !== requiredChainId.toLowerCase()) {
                 statusMsg.textContent = `Switching to ${requiredChainName}...`;
                 setButtonLoading(depositBtn, 'approving', `Switching to ${requiredChainName}...`);
@@ -7236,19 +7227,7 @@ async function executeDeposit() {
                     
                     await new Promise(resolve => setTimeout(resolve, 500));
                     
-                    try {
-                        const newChainId = await providerToUse.request({ method: 'eth_chainId' });
-                        if (newChainId.toLowerCase() !== requiredChainId.toLowerCase()) {
-                            throw new Error('Chain switch verification failed');
-                        }
-                    } catch (verifyErr) {
-                        console.warn('Chain verification failed, proceeding anyway:', verifyErr);
-                    }
-                    
                 } catch (switchError) {
-                    // =============================================
-                    // STEP 4: If chain not added, add it
-                    // =============================================
                     if (switchError.code === 4902) {
                         statusMsg.textContent = `Adding ${requiredChainName} to wallet...`;
                         setButtonLoading(depositBtn, 'approving', `Adding ${requiredChainName}...`);
@@ -7287,9 +7266,6 @@ async function executeDeposit() {
                 statusMsg.textContent = `Already on ${requiredChainName}`;
             }
             
-            // =============================================
-            // STEP 5: Get fresh accounts after potential chain switch
-            // =============================================
             try {
                 accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
             } catch (e) {
@@ -7303,12 +7279,9 @@ async function executeDeposit() {
             statusMsg.textContent = 'Building transaction...';
             
             // =============================================
-            // STEP 6: Build transaction based on asset type
-            // NATIVE assets: use native transfer (to + value)
-            // ERC-20 tokens: use contract transfer (to + value + data)
+            // STEP: Determine asset type and build transaction
             // =============================================
             const isNative = NATIVE_ASSETS.includes(asset);
-            const isToken = ERC20_ASSETS.includes(asset);
             
             let txData;
             
@@ -7323,13 +7296,12 @@ async function executeDeposit() {
                     to: depositAddress,
                     value: '0x' + amountInWei.toString(16),
                     from: accounts[0]
-                    // No data field for native transfers
                 };
                 
                 console.log(`💰 NATIVE transfer: ${asset.toUpperCase()} amount: ${cryptoAmount} to: ${depositAddress}`);
                 statusMsg.textContent = `Preparing native ${asset.toUpperCase()} transfer...`;
                 
-            } else if (isToken) {
+            } else {
                 // =============================================
                 // ERC-20 TOKEN TRANSFER (USDT, USDC, SHIB, LINK, UNI, WBTC)
                 // =============================================
@@ -7338,30 +7310,44 @@ async function executeDeposit() {
                     throw new Error('Contract address not available for this token.');
                 }
                 
-                const decimals = addressData.data?.decimals || 18;
-                const amountInWei = ethers.parseUnits(cryptoAmount.toString(), decimals);
+                // =============================================
+                // CRITICAL FIX: Get decimals from backend response
+                // USDT = 6, USDC = 6, SHIB = 18, WBTC = 8, etc.
+                // =============================================
+                let tokenDecimals = addressData.data?.decimals || 18;
+                
+                // If backend didn't return decimals, use hardcoded values
+                if (asset === 'usdt' || asset === 'usdc') {
+                    tokenDecimals = 6;  // USDT and USDC use 6 decimals
+                } else if (asset === 'wbtc') {
+                    tokenDecimals = 8;  // WBTC uses 8 decimals
+                } else if (asset === 'shib' || asset === 'link' || asset === 'uni') {
+                    tokenDecimals = 18; // These use 18 decimals
+                }
+                
+                console.log(`🔢 Token decimals for ${asset.toUpperCase()}: ${tokenDecimals}`);
+                
+                // Convert amount with correct decimals
+                const amountInWei = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
                 
                 // Build ERC-20 transfer transaction
                 const transferData = `0xa9059cbb000000000000000000000000${depositAddress.slice(2)}${amountInWei.toString(16).padStart(64, '0')}`;
                 
                 txData = {
                     to: contractAddress,
-                    value: "0x0",                    // ← FIXED: Required for ERC-20 transfers
+                    value: "0x0",                    // REQUIRED for ERC-20
                     data: transferData,
                     from: accounts[0]
                 };
                 
-                console.log(`💰 ERC-20 transfer: ${asset.toUpperCase()} amount: ${cryptoAmount} contract: ${contractAddress} to: ${depositAddress}`);
+                console.log(`💰 ERC-20 transfer: ${asset.toUpperCase()} amount: ${cryptoAmount} (${amountInWei.toString()} wei) contract: ${contractAddress} to: ${depositAddress}`);
                 statusMsg.textContent = `Preparing ${asset.toUpperCase()} token transfer...`;
-                
-            } else {
-                throw new Error(`Unknown asset type: ${asset}. Please contact support.`);
             }
 
             statusMsg.textContent = 'Approving transaction in wallet...';
             setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
             
-            // Send transaction directly via provider.request()
+            // Send transaction
             const txHash = await providerToUse.request({
                 method: 'eth_sendTransaction',
                 params: [txData]
@@ -7452,12 +7438,10 @@ async function executeDeposit() {
             errorMessage = 'Transaction was rejected in your wallet.';
         } else if (errorMessage.includes('network error')) {
             errorMessage = 'Network error. Please check your connection and try again.';
-        } else if (errorMessage.includes('Invalid RPC URL')) {
-            errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
+        } else if (errorMessage.includes('InvalidFEOpcode')) {
+            errorMessage = 'Transaction simulation failed. This usually means you need to approve the token first or the amount exceeds your balance.';
         } else if (errorMessage.includes('Unknown asset type')) {
             errorMessage = errorMessage;
-        } else if (errorMessage.includes('InvalidFEOpcode')) {
-            errorMessage = 'Transaction simulation failed. Please ensure your wallet is connected to the correct network and has sufficient balance.';
         }
         
         statusMsg.style.color = 'var(--error)';
