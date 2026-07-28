@@ -33,7 +33,7 @@
     <!-- Google Identity Services -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 
-    <!-- ====== SINGLE WALLETCONNECT BUNDLE ====== -->
+    <!-- ====== SINGLE WALLETCONNECT BUNDLE - MUST LOAD FIRST ====== -->
     <!-- This is the ONLY WalletConnect script we use. No other CDN URLs. -->
     <script src="walletconnect.bundle.js"></script>
 
@@ -2051,40 +2051,40 @@
         // =============================================
         // 1. WAIT FOR WALLETCONNECT BUNDLE TO LOAD
         // =============================================
-        function waitForWalletConnectBundle() {
-            return new Promise((resolve, reject) => {
-                // Check if already loaded via the bundle
-                if (typeof window.WalletConnectSignClient !== 'undefined') {
-                    console.log('✅ WalletConnect bundle already loaded');
-                    resolve();
-                    return;
+        async function waitForWalletConnectBundle() {
+            const timeout = 15000;
+            const start = Date.now();
+            const pollInterval = 100;
+
+            console.log('⏳ Waiting for walletconnect.bundle.js to load...');
+
+            while (true) {
+                // Check for BOTH globals that the bundle should provide
+                const hasProvider = typeof window.WalletConnectProvider !== 'undefined';
+                const hasSignClient = typeof window.WalletConnectSignClient !== 'undefined';
+
+                if (hasProvider && hasSignClient) {
+                    console.log('✅ WalletConnect bundle ready (Provider + SignClient)');
+                    return true;
                 }
 
-                console.log('⏳ Waiting for walletconnect.bundle.js to load...');
+                if (hasProvider && !hasSignClient) {
+                    console.log('⚠️ WalletConnectProvider found, waiting for SignClient...');
+                }
 
-                // Poll for the global
-                let attempts = 0;
-                const maxAttempts = 60;
-                const interval = setInterval(() => {
-                    attempts++;
-                    if (typeof window.WalletConnectSignClient !== 'undefined') {
-                        clearInterval(interval);
-                        console.log('✅ WalletConnect bundle detected');
-                        resolve();
-                        return;
-                    }
-                    if (attempts >= maxAttempts) {
-                        clearInterval(interval);
-                        reject(new Error('WalletConnect bundle load timeout after ' + (attempts * 200) + 'ms'));
-                    }
-                }, 200);
+                if (!hasProvider && hasSignClient) {
+                    console.log('⚠️ WalletConnectSignClient found, waiting for Provider...');
+                }
 
-                // Overall timeout
-                setTimeout(() => {
-                    clearInterval(interval);
-                    reject(new Error('WalletConnect bundle load timeout (15s)'));
-                }, 15000);
-            });
+                if (Date.now() - start > timeout) {
+                    const missing = [];
+                    if (typeof window.WalletConnectProvider === 'undefined') missing.push('WalletConnectProvider');
+                    if (typeof window.WalletConnectSignClient === 'undefined') missing.push('WalletConnectSignClient');
+                    throw new Error(`WalletConnect bundle failed to load after ${timeout}ms. Missing: ${missing.join(', ')}`);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+            }
         }
 
         // =============================================
@@ -2092,7 +2092,12 @@
         // =============================================
         document.addEventListener('DOMContentLoaded', function() {
             initializeEIP6963();
-            wcInitPromise = silentlyInitWalletConnect();
+            // Start initialization but don't block DOM rendering
+            wcInitPromise = silentlyInitWalletConnect().catch(err => {
+                console.error('Initial WalletConnect init failed:', err);
+                // Don't throw - let the user retry via button click
+                return null;
+            });
         });
 
         async function silentlyInitWalletConnect() {
@@ -2136,8 +2141,7 @@
                 wcClientReady = true;
                 console.log('✅ WalletConnect SignClient initialized from bundle and ready');
 
-                // Clean up old pairings
-                await pruneStalePairings();
+                // Clean up old pairings                await pruneStalePairings();
 
                 return signClient;
 
@@ -2433,6 +2437,9 @@
             document.getElementById('wc-mobile-status').classList.remove('active');
 
             try {
+                // Ensure the bundle is loaded before proceeding
+                await waitForWalletConnectBundle();
+
                 initializeEIP6963();
 
                 const isMobile = isMobileDevice();
@@ -2460,6 +2467,15 @@
                             }
                         } catch (providerErr) {
                             console.log('Provider connection failed, falling back to WalletConnect:', providerErr.message);
+                        }
+                    }
+
+                    // Ensure signClient is initialized before generating URI
+                    if (!signClient || !wcClientReady) {
+                        document.getElementById('wc-status-text').textContent = 'Initializing WalletConnect...';
+                        await silentlyInitWalletConnect();
+                        if (!signClient || !wcClientReady) {
+                            throw new Error('Failed to initialize WalletConnect. Please try again.');
                         }
                     }
 
