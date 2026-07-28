@@ -2305,10 +2305,11 @@
                 };
                 document.addEventListener('visibilitychange', handleVisibilityChange, { once: true });
 
+                // FIX 3: Increased timeout from 2500ms to 8000ms to prevent false positive App Store redirects
                 setTimeout(() => {
                     document.removeEventListener('visibilitychange', handleVisibilityChange);
                     resolve(false);
-                }, 2500);
+                }, 8000);
             });
 
             window.location.href = deepLinkUrl;
@@ -2323,6 +2324,7 @@
 
         // =============================================
         // 6. URI GENERATION USING BUNDLE - MATCHES DASHBOARD
+        // FIX 1: Changed requiredNamespaces to optionalNamespaces
         // =============================================
         async function generateWalletConnectURI(walletType) {
             try {
@@ -2339,8 +2341,10 @@
 
                 await pruneStalePairings();
 
+                // FIX 1: Using optionalNamespaces instead of requiredNamespaces
+                // This avoids the "requiredNamespaces are deprecated" warning
                 const connectParams = {
-                    requiredNamespaces: {
+                    optionalNamespaces: {
                         eip155: {
                             methods: [
                                 'personal_sign',
@@ -2370,6 +2374,10 @@
             }
         }
 
+        // =============================================
+        // 7. WAIT FOR WALLETCONNECT SESSION
+        // FIX 2: Improved account extraction with detailed logging
+        // =============================================
         async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
             return new Promise(async (resolve, reject) => {
                 const timeout = setTimeout(() => {
@@ -2390,21 +2398,44 @@
                     clearTimeout(timeout);
                     wcSessionPending = false;
 
-                    if (session && session.namespaces) {
-                        const namespace = session.namespaces.eip155;
-                        if (namespace && namespace.accounts && namespace.accounts.length > 0) {
-                            const account = namespace.accounts[0];
-                            const address = account.split(':')[2];
-                            if (address) {
+                    console.log('📦 WalletConnect session received:', JSON.stringify(session, null, 2));
+
+                    // FIX 2: Extract accounts from session safely with proper path
+                    const accounts = session?.namespaces?.eip155?.accounts || [];
+                    console.log('📋 WalletConnect accounts from session:', accounts);
+
+                    if (accounts && accounts.length > 0) {
+                        const account = accounts[0];
+                        const parts = account.split(':');
+
+                        if (parts.length >= 3) {
+                            const chainId = parseInt(parts[1]) || 1;
+                            const address = parts[2];
+
+                            console.log('✅ WalletConnect account found:', address);
+                            console.log('✅ Chain ID:', chainId);
+
+                            resolve({
+                                accounts: [address],
+                                chainId: chainId,
+                                session: session
+                            });
+                            return;
+                        } else {
+                            // Handle case where account is already just the address
+                            console.log('📋 Account format detected as address only:', account);
+                            if (/^0x[a-fA-F0-9]{40}$/.test(account)) {
                                 resolve({
-                                    accounts: [address],
-                                    chainId: parseInt(account.split(':')[1]),
+                                    accounts: [account],
+                                    chainId: 1,
                                     session: session
                                 });
+                                return;
                             }
                         }
                     }
-                    reject(new Error('No accounts found in session'));
+
+                    reject(new Error('Wallet connected but no accounts returned'));
                 } catch (err) {
                     clearTimeout(timeout);
                     wcSessionPending = false;
@@ -2414,7 +2445,7 @@
         }
 
         // =============================================
-        // 7. MAIN CONNECTION HANDLER
+        // 8. MAIN CONNECTION HANDLER
         // =============================================
         async function connectWeb3Wallet(targetRdns, walletType) {
             if (isConnecting) return;
