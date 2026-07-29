@@ -2612,7 +2612,7 @@
 
   <script>
     // ============================================================
-    // PRODUCTION-GRADE WEB3 AUTHENTICATION FLOW - MATCHES LOGIN PAGE
+    // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
     // STAGE-BASED ARCHITECTURE: WALLET ROUTER → PLATFORM DETECTION
     // → CONNECTIVITY → VALIDATION → NONCE → SIWE → SIGN → AUTH
     // ============================================================
@@ -2810,12 +2810,12 @@
 
     // =============================================
     // CONNECT MOBILE WALLET (Deep Link + WalletConnect)
-    // FIXED: Opens wallet app directly without browser first
+    // FIXED: Properly detects installed wallets and connects directly
     // =============================================
     async function connectMobileWallet(walletType) {
         const wcStatus = document.getElementById('wc-mobile-status');
         wcStatus.classList.add('active');
-        document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
+        document.getElementById('wc-status-text').textContent = 'Checking for wallet...';
 
         const rdnsMap = {
             'metamask': 'io.metamask',
@@ -2824,8 +2824,11 @@
             'rainbow': 'me.rainbow'
         };
         const targetRdns = rdnsMap[walletType];
+        
+        // FIRST: Check for installed wallet via EIP-6963 or window.ethereum
         let providerInfo = null;
 
+        // Check EIP-6963 discovered providers first
         if (eip6963Initialized) {
             for (const p of discoveredProviders) {
                 if (p.info.rdns === targetRdns) {
@@ -2834,6 +2837,8 @@
                 }
             }
         }
+        
+        // If not found, check window.ethereum for the specific wallet
         if (!providerInfo && window.ethereum) {
             const isTarget =
                 (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
@@ -2845,28 +2850,54 @@
             }
         }
 
+        // SECOND: If wallet IS installed, connect directly - NO DEEP LINK, NO PLAY STORE
         if (providerInfo) {
-            document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
+            document.getElementById('wc-status-text').textContent = 'Wallet detected! Connecting...';
             const provider = providerInfo.provider;
             try {
-                await provider.request({ method: 'eth_requestAccounts' });
-                return { provider, session: null };
+                // Request accounts - this triggers the wallet's native connection flow
+                const accounts = await provider.request({ method: 'eth_requestAccounts' });
+                if (accounts && accounts.length > 0) {
+                    wcStatus.classList.remove('active');
+                    return { provider, session: null };
+                }
             } catch (err) {
-                console.log('Provider request failed, falling back to deep link:', err.message);
+                console.log('Provider connection error:', err.message);
+                // If user rejects or there's an error, we can try deep link fallback
+                if (err.code === 4001) {
+                    // User rejected - don't redirect to store
+                    throw new Error('Connection rejected in wallet. Please try again.');
+                }
+                // For other errors, we may try deep link fallback
             }
         }
 
-        document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
+        // THIRD: If wallet is NOT installed, use deep link + WalletConnect with store fallback
+        // But ONLY if we're sure the wallet isn't installed
+        document.getElementById('wc-status-text').textContent = 'Wallet not detected. Opening wallet app...';
 
+        // Double-check if wallet is actually installed before redirecting to store
+        // Check for any wallet provider that might indicate a wallet is installed
+        const hasAnyWallet = window.ethereum || discoveredProviders.length > 0;
+        
+        if (!hasAnyWallet) {
+            // No wallet at all - redirect to store
+            const storeUrl = getAppStoreUrl(walletType);
+            document.getElementById('wc-status-text').textContent = 'Wallet not found. Redirecting to app store...';
+            setTimeout(() => {
+                window.location.href = storeUrl;
+            }, 1500);
+            throw new Error('Wallet not installed. Redirecting to app store...');
+        }
+
+        // If we get here, we have a wallet but it didn't connect - try deep link
         const wcUri = await generateWalletConnectURI(walletType);
         if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
 
         const deepLink = openDeepLink(walletType, wcUri);
-        const storeUrl = getAppStoreUrl(walletType);
 
-        // FIXED: Redirect immediately to deep link - opens wallet app directly
-        // without opening browser first
-        safeRedirectToWallet(deepLink, storeUrl);
+        // Redirect to deep link - this will open the wallet app
+        window.location.href = deepLink;
 
         document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
 
@@ -3159,20 +3190,6 @@
         if (/Android/i.test(ua)) return 'android';
         if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
         return 'desktop';
-    }
-
-    function safeRedirectToWallet(deepLinkUrl, storeUrl) {
-        // FIXED: Immediate redirect to deep link - opens wallet app directly
-        // No browser page is shown before redirect
-        window.location.href = deepLinkUrl;
-        
-        // Fallback: If the app doesn't open (user not redirected), go to store
-        setTimeout(() => {
-            // If the page is still visible after 3 seconds, the app didn't open
-            if (!document.hidden) {
-                window.location.href = storeUrl;
-            }
-        }, 3000);
     }
 
     // =============================================
