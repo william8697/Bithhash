@@ -2009,10 +2009,10 @@
     </script>
 
     <script>
-     // ============================================================
+    // ============================================================
 // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
 // STAGE-BASED ARCHITECTURE: WALLET ROUTER → PLATFORM DETECTION
-// → CONNECTIVITY → VALIDATION → NONCE → SIWE → SIGN → AUTH
+// → CONNECTIVITY → VALIDATION → NONCE → SIGN → AUTH
 // ============================================================
 
 // =============================================
@@ -2044,6 +2044,18 @@ let currentAuthMethod = 'form';
 const discoveredProviders = [];
 let eip6963Initialized = false;
 
+// OTP state
+let otpTimer, resendTimer, currentUserEmail = '',
+    currentTempToken = '',
+    lastOtpRequestTime = 0;
+const OTP_COOLDOWN_PERIOD = 60000;
+
+// Login cooldown
+let lastLoginAttempt = 0;
+const LOGIN_COOLDOWN = 5000;
+let lastGoogleSignIn = 0;
+const GOOGLE_SIGNIN_COOLDOWN = 5000;
+
 // =============================================
 // HELPER: Get timezone-based greeting
 // =============================================
@@ -2057,6 +2069,31 @@ function getGreetingByTimezone(offsetMinutes = 0) {
     if (hour >= 12 && hour < 17) return 'Good afternoon';
     if (hour >= 17 && hour < 22) return 'Good evening';
     return 'Hello';
+}
+
+// =============================================
+// HELPER: Get crypto logo URL
+// =============================================
+function getCryptoLogo(asset) {
+    const logoMap = {
+        'BTC': 'https://cryptologos.cc/logos/bitcoin-btc-logo.png',
+        'ETH': 'https://cryptologos.cc/logos/ethereum-eth-logo.png',
+        'USDT': 'https://cryptologos.cc/logos/tether-usdt-logo.png',
+        'BNB': 'https://cryptologos.cc/logos/bnb-bnb-logo.png',
+        'SOL': 'https://cryptologos.cc/logos/solana-sol-logo.png',
+        'USDC': 'https://cryptologos.cc/logos/usd-coin-usdc-logo.png',
+        'XRP': 'https://cryptologos.cc/logos/xrp-xrp-logo.png',
+        'DOGE': 'https://cryptologos.cc/logos/dogecoin-doge-logo.png',
+        'ADA': 'https://cryptologos.cc/logos/cardano-ada-logo.png',
+        'SHIB': 'https://cryptologos.cc/logos/shiba-inu-shib-logo.png',
+        'AVAX': 'https://cryptologos.cc/logos/avalanche-avax-logo.png',
+        'DOT': 'https://cryptologos.cc/logos/polkadot-new-dot-logo.png',
+        'TRX': 'https://cryptologos.cc/logos/tron-trx-logo.png',
+        'LINK': 'https://cryptologos.cc/logos/chainlink-link-logo.png',
+        'MATIC': 'https://cryptologos.cc/logos/polygon-matic-logo.png',
+        'LTC': 'https://cryptologos.cc/logos/litecoin-ltc-logo.png'
+    };
+    return logoMap[asset.toUpperCase()] || 'https://cryptologos.cc/logos/bitcoin-btc-logo.png';
 }
 
 // =============================================
@@ -2082,7 +2119,7 @@ function detectPlatform() {
 }
 
 // =============================================
-// 3. STAGE-BASED EXECUTION
+// 3. STAGE-BASED EXECUTION - FIXED
 // =============================================
 async function executeWalletFlow(walletType) {
     const statusDiv = document.getElementById('web3-status');
@@ -2157,10 +2194,13 @@ async function executeWalletFlow(walletType) {
         const nonceData = await fetchNonce(address, timezoneOffset);
         if (!nonceData) throw new Error('Failed to fetch nonce.');
 
-        // Stage 6: Build SIWE Message
-        const siweMessage = buildSIWEMessage(address, nonceData);
+        // ============================================================
+        // FIX: Use the exact message string from the backend
+        // This is the CRITICAL FIX for the "Address mismatch" error
+        // ============================================================
+        const siweMessage = nonceData.message;
 
-        // Stage 7: Request Wallet Signature
+        // Stage 6: Request Wallet Signature
         let signature;
         try {
             signature = await provider.request({
@@ -2168,11 +2208,13 @@ async function executeWalletFlow(walletType) {
                 params: [siweMessage, address]
             });
         } catch (signErr) {
+            console.error('Signature error:', signErr);
             throw new Error('Signature rejected. Please sign the message to login.');
         }
 
-        // Stage 8: Authentication - WITH TIMEZONE OFFSET
+        // Stage 7: Authentication - WITH TIMEZONE OFFSET
         const authResult = await authenticateWithSignature(address, signature, nonceData, timezoneOffset);
+        
         if (authResult.token) {
             localStorage.setItem('jwtToken', authResult.token);
             window.location.href = 'dashboard';
@@ -2195,6 +2237,13 @@ async function executeWalletFlow(walletType) {
         } else {
             showConnectionError(errorMsg);
         }
+        
+        // Reset UI
+        document.querySelectorAll('.wallet-btn').forEach(btn => {
+            btn.disabled = false;
+            const statusEl = btn.querySelector('.connection-status');
+            if (statusEl) statusEl.className = 'connection-status';
+        });
     }
 }
 
@@ -2313,7 +2362,7 @@ async function connectMobileWallet(walletType) {
 }
 
 // =============================================
-// WALLETCONNECT HELPERS - MATCHES DASHBOARD
+// WALLETCONNECT HELPERS
 // =============================================
 async function generateWalletConnectURI(walletType) {
     if (!wcInitPromise) {
@@ -2341,9 +2390,6 @@ async function generateWalletConnectURI(walletType) {
     return uri;
 }
 
-// =============================================
-// FIXED: waitForWalletConnectSession - approval is a function, not a Promise
-// =============================================
 async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
     return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
@@ -2615,7 +2661,7 @@ function safeRedirectToWallet(deepLinkUrl, storeUrl) {
 }
 
 // =============================================
-// NONCE & SIWE - WITH TIMEZONE SUPPORT
+// NONCE & SIWE - FIXED: Use exact message from backend
 // =============================================
 async function fetchNonce(address, timezoneOffset = 0) {
     const response = await fetch(
@@ -2631,25 +2677,6 @@ async function fetchNonce(address, timezoneOffset = 0) {
         throw new Error(data.message || 'Failed to fetch nonce.');
     }
     return data.data;
-}
-
-function buildSIWEMessage(address, nonceData) {
-    const domain = nonceData.domain || window.location.host;
-    const uri = nonceData.uri || window.location.origin;
-    const statement = nonceData.statement || 'Sign in to BitHash Capital';
-    const issuedAt = nonceData.issuedAt || new Date().toISOString();
-    const expiration = nonceData.expiration || new Date(Date.now() + 3600000).toISOString();
-    const chainId = connectionManager.chainId || 1;
-
-    return `${domain} wants you to sign in with your Ethereum account:\n` +
-        `${address}\n\n` +
-        `${statement}\n\n` +
-        `URI: ${uri}\n` +
-        `Version: 1\n` +
-        `Chain ID: ${chainId}\n` +
-        `Nonce: ${nonceData.nonce}\n` +
-        `Issued At: ${issuedAt}\n` +
-        `Expiration Time: ${expiration}`;
 }
 
 // =============================================
@@ -2755,13 +2782,8 @@ function retryWalletConnect() {
 }
 
 // =============================================
-// OTP MODAL
+// OTP MODAL - FIXED
 // =============================================
-let otpTimer, resendTimer, currentUserEmail = '',
-    currentTempToken = '',
-    lastOtpRequestTime = 0;
-const OTP_COOLDOWN_PERIOD = 60000;
-
 function showTwoStepModal(email, tempToken) {
     currentUserEmail = email;
     currentTempToken = tempToken;
@@ -3090,9 +3112,6 @@ function validateLoginForm() {
     return isValid;
 }
 
-let lastLoginAttempt = 0;
-const LOGIN_COOLDOWN = 5000;
-
 document.getElementById('login-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     const now = Date.now();
@@ -3194,9 +3213,6 @@ async function checkAuthState() {
         console.error('Auth check failed:', error);
     }
 }
-
-let lastGoogleSignIn = 0;
-const GOOGLE_SIGNIN_COOLDOWN = 5000;
 
 function handleGoogleSignIn(response) {
     const now = Date.now();
