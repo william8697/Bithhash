@@ -2040,8 +2040,6 @@ let wcInitPromise = null;
 let wcInitializationStarted = false;
 let isConnecting = false;
 let currentAuthMethod = 'form';
-let eip6963Initialized = false;
-const discoveredProviders = [];
 
 // OTP state
 let otpTimer, resendTimer, currentUserEmail = '',
@@ -2222,7 +2220,7 @@ class WalletLauncher {
     _getDeepLink(walletType) {
         const links = {
             'metamask': 'https://metamask.app.link',
-            'trust': 'trust://',
+            'trust': 'https://link.trustwallet.com',
             'phantom': 'phantom://',
             'rainbow': 'rainbow://'
         };
@@ -2408,82 +2406,7 @@ async function executeWalletFlow(walletType) {
 }
 
 // =============================================
-// 6. PROVIDER DETECTION FOR DESKTOP
-// =============================================
-function detectWalletProvider(walletType) {
-    const deviceEngine = new DeviceDetectionEngine();
-    const deviceInfo = deviceEngine.detect();
-    
-    if (deviceInfo.isMobile || deviceInfo.isTablet) {
-        return { provider: null, detected: false, source: 'mobile' };
-    }
-
-    console.log(`🔍 [Desktop] Detecting ${walletType} extension...`);
-
-    const rdnsMap = {
-        'metamask': 'io.metamask',
-        'trust': 'com.trustwallet.app',
-        'phantom': 'app.phantom',
-        'rainbow': 'me.rainbow'
-    };
-    
-    for (const p of discoveredProviders) {
-        if (p.info.rdns === rdnsMap[walletType]) {
-            console.log(`✅ [Desktop] ${walletType} found via EIP-6963`);
-            return { provider: p.provider, detected: true, source: 'eip6963' };
-        }
-    }
-
-    if (window.ethereum) {
-        const ethereum = window.ethereum;
-        
-        switch(walletType) {
-            case 'metamask':
-                if (ethereum.isMetaMask) {
-                    console.log('✅ [Desktop] MetaMask detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-            case 'trust':
-                if (ethereum.isTrust || ethereum.isTrustWallet) {
-                    console.log('✅ [Desktop] Trust Wallet detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                if (ethereum.providers) {
-                    for (const provider of ethereum.providers) {
-                        if (provider.isTrust || provider.isTrustWallet) {
-                            console.log('✅ [Desktop] Trust Wallet detected in providers array');
-                            return { provider: provider, detected: true, source: 'providers' };
-                        }
-                    }
-                }
-                break;
-            case 'phantom':
-                if (ethereum.isPhantom) {
-                    console.log('✅ [Desktop] Phantom detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-            case 'rainbow':
-                if (ethereum.isRainbow) {
-                    console.log('✅ [Desktop] Rainbow detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-        }
-    }
-
-    if (walletType === 'trust' && window.trustWallet) {
-        console.log('✅ [Desktop] Trust Wallet detected via window.trustWallet');
-        return { provider: window.trustWallet, detected: true, source: 'window.trustWallet' };
-    }
-
-    console.log(`❌ [Desktop] ${walletType} not detected`);
-    return { provider: null, detected: false, source: 'none' };
-}
-
-// =============================================
-// 7. WALLETCONNECT HELPERS
+// 6. WALLETCONNECT HELPERS
 // =============================================
 async function generateWalletConnectURI(walletType) {
     if (!wcInitPromise) {
@@ -2631,10 +2554,20 @@ function waitForWalletConnectScript() {
 }
 
 // =============================================
-// 8. EIP-6963 INITIALIZATION
+// 7. EIP-6963 INITIALIZATION (DESKTOP ONLY)
 // =============================================
 function initializeEIP6963() {
-    if (eip6963Initialized) return;
+    const deviceEngine = new DeviceDetectionEngine();
+    const deviceInfo = deviceEngine.detect();
+    
+    // Only initialize on desktop
+    if (!deviceInfo.isDesktop) {
+        console.log('[EIP-6963] Skipped - mobile device detected');
+        return;
+    }
+    
+    console.log('[EIP-6963] Initializing for desktop...');
+    const discoveredProviders = [];
     
     window.addEventListener('eip6963:announceProvider', (event) => {
         const detail = event.detail;
@@ -2645,12 +2578,10 @@ function initializeEIP6963() {
     });
     
     window.dispatchEvent(new Event('eip6963:requestProvider'));
-    eip6963Initialized = true;
-    console.log('🔍 EIP-6963 initialized');
 }
 
 // =============================================
-// 9. NONCE & AUTHENTICATION
+// 8. NONCE & AUTHENTICATION
 // =============================================
 async function fetchNonce(address, timezoneOffset = 0) {
     const response = await fetch(
@@ -2703,7 +2634,7 @@ function getGreetingByTimezone(timezoneOffset) {
 }
 
 // =============================================
-// 10. UI HELPERS
+// 9. UI HELPERS
 // =============================================
 function resetWalletUI(walletType) {
     const statusEl = document.getElementById(`status-${walletType}`);
@@ -2773,7 +2704,7 @@ function retryWalletConnect() {
 }
 
 // =============================================
-// 11. OTP MODAL (Complete - Preserved)
+// 10. OTP MODAL (Complete - Preserved)
 // =============================================
 function showTwoStepModal(email, tempToken) {
     currentUserEmail = email;
@@ -3015,7 +2946,7 @@ modal.addEventListener('click', (event) => {
 });
 
 // =============================================
-// 12. TRADITIONAL FORM LOGIC (Preserved)
+// 11. TRADITIONAL FORM LOGIC (Preserved)
 // =============================================
 function validateLoginForm() {
     let isValid = true;
@@ -3259,7 +3190,7 @@ document.getElementById('enable-2fa').addEventListener('click', function() {
 });
 
 // =============================================
-// 13. INITIALIZATION
+// 12. INITIALIZATION
 // =============================================
 AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
 
@@ -3270,14 +3201,15 @@ window.addEventListener('load', function() {
     checkAuthState();
     initializeAccountTypeSelection();
     
-    // Initialize EIP-6963 for desktop
+    // Initialize EIP-6963 for desktop only
+    // Mobile never uses EIP-6963 or window.ethereum
     const deviceEngine = new DeviceDetectionEngine();
     const deviceInfo = deviceEngine.detect();
     if (deviceInfo.isDesktop) {
         initializeEIP6963();
     }
     
-    // Initialize WalletConnect for mobile
+    // Initialize WalletConnect for all devices (mobile uses it, desktop uses it as fallback)
     wcInitPromise = silentlyInitWalletConnect();
 });
 
