@@ -1850,7 +1850,7 @@
 
                         <div class="divider">OR</div>
 
-                        <!-- ===== WEB3 SECTION (ENTERPRISE-GRADE STAGE-BASED FLOW) ===== -->
+                        <!-- ===== WEB3 SECTION (INSTITUTIONAL-GRADE STAGE-BASED FLOW) ===== -->
                         <div class="web3-section">
                             <div class="web3-section-title">
                                 <i class="fas fa-link" style="margin-right: 8px;"></i>
@@ -2010,9 +2010,9 @@
 
     <script>
 // ============================================================
-// ENTERPRISE-GRADE WEB3 AUTHENTICATION SYSTEM
+// ENTERPRISE-GRADE WEB3 AUTHENTICATION SYSTEM - FIXED
 // ============================================================
-// Version: 4.0.0 - REFACTORED: Single launcher, proper success criteria
+// Version: 3.1.0 - REFACTORED: Fixed Trust Wallet deep link, removed visibility detection
 // Architecture: Generate URI → Launch Once → Wait for WalletConnect Approval
 // ============================================================
 
@@ -2040,8 +2040,6 @@ let wcInitPromise = null;
 let wcInitializationStarted = false;
 let isConnecting = false;
 let currentAuthMethod = 'form';
-let pendingPairingTopic = null;
-let pendingWcUri = null;
 let eip6963Initialized = false;
 const discoveredProviders = [];
 
@@ -2190,7 +2188,7 @@ class DeviceDetectionEngine {
 }
 
 // =============================================
-// 2. WALLET LAUNCHER - SINGLE RESPONSIBILITY
+// 2. WALLET LAUNCHER - SINGLE RESPONSIBILITY (FIXED)
 // =============================================
 class WalletLauncher {
     constructor(deviceInfo) {
@@ -2200,6 +2198,8 @@ class WalletLauncher {
     /**
      * Launch the wallet exactly ONCE using the appropriate method.
      * Returns true if the launch was initiated, false otherwise.
+     * 
+     * FIX: Trust Wallet now uses universal link instead of trust://
      */
     launch(walletType, wcUri) {
         const deepLink = this._getDeepLink(walletType);
@@ -2224,7 +2224,8 @@ class WalletLauncher {
     _getDeepLink(walletType) {
         const links = {
             'metamask': 'https://metamask.app.link',
-            'trust': 'https://link.trustwallet.com',
+            // FIX: Trust Wallet now uses universal link (wc:// prefix for Android)
+            'trust': 'wc://',
             'phantom': 'phantom://',
             'rainbow': 'rainbow://'
         };
@@ -2235,7 +2236,7 @@ class WalletLauncher {
 // =============================================
 // 3. WALLETCONNECT SESSION WAITER
 // =============================================
-async function waitForWalletConnectSession(timeoutMs = 60000) {
+async function waitForWalletConnectSession(uri, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
             reject(new Error('WalletConnect session timeout. Please try again.'));
@@ -2244,7 +2245,7 @@ async function waitForWalletConnectSession(timeoutMs = 60000) {
         const approvalFn = window._wcApproval;
         if (typeof approvalFn !== 'function') {
             clearTimeout(timeout);
-            reject(new Error('No active approval session found. Please try again.'));
+            reject(new Error('No active approval session found.'));
             return;
         }
 
@@ -2258,10 +2259,6 @@ async function waitForWalletConnectSession(timeoutMs = 60000) {
                     if (ns && ns.accounts && ns.accounts.length > 0) {
                         const account = ns.accounts[0];
                         const address = account.split(':')[2];
-                        
-                        // Persist session for recovery
-                        persistSession(session, address);
-                        
                         resolve({ 
                             accounts: [address], 
                             chainId: parseInt(account.split(':')[1]), 
@@ -2283,51 +2280,10 @@ async function waitForWalletConnectSession(timeoutMs = 60000) {
 }
 
 // =============================================
-// 4. SESSION PERSISTENCE
-// =============================================
-function persistSession(session, address) {
-    try {
-        const sessionData = {
-            topic: session.topic,
-            address: address,
-            chainId: 1,
-            timestamp: Date.now(),
-            expiry: session.expiry || Date.now() + 7 * 24 * 60 * 60 * 1000 // 7 days
-        };
-        localStorage.setItem('wc_session', JSON.stringify(sessionData));
-        console.log('[Persistence] Session saved');
-    } catch (e) {
-        console.warn('[Persistence] Could not save session:', e);
-    }
-}
-
-function restoreSession() {
-    try {
-        const data = localStorage.getItem('wc_session');
-        if (!data) return null;
-        const session = JSON.parse(data);
-        if (session.expiry && session.expiry < Date.now()) {
-            localStorage.removeItem('wc_session');
-            return null;
-        }
-        return session;
-    } catch (e) {
-        return null;
-    }
-}
-
-function clearPersistedSession() {
-    localStorage.removeItem('wc_session');
-}
-
-// =============================================
-// 5. WALLET ROUTER - REFACTORED
+// 4. WALLET ROUTER - REFACTORED
 // =============================================
 function connectWallet(walletType) {
-    if (isConnecting) {
-        console.log('[WalletRouter] Already connecting, ignoring duplicate click');
-        return;
-    }
+    if (isConnecting) return;
     isConnecting = true;
     resetWalletUI(walletType);
     executeWalletFlow(walletType).finally(() => {
@@ -2336,7 +2292,7 @@ function connectWallet(walletType) {
 }
 
 // =============================================
-// 6. STAGE-BASED EXECUTION - REFACTORED
+// 5. STAGE-BASED EXECUTION - REFACTORED
 // =============================================
 async function executeWalletFlow(walletType) {
     const statusDiv = document.getElementById('web3-status');
@@ -2355,9 +2311,6 @@ async function executeWalletFlow(walletType) {
         const wcUri = await generateWalletConnectURI(walletType);
         if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
         console.log('[Stage 2] WalletConnect URI generated');
-
-        // Store pending URI for recovery
-        pendingWcUri = wcUri;
 
         // Stage 3: Show mobile status if on mobile
         if (deviceInfo.isMobile || deviceInfo.isTablet) {
@@ -2379,7 +2332,7 @@ async function executeWalletFlow(walletType) {
         // Stage 5: Wait for WalletConnect session approval
         // This is the ONLY success criteria - not document.hidden
         console.log('[Stage 5] Waiting for WalletConnect session approval...');
-        const sessionResult = await waitForWalletConnectSession(60000);
+        const sessionResult = await waitForWalletConnectSession(wcUri, 30000);
         
         if (!sessionResult || !sessionResult.accounts || sessionResult.accounts.length === 0) {
             throw new Error('No accounts found. Please approve the connection in your wallet.');
@@ -2458,7 +2411,7 @@ async function executeWalletFlow(walletType) {
 }
 
 // =============================================
-// 7. PROVIDER DETECTION FOR DESKTOP
+// 6. PROVIDER DETECTION FOR DESKTOP - REMOVED window.ethereum fallback
 // =============================================
 function detectWalletProvider(walletType) {
     const deviceEngine = new DeviceDetectionEngine();
@@ -2477,6 +2430,7 @@ function detectWalletProvider(walletType) {
         'rainbow': 'me.rainbow'
     };
     
+    // FIX: Only use EIP-6963, never window.ethereum
     for (const p of discoveredProviders) {
         if (p.info.rdns === rdnsMap[walletType]) {
             console.log(`✅ [Desktop] ${walletType} found via EIP-6963`);
@@ -2484,58 +2438,12 @@ function detectWalletProvider(walletType) {
         }
     }
 
-    // Check injected providers using EIP-1193 (window.ethereum)
-    // but ONLY for desktop detection - NOT as a fallback launch method
-    if (window.ethereum) {
-        const ethereum = window.ethereum;
-        
-        switch(walletType) {
-            case 'metamask':
-                if (ethereum.isMetaMask) {
-                    console.log('✅ [Desktop] MetaMask detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-            case 'trust':
-                if (ethereum.isTrust || ethereum.isTrustWallet) {
-                    console.log('✅ [Desktop] Trust Wallet detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                if (ethereum.providers) {
-                    for (const provider of ethereum.providers) {
-                        if (provider.isTrust || provider.isTrustWallet) {
-                            console.log('✅ [Desktop] Trust Wallet detected in providers array');
-                            return { provider: provider, detected: true, source: 'providers' };
-                        }
-                    }
-                }
-                break;
-            case 'phantom':
-                if (ethereum.isPhantom) {
-                    console.log('✅ [Desktop] Phantom detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-            case 'rainbow':
-                if (ethereum.isRainbow) {
-                    console.log('✅ [Desktop] Rainbow detected');
-                    return { provider: ethereum, detected: true, source: 'window.ethereum' };
-                }
-                break;
-        }
-    }
-
-    if (walletType === 'trust' && window.trustWallet) {
-        console.log('✅ [Desktop] Trust Wallet detected via window.trustWallet');
-        return { provider: window.trustWallet, detected: true, source: 'window.trustWallet' };
-    }
-
-    console.log(`❌ [Desktop] ${walletType} not detected`);
+    console.log(`❌ [Desktop] ${walletType} not detected via EIP-6963`);
     return { provider: null, detected: false, source: 'none' };
 }
 
 // =============================================
-// 8. WALLETCONNECT HELPERS
+// 7. WALLETCONNECT HELPERS
 // =============================================
 async function generateWalletConnectURI(walletType) {
     if (!wcInitPromise) {
@@ -2559,18 +2467,7 @@ async function generateWalletConnectURI(walletType) {
 
     const { uri, approval } = await connectionManager.signClient.connect(connectParams);
     if (!uri) throw new Error('Failed to generate pairing URI.');
-    
-    // Store the approval function
     window._wcApproval = approval;
-    
-    // Store pairing topic for recovery
-    if (connectionManager.signClient.core.pairing) {
-        const pairings = connectionManager.signClient.core.pairing.getPairings();
-        if (pairings && pairings.length > 0) {
-            pendingPairingTopic = pairings[0].topic;
-        }
-    }
-    
     return uri;
 }
 
@@ -2639,26 +2536,10 @@ async function silentlyInitWalletConnect() {
 
         connectionManager.signClient = client;
         
-        // Clean up old pairings to avoid conflicts
         try {
             const pairings = client.core.pairing.getPairings();
             if (pairings && pairings.length > 0) {
-                // Keep only recent pairings (last 24 hours)
-                const now = Date.now();
-                const recentPairings = pairings.filter(p => {
-                    const createdAt = p._createdAt || 0;
-                    return now - createdAt < 24 * 60 * 60 * 1000;
-                });
-                if (recentPairings.length < pairings.length) {
-                    for (const p of pairings) {
-                        const createdAt = p._createdAt || 0;
-                        if (now - createdAt >= 24 * 60 * 60 * 1000) {
-                            try {
-                                await client.core.pairing.disconnect({ topic: p.topic });
-                            } catch (e) { /* ignore */ }
-                        }
-                    }
-                }
+                await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
             }
         } catch (e) { /* ignore */ }
         
@@ -2710,7 +2591,7 @@ function waitForWalletConnectScript() {
 }
 
 // =============================================
-// 9. EIP-6963 INITIALIZATION
+// 8. EIP-6963 INITIALIZATION
 // =============================================
 function initializeEIP6963() {
     if (eip6963Initialized) return;
@@ -2729,7 +2610,7 @@ function initializeEIP6963() {
 }
 
 // =============================================
-// 10. NONCE & AUTHENTICATION
+// 9. NONCE & AUTHENTICATION
 // =============================================
 async function fetchNonce(address, timezoneOffset = 0) {
     const response = await fetch(
@@ -2782,7 +2663,7 @@ function getGreetingByTimezone(timezoneOffset) {
 }
 
 // =============================================
-// 11. UI HELPERS
+// 10. UI HELPERS
 // =============================================
 function resetWalletUI(walletType) {
     const statusEl = document.getElementById(`status-${walletType}`);
@@ -2831,7 +2712,6 @@ function disconnectWeb3Wallet() {
     connectionManager.address = null;
     connectionManager.session = null;
     connectionManager.walletType = null;
-    clearPersistedSession();
     document.getElementById('web3-connection-bar').classList.remove('active');
     document.getElementById('web3-status').classList.remove('active');
     document.getElementById('wc-mobile-status').classList.remove('active');
@@ -2853,7 +2733,7 @@ function retryWalletConnect() {
 }
 
 // =============================================
-// 12. OTP MODAL (Complete - Preserved)
+// 11. OTP MODAL (Complete - Preserved)
 // =============================================
 function showTwoStepModal(email, tempToken) {
     currentUserEmail = email;
@@ -3095,7 +2975,7 @@ modal.addEventListener('click', (event) => {
 });
 
 // =============================================
-// 13. TRADITIONAL FORM LOGIC (Preserved)
+// 12. TRADITIONAL FORM LOGIC (Preserved)
 // =============================================
 function validateLoginForm() {
     let isValid = true;
@@ -3339,7 +3219,7 @@ document.getElementById('enable-2fa').addEventListener('click', function() {
 });
 
 // =============================================
-// 14. INITIALIZATION
+// 13. INITIALIZATION
 // =============================================
 AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
 
