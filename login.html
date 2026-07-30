@@ -2009,9 +2009,9 @@
     </script>
 
     <script>
-  // ============================================================
+// ============================================================
 // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
-// FIXED: Proper device detection & app installation check
+// FIXED: Proper mobile app deep linking - try app first, fallback to store
 // ============================================================
 
 // =============================================
@@ -2094,7 +2094,7 @@ function getCryptoLogo(asset) {
 }
 
 // =============================================
-// 1. DEVICE DETECTION - FIRST STEP
+// 1. DEVICE DETECTION
 // =============================================
 function detectDevice() {
     const ua = navigator.userAgent;
@@ -2112,127 +2112,7 @@ function detectDevice() {
 }
 
 // =============================================
-// 2. CHECK IF MOBILE APP IS INSTALLED
-// =============================================
-async function isMobileAppInstalled(walletType) {
-    const device = detectDevice();
-    
-    // Only check for mobile apps on mobile devices
-    if (!device.isMobile) return false;
-    
-    const deepLink = getDeepLinkUrl(walletType);
-    if (!deepLink) return false;
-    
-    console.log(`🔍 Checking if ${walletType} app is installed on ${device.type}...`);
-    
-    return new Promise((resolve) => {
-        let appDetected = false;
-        let timeoutId = null;
-        
-        // Method 1: Try to detect via iframe (works on Android)
-        if (device.isAndroid) {
-            try {
-                const iframe = document.createElement('iframe');
-                iframe.style.display = 'none';
-                iframe.style.width = '0';
-                iframe.style.height = '0';
-                iframe.src = deepLink;
-                document.body.appendChild(iframe);
-                
-                // If the app opens, the page will lose focus or visibility change
-                const checkVisibility = () => {
-                    if (document.hidden) {
-                        appDetected = true;
-                        document.removeEventListener('visibilitychange', checkVisibility);
-                        if (iframe.parentNode) iframe.remove();
-                        clearTimeout(timeoutId);
-                        resolve(true);
-                    }
-                };
-                
-                document.addEventListener('visibilitychange', checkVisibility);
-                
-                timeoutId = setTimeout(() => {
-                    document.removeEventListener('visibilitychange', checkVisibility);
-                    if (iframe.parentNode) iframe.remove();
-                    if (!appDetected) {
-                        resolve(false);
-                    }
-                }, 2000);
-                
-                return;
-            } catch (err) {
-                console.log('Iframe detection error:', err);
-            }
-        }
-        
-        // Method 2: Check for specific app indicators on Android
-        if (device.isAndroid) {
-            // Check if the app is installed via intent detection
-            // This is a best-effort check
-            const appIndicators = {
-                'metamask': 'io.metamask',
-                'trust': 'com.wallet.crypto.trustapp',
-                'phantom': 'app.phantom',
-                'rainbow': 'me.rainbow'
-            };
-            
-            const packageName = appIndicators[walletType];
-            if (packageName) {
-                // Try to check if the app is installed via intent
-                try {
-                    const intentUrl = `intent://#Intent;package=${packageName};end`;
-                    const link = document.createElement('a');
-                    link.href = intentUrl;
-                    link.style.display = 'none';
-                    document.body.appendChild(link);
-                    
-                    // If the app is installed, the intent will be handled
-                    // We can't directly detect this, but we can try
-                    appDetected = true;
-                    link.remove();
-                } catch (err) {
-                    console.log('Intent detection error:', err);
-                }
-            }
-        }
-        
-        // Method 3: Check for iOS app via universal links
-        if (device.isIOS) {
-            const iosIndicators = {
-                'metamask': 'metamask://',
-                'trust': 'trust://',
-                'phantom': 'phantom://',
-                'rainbow': 'rainbow://'
-            };
-            
-            const scheme = iosIndicators[walletType];
-            if (scheme) {
-                try {
-                    const link = document.createElement('a');
-                    link.href = scheme;
-                    link.style.display = 'none';
-                    document.body.appendChild(link);
-                    
-                    // If the app is installed, the link will be handled
-                    appDetected = true;
-                    link.remove();
-                } catch (err) {
-                    console.log('iOS scheme detection error:', err);
-                }
-            }
-        }
-        
-        // If we couldn't detect via other methods, assume not installed
-        // but give a small delay to be safe
-        setTimeout(() => {
-            resolve(appDetected);
-        }, 500);
-    });
-}
-
-// =============================================
-// 3. WALLET ROUTER - Single entry point
+// 2. WALLET ROUTER - Single entry point
 // =============================================
 function connectWallet(walletType) {
     if (isConnecting) return;
@@ -2244,12 +2124,12 @@ function connectWallet(walletType) {
 }
 
 // =============================================
-// 4. PROVIDER DETECTION FOR DESKTOP
+// 3. PROVIDER DETECTION FOR DESKTOP
 // =============================================
 function detectWalletProvider(walletType) {
     const device = detectDevice();
     
-    // On mobile, we use WalletConnect deep links, not extension detection
+    // On mobile, we use WalletConnect deep links
     if (device.isMobile) {
         return { provider: null, detected: false, source: 'mobile' };
     }
@@ -2275,7 +2155,6 @@ function detectWalletProvider(walletType) {
     if (window.ethereum) {
         const ethereum = window.ethereum;
         
-        // Check for specific wallet flags
         switch(walletType) {
             case 'metamask':
                 if (ethereum.isMetaMask) {
@@ -2323,7 +2202,7 @@ function detectWalletProvider(walletType) {
 }
 
 // =============================================
-// 5. STAGE-BASED EXECUTION - COMPLETELY FIXED
+// 4. STAGE-BASED EXECUTION - PRECISE FIX
 // =============================================
 async function executeWalletFlow(walletType) {
     const statusDiv = document.getElementById('web3-status');
@@ -2347,36 +2226,53 @@ async function executeWalletFlow(walletType) {
         let session = null;
 
         if (device.isMobile) {
-            // Mobile flow - Check if app is installed first
-            console.log(`📱 Mobile detected - checking if ${walletType} app is installed...`);
+            // =============================================
+            // MOBILE FLOW - PRECISE FIX:
+            // 1. Generate WalletConnect URI
+            // 2. Try to open the app via deep link
+            // 3. If app opens, user approves in app
+            // 4. If app doesn't open, user goes to store
+            // =============================================
+            console.log(`📱 Mobile detected - connecting to ${walletType} app...`);
             
-            const appInstalled = await isMobileAppInstalled(walletType);
+            // Generate WalletConnect URI first
+            const wcUri = await generateWalletConnectURI(walletType);
+            if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
             
-            if (appInstalled) {
-                console.log(`✅ ${walletType} app is installed on device`);
-                // Use WalletConnect deep link to open the app
-                const result = await connectMobileWallet(walletType);
-                provider = result.provider;
-                session = result.session;
+            // Get the deep link URL for this wallet
+            const deepLinkUrl = getDeepLinkUrl(walletType);
+            if (!deepLinkUrl) {
+                throw new Error(`No deep link available for ${walletType}`);
+            }
+            
+            // Build the full deep link with WalletConnect URI
+            const fullDeepLink = `${deepLinkUrl}?uri=${encodeURIComponent(wcUri)}`;
+            
+            console.log(`📱 Opening ${walletType} app with deep link: ${fullDeepLink}`);
+            
+            // Show status
+            const wcStatus = document.getElementById('wc-mobile-status');
+            wcStatus.classList.add('active');
+            document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
+            
+            // Try to open the app via deep link
+            // This will either open the app OR take user to the store
+            window.location.href = fullDeepLink;
+            
+            // Update status while waiting for approval
+            document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
+            
+            // Wait for the session
+            session = await waitForWalletConnectSession(wcUri);
+            
+            if (session && session.accounts && session.accounts.length > 0) {
+                provider = createProviderFromSession(session);
+                console.log(`✅ WalletConnect session established for ${walletType}`);
             } else {
-                console.log(`❌ ${walletType} app not installed on device`);
-                // Show install prompt and open app store
-                const storeUrl = getAppStoreUrl(walletType);
-                const walletName = walletType.charAt(0).toUpperCase() + walletType.slice(1);
-                const errorMsg = `
-                    <div style="text-align: left; padding: 10px 0;">
-                        <strong>${walletName} not installed</strong><br>
-                        Please install the ${walletName} app to continue.<br>
-                        <a href="${storeUrl}" target="_blank" style="color: var(--accent); text-decoration: underline; display: inline-block; margin-top: 8px;">
-                            <i class="fas fa-external-link-alt"></i> Install ${walletName}
-                        </a>
-                    </div>
-                `;
-                showConnectionError(errorMsg);
-                throw new Error(`${walletName} not installed. Please install the app and try again.`);
+                throw new Error('No accounts returned from wallet.');
             }
         } else {
-            // Desktop flow - detect installed extension
+            // DESKTOP FLOW - detect installed extension
             console.log(`💻 Desktop detected - detecting ${walletType} extension`);
             const detection = detectWalletProvider(walletType);
             
@@ -2510,81 +2406,26 @@ async function executeWalletFlow(walletType) {
 }
 
 // =============================================
-// 6. MOBILE WALLET CONNECTION
-// =============================================
-async function connectMobileWallet(walletType) {
-    const wcStatus = document.getElementById('wc-mobile-status');
-    wcStatus.classList.add('active');
-    document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
-
-    // Get deep link URL
-    const deepLinkUrl = getDeepLinkUrl(walletType);
-    if (!deepLinkUrl) {
-        throw new Error(`No deep link available for ${walletType}`);
-    }
-
-    console.log(`📱 Opening ${walletType} app via deep link: ${deepLinkUrl}`);
-
-    // Generate WalletConnect URI
-    const wcUri = await generateWalletConnectURI(walletType);
-    if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
-
-    // Open the wallet app via deep link with WalletConnect URI
-    const fullDeepLink = `${deepLinkUrl}?uri=${encodeURIComponent(wcUri)}`;
-    
-    document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
-
-    // Open the deep link - this should open the app directly
-    window.location.href = fullDeepLink;
-
-    document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
-
-    // Wait for the session
-    const session = await waitForWalletConnectSession(wcUri);
-    
-    if (session && session.accounts && session.accounts.length > 0) {
-        return { 
-            provider: createProviderFromSession(session), 
-            session: session 
-        };
-    }
-
-    throw new Error('No accounts returned from wallet.');
-}
-
-// =============================================
-// 7. MOBILE APP DEEP LINKING
+// 5. MOBILE DEEP LINKING - SIMPLIFIED
 // =============================================
 function getDeepLinkUrl(walletType) {
     const device = detectDevice();
     
+    // Universal links that work on both Android and iOS
     const links = {
-        'metamask': {
-            android: 'https://metamask.app.link',
-            ios: 'https://metamask.app.link'
-        },
-        'trust': {
-            android: 'trust://',
-            ios: 'trust://'
-        },
-        'phantom': {
-            android: 'phantom://',
-            ios: 'phantom://'
-        },
-        'rainbow': {
-            android: 'rainbow://',
-            ios: 'rainbow://'
-        }
+        'metamask': 'https://metamask.app.link',
+        'trust': 'trust://',
+        'phantom': 'phantom://',
+        'rainbow': 'rainbow://'
     };
     
-    const platformLinks = links[walletType];
-    if (!platformLinks) return null;
+    // For MetaMask, use the universal link that works everywhere
+    if (walletType === 'metamask') {
+        return 'https://metamask.app.link';
+    }
     
-    if (device.isAndroid) return platformLinks.android;
-    if (device.isIOS) return platformLinks.ios;
-    
-    // Fallback for other mobile
-    return platformLinks.android || platformLinks.ios;
+    // For other wallets, use their native scheme
+    return links[walletType] || null;
 }
 
 function getAppStoreUrl(walletType) {
@@ -2631,7 +2472,7 @@ function getDesktopExtensionUrl(walletType) {
 }
 
 // =============================================
-// 8. WALLETCONNECT HELPERS
+// 6. WALLETCONNECT HELPERS
 // =============================================
 async function generateWalletConnectURI(walletType) {
     if (!wcInitPromise) {
@@ -2823,7 +2664,7 @@ function waitForWalletConnectScript() {
 }
 
 // =============================================
-// 9. EIP-6963 INITIALIZATION
+// 7. EIP-6963 INITIALIZATION
 // =============================================
 function initializeEIP6963() {
     if (eip6963Initialized) return;
@@ -2842,7 +2683,7 @@ function initializeEIP6963() {
 }
 
 // =============================================
-// 10. NONCE & AUTHENTICATION
+// 8. NONCE & AUTHENTICATION
 // =============================================
 async function fetchNonce(address, timezoneOffset = 0) {
     const response = await fetch(
@@ -2887,7 +2728,7 @@ async function authenticateWithSignature(address, signature, nonceData, timezone
 }
 
 // =============================================
-// 11. UI HELPERS
+// 9. UI HELPERS
 // =============================================
 function resetWalletUI(walletType) {
     const statusEl = document.getElementById(`status-${walletType}`);
@@ -2957,7 +2798,7 @@ function retryWalletConnect() {
 }
 
 // =============================================
-// 12. OTP MODAL
+// 10. OTP MODAL
 // =============================================
 function showTwoStepModal(email, tempToken) {
     currentUserEmail = email;
@@ -3199,7 +3040,7 @@ modal.addEventListener('click', (event) => {
 });
 
 // =============================================
-// 13. TRADITIONAL FORM LOGIC
+// 11. TRADITIONAL FORM LOGIC
 // =============================================
 function validateLoginForm() {
     let isValid = true;
@@ -3443,7 +3284,7 @@ document.getElementById('enable-2fa').addEventListener('click', function() {
 });
 
 // =============================================
-// 14. INITIALIZATION
+// 12. INITIALIZATION
 // =============================================
 AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
 
