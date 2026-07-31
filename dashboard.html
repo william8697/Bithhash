@@ -7110,9 +7110,8 @@ async function executeDepositModal() {
 
 
 
-
 // =============================================
-// EXECUTE DEPOSIT - WITH MOBILE WALLET TRANSACTION APPROVAL FIX
+// EXECUTE DEPOSIT - WITH CHAIN DETECTION AND SWITCHING FIX
 // =============================================
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
@@ -7198,7 +7197,7 @@ async function executeDeposit() {
 
         console.log("=== Deposit ===");
         console.log("Token:", tokenSymbol);
-        console.log("Chain ID:", chainId);
+        console.log("Chain ID required:", chainId);
         console.log("Contract:", contractAddress);
         console.log("Decimals:", tokenDecimals);
         console.log("Recipient:", depositAddress);
@@ -7243,8 +7242,11 @@ async function executeDeposit() {
                 throw new Error('No accounts found. Please unlock your wallet.');
             }
 
-            // CHAIN ID CHECK AND SWITCH
-            let currentChainId;
+            // DETECT CURRENT CHAIN - BOTH FROM PROVIDER AND SESSION
+            let currentChainId = null;
+            let sessionChainId = null;
+            
+            // First, try to get chain from provider
             try {
                 currentChainId = await providerToUse.request({ method: "eth_chainId" });
                 if (typeof currentChainId === "number") {
@@ -7261,56 +7263,141 @@ async function executeDeposit() {
                     throw new Error(`Invalid eth_chainId response: ${JSON.stringify(currentChainId)}`);
                 }
             } catch (e) {
-                throw new Error(`Unable to determine wallet chain: ${e.message}`);
+                console.warn("Failed to get chain from provider:", e);
             }
-
+            
+            // For WalletConnect, also check the session chain
+            if (isWalletConnectSession && providerToUse.session) {
+                try {
+                    const sessionChains = providerToUse.session?.namespaces?.eip155?.chains || [];
+                    if (sessionChains.length > 0) {
+                        const chain = sessionChains[0];
+                        if (chain && chain.startsWith('eip155:')) {
+                            const chainNum = parseInt(chain.split(':')[1]);
+                            sessionChainId = "0x" + chainNum.toString(16);
+                            console.log("Session chain from WalletConnect:", sessionChainId);
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Failed to get session chain:", e);
+                }
+            }
+            
+            // Use session chain if available and provider chain is different
+            if (sessionChainId && sessionChainId !== currentChainId) {
+                console.log(`Chain mismatch: Provider says ${currentChainId}, Session says ${sessionChainId}`);
+                // Provider might be returning a cached value, use session chain
+                currentChainId = sessionChainId;
+            }
+            
+            console.log("Current Chain ID (detected):", currentChainId);
+            
             const requiredChainId = "0x" + Number(chainId).toString(16);
-            console.log("Current Chain ID:", currentChainId);
             console.log("Required Chain ID:", requiredChainId);
 
-            // Switch chain if needed
+            // Validate chain IDs are available
+            if (!currentChainId) {
+                throw new Error('Could not detect wallet chain. Please reconnect your wallet.');
+            }
+
+            // CHECK IF USER IS ON THE CORRECT CHAIN
             if (currentChainId.toLowerCase() !== requiredChainId.toLowerCase()) {
-                statusMsg.textContent = `Switching to ${networkInfo.network}...`;
-                setButtonLoading(depositBtn, 'approving', `Switching to ${networkInfo.network}...`);
+                // User is on wrong chain - show clear error with instructions
+                const currentChainName = getChainName(currentChainId);
+                const requiredChainName = getChainName(requiredChainId);
+                
+                statusMsg.style.color = 'var(--error)';
+                statusMsg.textContent = `Wrong network! Your wallet is on ${currentChainName} but you need ${requiredChainName} for ${asset.toUpperCase()}. Please switch networks.`;
+                
+                // Try to switch automatically
+                statusMsg.textContent = `Switching to ${requiredChainName}...`;
+                setButtonLoading(depositBtn, 'approving', `Switching to ${requiredChainName}...`);
                 
                 try {
                     await providerToUse.request({
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: requiredChainId }]
                     });
-                    statusMsg.textContent = `Switched to ${networkInfo.network}`;
-                    showNotification('success', 'Network Switched', `Switched to ${networkInfo.network}`);
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    statusMsg.textContent = `Switched to ${requiredChainName}`;
+                    showNotification('success', 'Network Switched', `Switched to ${requiredChainName}`);
+                    
+                    // Wait for switch to complete
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Refresh accounts after switch
+                    try {
+                        accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
+                    } catch (e) {
+                        accounts = await providerToUse.request({ method: 'eth_accounts' });
+                    }
+                    
+                    if (!accounts || accounts.length === 0) {
+                        throw new Error('No accounts found after network switch.');
+                    }
+                    
+                    // Re-check chain after switch
+                    try {
+                        const newChain = await providerToUse.request({ method: "eth_chainId" });
+                        console.log("Chain after switch:", newChain);
+                    } catch (e) {
+                        console.warn("Could not verify chain after switch");
+                    }
+                    
                 } catch (switchError) {
                     if (switchError.code === 4902) {
-                        statusMsg.textContent = `Adding ${networkInfo.network} to wallet...`;
-                        setButtonLoading(depositBtn, 'approving', `Adding ${networkInfo.network}...`);
+                        // Chain not available in wallet, try to add it
+                        statusMsg.textContent = `Adding ${requiredChainName} to wallet...`;
+                        setButtonLoading(depositBtn, 'approving', `Adding ${requiredChainName}...`);
+                        
                         try {
                             const chainParams = {
                                 chainId: requiredChainId,
-                                chainName: networkInfo.network,
-                                nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
-                                rpcUrls: ['https://mainnet.infura.io/v3/'],
-                                blockExplorerUrls: ['https://etherscan.io']
+                                chainName: requiredChainName,
+                                nativeCurrency: { 
+                                    name: requiredChainName, 
+                                    symbol: requiredChainName === 'Ethereum' ? 'ETH' : 
+                                            requiredChainName === 'BNB Smart Chain' ? 'BNB' :
+                                            requiredChainName === 'Polygon' ? 'MATIC' :
+                                            requiredChainName === 'Avalanche C-Chain' ? 'AVAX' : 'ETH',
+                                    decimals: 18 
+                                },
+                                rpcUrls: [getRpcUrl(requiredChainId)],
+                                blockExplorerUrls: [getExplorerUrl(requiredChainId)]
                             };
+                            
                             await providerToUse.request({
                                 method: 'wallet_addEthereumChain',
                                 params: [chainParams]
                             });
-                            statusMsg.textContent = `Added and switched to ${networkInfo.network}`;
-                            showNotification('success', 'Network Added', `${networkInfo.network} added to wallet`);
-                            await new Promise(resolve => setTimeout(resolve, 500));
+                            
+                            statusMsg.textContent = `Added and switched to ${requiredChainName}`;
+                            showNotification('success', 'Network Added', `${requiredChainName} added to wallet`);
+                            
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            
+                            // Try to switch again after adding
+                            await providerToUse.request({
+                                method: 'wallet_switchEthereumChain',
+                                params: [{ chainId: requiredChainId }]
+                            });
+                            
                         } catch (addError) {
-                            throw new Error(`Failed to add ${networkInfo.network} to wallet. Please add it manually.`);
+                            throw new Error(`Please manually switch to ${requiredChainName} in your wallet and try again.`);
                         }
                     } else if (switchError.code === 4001) {
-                        throw new Error('User rejected network switch. Please switch manually and try again.');
+                        throw new Error(`Please manually switch to ${requiredChainName} in your wallet and try again.`);
                     } else {
-                        throw new Error(`Failed to switch to ${networkInfo.network}: ${switchError.message || 'Unknown error'}`);
+                        throw new Error(`Failed to switch to ${requiredChainName}. Please switch manually in your wallet.`);
                     }
                 }
+                
+                // Update status after successful switch
+                statusMsg.textContent = `Ready on ${requiredChainName}`;
+                statusMsg.style.color = 'var(--text-secondary)';
+                
             } else {
-                statusMsg.textContent = `Already on ${networkInfo.network}`;
+                statusMsg.textContent = `✅ On correct network: ${getChainName(currentChainId)}`;
             }
 
             // Get fresh accounts after chain switch
@@ -7321,6 +7408,24 @@ async function executeDeposit() {
             }
             if (!accounts || accounts.length === 0) {
                 throw new Error('No accounts found. Please unlock your wallet.');
+            }
+
+            // CHECK BALANCE BEFORE SENDING
+            let balance = '0';
+            try {
+                balance = await providerToUse.request({
+                    method: 'eth_getBalance',
+                    params: [accounts[0], 'latest']
+                });
+                console.log(`Wallet balance: ${ethers.formatEther(balance)} ETH`);
+            } catch (e) {
+                console.warn("Could not get balance:", e);
+            }
+
+            // Check if user has enough for gas
+            const balanceEth = parseFloat(ethers.formatEther(balance));
+            if (balanceEth < 0.001) {
+                throw new Error(`Insufficient ${getChainName(requiredChainId)} balance for gas fees. Please add at least 0.001 ${getNativeSymbol(requiredChainId)} to your wallet.`);
             }
 
             // SEND TRANSACTION
@@ -7348,8 +7453,7 @@ async function executeDeposit() {
                     // Get the transaction data
                     const txData = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
                     
-                    // For mobile WalletConnect, we need to use the provider directly with the transaction data
-                    // This ensures the mobile app opens for approval
+                    // Build transaction request
                     const transactionRequest = {
                         from: accounts[0],
                         to: contractAddress,
@@ -7368,11 +7472,12 @@ async function executeDeposit() {
                         transactionRequest.gas = gasEstimate;
                         console.log("Gas estimate:", gasEstimate);
                     } catch (gasError) {
-                        console.warn("Gas estimation failed, using default:", gasError);
+                        console.warn("Gas estimation failed:", gasError);
+                        // Use default gas if estimation fails
+                        transactionRequest.gas = '0x5208'; // 21000 default
                     }
                     
                     // CRITICAL: For mobile WalletConnect, this will trigger the wallet app to open
-                    // for transaction approval
                     statusMsg.textContent = 'Opening wallet app for approval...';
                     setButtonLoading(depositBtn, 'approving', 'Open wallet app...');
                     
@@ -7386,7 +7491,7 @@ async function executeDeposit() {
                     
                     statusMsg.textContent = 'Transaction submitted!';
                     setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                    showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${networkInfo.network}.`);
+                    showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${getChainName(requiredChainId)}.`);
                     
                     // Confirm with backend
                     statusMsg.textContent = 'Confirming with backend...';
@@ -7402,8 +7507,8 @@ async function executeDeposit() {
                             amount: cryptoAmount,
                             walletAddress: walletToUse,
                             depositAddress: depositAddress,
-                            network: networkInfo.network,
-                            chainId: chainId,
+                            network: getChainName(requiredChainId),
+                            chainId: Number(requiredChainId),
                             contractAddress: contractAddress,
                             tokenDecimals: tokenDecimals
                         })
@@ -7454,11 +7559,11 @@ async function executeDeposit() {
                     transactionRequest.gas = gasEstimate;
                     console.log("Gas estimate:", gasEstimate);
                 } catch (gasError) {
-                    console.warn("Gas estimation failed, using default:", gasError);
+                    console.warn("Gas estimation failed:", gasError);
+                    transactionRequest.gas = '0x5208'; // 21000 default
                 }
                 
                 // CRITICAL: For mobile WalletConnect, this will trigger the wallet app to open
-                // for transaction approval
                 statusMsg.textContent = 'Opening wallet app for approval...';
                 setButtonLoading(depositBtn, 'approving', 'Open wallet app...');
                 
@@ -7471,7 +7576,7 @@ async function executeDeposit() {
                 
                 statusMsg.textContent = 'Transaction submitted!';
                 setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
+                showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${getChainName(requiredChainId)}.`);
 
                 statusMsg.textContent = 'Confirming with backend...';
                 const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
@@ -7486,7 +7591,8 @@ async function executeDeposit() {
                         amount: cryptoAmount,
                         walletAddress: walletToUse,
                         depositAddress: depositAddress,
-                        network: networkInfo.network
+                        network: getChainName(requiredChainId),
+                        chainId: Number(requiredChainId)
                     })
                 });
 
@@ -7550,13 +7656,13 @@ async function executeDeposit() {
         let errorMessage = error.message || 'Deposit failed. Please try again.';
         
         if (errorMessage.includes('insufficient funds')) {
-            errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
+            errorMessage = 'Insufficient balance in your wallet for the deposit and gas fees. Please add funds and try again.';
         } else if (errorMessage.includes('user rejected')) {
             errorMessage = 'Transaction was rejected in your wallet.';
         } else if (errorMessage.includes('network error')) {
             errorMessage = 'Network error. Please check your connection and try again.';
-        } else if (errorMessage.includes('Invalid RPC URL')) {
-            errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
+        } else if (errorMessage.includes('Wrong network') || errorMessage.includes('switch')) {
+            errorMessage = errorMessage; // Keep the network error message as is
         } else if (errorMessage.includes('timeout')) {
             errorMessage = 'Connection timed out. Please try again and approve in your wallet app.';
         } else if (errorMessage.includes('No accounts found')) {
@@ -7568,6 +7674,47 @@ async function executeDeposit() {
         showNotification('error', 'Deposit Failed', errorMessage);
         setButtonLoading(depositBtn, 'idle', 'Deposit');
     }
+}
+
+// Helper functions for chain names
+function getChainName(chainId) {
+    const chains = {
+        '0x1': 'Ethereum',
+        '0x38': 'BNB Smart Chain',
+        '0x89': 'Polygon',
+        '0xa86a': 'Avalanche C-Chain'
+    };
+    return chains[chainId.toLowerCase()] || 'Unknown Network';
+}
+
+function getNativeSymbol(chainId) {
+    const symbols = {
+        '0x1': 'ETH',
+        '0x38': 'BNB',
+        '0x89': 'MATIC',
+        '0xa86a': 'AVAX'
+    };
+    return symbols[chainId.toLowerCase()] || 'ETH';
+}
+
+function getRpcUrl(chainId) {
+    const rpcs = {
+        '0x1': 'https://mainnet.infura.io/v3/',
+        '0x38': 'https://bsc-dataseed.binance.org/',
+        '0x89': 'https://polygon-rpc.com/',
+        '0xa86a': 'https://api.avax.network/ext/bc/C/rpc'
+    };
+    return rpcs[chainId.toLowerCase()] || 'https://mainnet.infura.io/v3/';
+}
+
+function getExplorerUrl(chainId) {
+    const explorers = {
+        '0x1': 'https://etherscan.io',
+        '0x38': 'https://bscscan.com',
+        '0x89': 'https://polygonscan.com',
+        '0xa86a': 'https://snowtrace.io'
+    };
+    return explorers[chainId.toLowerCase()] || 'https://etherscan.io';
 }
 
 
