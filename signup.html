@@ -2645,6 +2645,7 @@
     let currentAuthMethod = 'form';
     let wcApprovalFn = null;
     let activeWcUri = null;
+    let pendingSessionResume = null;
 
     // EIP-6963 state
     const discoveredProviders = [];
@@ -2667,6 +2668,9 @@
       'phantom': 'phantom://v1/connect?uri=',
       'rainbow': 'rainbow://wc?uri='
     };
+
+    // Session persistence key
+    const SESSION_STORAGE_KEY = 'wc_session_data';
 
     // =============================================
     // HELPER: Get timezone-based greeting
@@ -2859,7 +2863,63 @@
     }
 
     // =============================================
-    // 3. WALLETCONNECT CLIENT INITIALIZATION
+    // 3. SESSION PERSISTENCE MANAGER
+    // =============================================
+    const SessionPersistenceManager = {
+      saveSession(sessionData) {
+        try {
+          const data = {
+            session: sessionData,
+            timestamp: Date.now(),
+            expiry: Date.now() + 7 * 24 * 60 * 60 * 1000 // 7 days
+          };
+          localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data));
+          console.log('💾 Session saved to localStorage');
+        } catch (e) {
+          console.warn('Failed to save session:', e);
+        }
+      },
+
+      loadSession() {
+        try {
+          const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+          if (!raw) return null;
+          const data = JSON.parse(raw);
+          if (data.expiry && Date.now() > data.expiry) {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+            return null;
+          }
+          console.log('💾 Session loaded from localStorage');
+          return data.session;
+        } catch (e) {
+          console.warn('Failed to load session:', e);
+          return null;
+        }
+      },
+
+      clearSession() {
+        try {
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+          console.log('💾 Session cleared from localStorage');
+        } catch (e) {
+          console.warn('Failed to clear session:', e);
+        }
+      },
+
+      hasValidSession() {
+        try {
+          const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+          if (!raw) return false;
+          const data = JSON.parse(raw);
+          return data.expiry && Date.now() < data.expiry;
+        } catch {
+          return false;
+        }
+      }
+    };
+
+    // =============================================
+    // 4. WALLETCONNECT CLIENT INITIALIZATION
     // =============================================
     async function initializeWalletConnect() {
       if (wcInitializationStarted && wcInitPromise) {
@@ -2902,17 +2962,23 @@
         connectionManager.signClient = client;
         console.log('✅ WalletConnect client initialized');
 
-        // Clean up old pairings
+        // Clean up old pairings (but keep active sessions)
         try {
           const pairings = client.core.pairing.getPairings();
           if (pairings && pairings.length > 0) {
             for (const p of pairings) {
               try {
-                await client.core.pairing.disconnect({ topic: p.topic });
+                // Only disconnect expired pairings
+                if (!p.active) {
+                  await client.core.pairing.disconnect({ topic: p.topic });
+                }
               } catch (e) { /* ignore */ }
             }
           }
         } catch (e) { /* ignore */ }
+
+        // Check for existing session
+        await checkForExistingSession();
 
         return client;
       } catch (err) {
@@ -2962,7 +3028,89 @@
     }
 
     // =============================================
-    // 4. GENERATE WALLETCONNECT URI
+    // 5. CHECK FOR EXISTING SESSION (Resume Manager)
+    // =============================================
+    async function checkForExistingSession() {
+      try {
+        const sessionData = SessionPersistenceManager.loadSession();
+        if (!sessionData) {
+          console.log('No existing session found');
+          return null;
+        }
+
+        const client = connectionManager.signClient;
+        if (!client) return null;
+
+        // Try to resume the session
+        const sessions = client.session.getAll();
+        const existingSession = sessions.find(s => s.topic === sessionData.topic);
+
+        if (existingSession) {
+          console.log('✅ Found existing active session, resuming...');
+          pendingSessionResume = {
+            address: sessionData.address,
+            session: existingSession,
+            walletType: sessionData.walletType
+          };
+          return pendingSessionResume;
+        }
+
+        // Try to re-pair if we have a pairing
+        const pairings = client.core.pairing.getPairings();
+        const existingPairing = pairings.find(p => p.topic === sessionData.topic);
+
+        if (existingPairing) {
+          console.log('Found existing pairing, attempting to reconnect...');
+          // Store the pairing for later use
+          return { hasPairing: true, topic: sessionData.topic };
+        }
+
+        // Session expired or invalid
+        SessionPersistenceManager.clearSession();
+        return null;
+      } catch (err) {
+        console.warn('Failed to check for existing session:', err);
+        return null;
+      }
+    }
+
+    // =============================================
+    // 6. RESUME MANAGER - Handle page return
+    // =============================================
+    function resumePendingSession() {
+      if (pendingSessionResume) {
+        console.log('🔄 Resuming pending session...');
+        const { address, session, walletType } = pendingSessionResume;
+
+        // Update connection state
+        connectionManager.address = address;
+        connectionManager.session = session;
+        connectionManager.walletType = walletType;
+        connectionManager.connected = true;
+
+        // Create provider from session
+        const provider = createProviderFromSession(session, address);
+        connectionManager.provider = provider;
+        web3Provider = provider;
+        web3WalletAddress = address;
+        web3WalletType = walletType;
+
+        // Update UI
+        updateUIAfterConnection(address, walletType);
+        document.getElementById('wc-mobile-status').classList.remove('active');
+
+        // Continue with auth flow
+        handleWeb3Connection(address);
+
+        // Clear pending resume
+        pendingSessionResume = null;
+        return true;
+      }
+      return false;
+    }
+
+    // =============================================
+    // 7. GENERATE WALLETCONNECT URI
     // =============================================
     async function generateWalletConnectURI() {
       if (!connectionManager.signClient) {
@@ -2992,7 +3140,7 @@
     }
 
     // =============================================
-    // 5. WAIT FOR WALLETCONNECT SESSION
+    // 8. WAIT FOR WALLETCONNECT SESSION
     // =============================================
     async function waitForWalletConnectSession(timeoutMs = 60000) {
       return new Promise((resolve, reject) => {
@@ -3017,6 +3165,14 @@
                 const account = ns.accounts[0];
                 const address = account.split(':')[2];
                 const chainId = parseInt(account.split(':')[1]);
+
+                // Save session for persistence
+                SessionPersistenceManager.saveSession({
+                  topic: session.topic,
+                  address: address,
+                  walletType: connectionManager.walletType || 'metamask'
+                });
+
                 resolve({
                   accounts: [address],
                   chainId: chainId || 1,
@@ -3038,7 +3194,7 @@
     }
 
     // =============================================
-    // 6. CREATE PROVIDER FROM SESSION
+    // 9. CREATE PROVIDER FROM SESSION
     // =============================================
     function createProviderFromSession(session, address) {
       return {
@@ -3068,7 +3224,7 @@
     }
 
     // =============================================
-    // 7. DESKTOP WALLET CONNECTION (EIP-6963 ONLY)
+    // 10. DESKTOP WALLET CONNECTION (EIP-6963 ONLY)
     // =============================================
     async function connectDesktopWallet(walletType) {
       const providerInfo = getProviderForWalletType(walletType);
@@ -3095,6 +3251,9 @@
         const address = accounts[0];
         console.log(`✅ Desktop ${walletType} connected: ${address}`);
 
+        // Store wallet type for session persistence
+        connectionManager.walletType = walletType;
+
         return {
           address: address,
           provider: provider,
@@ -3110,7 +3269,7 @@
     }
 
     // =============================================
-    // 8. MOBILE WALLET CONNECTION (WalletConnect)
+    // 11. MOBILE WALLET CONNECTION (WalletConnect)
     // =============================================
     async function connectMobileWallet(walletType) {
       try {
@@ -3146,6 +3305,9 @@
         const address = sessionResult.accounts[0];
         const provider = createProviderFromSession(sessionResult.session, address);
 
+        // Store wallet type
+        connectionManager.walletType = walletType;
+
         return {
           address: address,
           provider: provider,
@@ -3161,7 +3323,7 @@
     }
 
     // =============================================
-    // 9. LAUNCH WALLET DEEP LINK
+    // 12. LAUNCH WALLET DEEP LINK
     // =============================================
     function launchWalletDeepLink(walletType, uri) {
       const deviceEngine = new DeviceDetectionEngine();
@@ -3196,7 +3358,7 @@
     }
 
     // =============================================
-    // 10. GET APP STORE URL
+    // 13. GET APP STORE URL
     // =============================================
     function getAppStoreUrl(walletType) {
       const deviceEngine = new DeviceDetectionEngine();
@@ -3234,7 +3396,7 @@
     }
 
     // =============================================
-    // 11. MAIN CONNECT WALLET FUNCTION
+    // 14. MAIN CONNECT WALLET FUNCTION
     // =============================================
     async function connectWeb3Wallet(walletType) {
       if (isConnecting) {
@@ -3304,7 +3466,7 @@
     }
 
     // =============================================
-    // 12. RETRY WALLET CONNECT
+    // 15. RETRY WALLET CONNECT
     // =============================================
     function retryWalletConnect() {
       if (!connectionManager.walletType) {
@@ -3315,7 +3477,7 @@
     }
 
     // =============================================
-    // 13. DISCONNECT WALLET
+    // 16. DISCONNECT WALLET
     // =============================================
     function disconnectWeb3Wallet() {
       connectionManager.connected = false;
@@ -3328,6 +3490,9 @@
       web3Provider = null;
       activeWcUri = null;
       wcApprovalFn = null;
+
+      // Clear persisted session
+      SessionPersistenceManager.clearSession();
 
       if (connectionManager.signClient) {
         try {
@@ -3350,7 +3515,7 @@
     }
 
     // =============================================
-    // 14. UI HELPERS
+    // 17. UI HELPERS
     // =============================================
     function resetWalletUI(walletType) {
       const statusEl = document.getElementById(`status-${walletType}`);
@@ -3403,7 +3568,7 @@
     }
 
     // =============================================
-    // 15. HANDLE WEB3 CONNECTION - Signup
+    // 18. HANDLE WEB3 CONNECTION - Signup
     // =============================================
     async function handleWeb3Connection(address) {
       try {
@@ -3448,7 +3613,7 @@
     }
 
     // =============================================
-    // 16. WEB3 SIGNUP POPUP
+    // 19. WEB3 SIGNUP POPUP
     // =============================================
     function showWeb3SignupPopup(address) {
       const popup = document.getElementById('web3-popup');
@@ -3487,7 +3652,7 @@
     }
 
     // =============================================
-    // 17. WEB3 SIGNUP FORM SUBMIT
+    // 20. WEB3 SIGNUP FORM SUBMIT
     // =============================================
     document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -3739,7 +3904,7 @@
     });
 
     // =============================================
-    // 18. WEB3 OTP FUNCTIONS
+    // 21. WEB3 OTP FUNCTIONS
     // =============================================
     async function sendWeb3OtpToEmail(email, tempToken) {
       try {
@@ -3784,7 +3949,7 @@
     }
 
     // =============================================
-    // 19. OTP MODAL FUNCTIONS
+    // 22. OTP MODAL FUNCTIONS
     // =============================================
     let otpTimer, resendTimer, currentUserEmail = '',
       currentTempToken = '',
@@ -4060,7 +4225,7 @@
     document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
     // =============================================
-    // 20. TRADITIONAL FORM LOGIC
+    // 23. TRADITIONAL FORM LOGIC
     // =============================================
 
     AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
@@ -4084,6 +4249,29 @@
 
       // Initialize WalletConnect for mobile
       wcInitPromise = initializeWalletConnect();
+
+      // Check for pending session resume (when returning from wallet app)
+      if (document.visibilityState === 'visible') {
+        resumePendingSession();
+      }
+
+      // Listen for visibility change to resume session when user returns
+      document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') {
+          const resumed = resumePendingSession();
+          if (resumed) {
+            console.log('✅ Session resumed after returning to page');
+          }
+        }
+      });
+
+      // Also listen for page focus
+      window.addEventListener('focus', function() {
+        const resumed = resumePendingSession();
+        if (resumed) {
+          console.log('✅ Session resumed after window focus');
+        }
+      });
     });
 
     document.getElementById('current-year').textContent = new Date().getFullYear();
