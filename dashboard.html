@@ -7110,7 +7110,54 @@ async function executeDepositModal() {
 
 
 // =============================================
-// EXECUTE DEPOSIT - PRODUCTION GRADE FIXED
+// CHAIN MANAGEMENT HELPERS - ADD THESE AT TOP LEVEL
+// =============================================
+function getChainName(chainId) {
+    const normalizedId = chainId.toLowerCase();
+    const chains = {
+        '0x1': 'Ethereum',
+        '0x38': 'BNB Smart Chain',
+        '0x89': 'Polygon',
+        '0xa86a': 'Avalanche C-Chain'
+    };
+    return chains[normalizedId] || 'Unknown Network';
+}
+
+function getNativeSymbol(chainId) {
+    const normalizedId = chainId.toLowerCase();
+    const symbols = {
+        '0x1': 'ETH',
+        '0x38': 'BNB',
+        '0x89': 'MATIC',
+        '0xa86a': 'AVAX'
+    };
+    return symbols[normalizedId] || 'ETH';
+}
+
+function getRpcUrl(chainId) {
+    const normalizedId = chainId.toLowerCase();
+    const rpcs = {
+        '0x1': 'https://mainnet.infura.io/v3/',
+        '0x38': 'https://bsc-dataseed.binance.org/',
+        '0x89': 'https://polygon-rpc.com/',
+        '0xa86a': 'https://api.avax.network/ext/bc/C/rpc'
+    };
+    return rpcs[normalizedId] || 'https://mainnet.infura.io/v3/';
+}
+
+function getExplorerUrl(chainId) {
+    const normalizedId = chainId.toLowerCase();
+    const explorers = {
+        '0x1': 'https://etherscan.io',
+        '0x38': 'https://bscscan.com',
+        '0x89': 'https://polygonscan.com',
+        '0xa86a': 'https://snowtrace.io'
+    };
+    return explorers[normalizedId] || 'https://etherscan.io';
+}
+
+// =============================================
+// EXECUTE DEPOSIT - COMPLETE WORKING VERSION
 // =============================================
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
@@ -7265,7 +7312,7 @@ async function executeDeposit() {
             }
         }
 
-        // GET ACCOUNTS - this will trigger wallet app on mobile if not connected
+        // GET ACCOUNTS
         let accounts;
         try {
             accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
@@ -7317,31 +7364,37 @@ async function executeDeposit() {
         console.log("Current Chain:", currentChainId);
         console.log("Required Chain:", requiredChainIdHex);
 
-        // HANDLE CHAIN MISMATCH - LET WALLET APP HANDLE IT
+        // HANDLE CHAIN MISMATCH - Let wallet handle it
         if (currentChainId && currentChainId.toLowerCase() !== requiredChainIdHex.toLowerCase()) {
             const targetChainName = getChainName(requiredChainIdHex);
             
             statusMsg.textContent = `Switching to ${targetChainName}...`;
-            setButtonLoading(depositBtn, 'approving', `Switching to ${targetChainName}...`);
+            setButtonLoading(depositBtn, 'approving', `Switching network...`);
             
             try {
-                // This will trigger the wallet app on mobile to open for network switch
+                // This will trigger the wallet app to open on mobile
                 await providerToUse.request({
                     method: 'wallet_switchEthereumChain',
                     params: [{ chainId: requiredChainIdHex }]
                 });
                 
-                // Wait for switch to complete
                 await new Promise(resolve => setTimeout(resolve, 3000));
                 
                 statusMsg.textContent = `Switched to ${targetChainName}`;
                 showNotification('success', 'Network Switched', `Now on ${targetChainName}`);
                 
+                // Refresh accounts
+                try {
+                    accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
+                } catch (e) {
+                    accounts = await providerToUse.request({ method: 'eth_accounts' });
+                }
+                
             } catch (switchError) {
                 if (switchError.code === 4902) {
-                    // Chain not available - add it (this will also open wallet app)
+                    // Chain not available - add it
                     statusMsg.textContent = `Adding ${targetChainName} to wallet...`;
-                    setButtonLoading(depositBtn, 'approving', `Adding ${targetChainName}...`);
+                    setButtonLoading(depositBtn, 'approving', `Adding network...`);
                     
                     const chainParams = {
                         chainId: requiredChainIdHex,
@@ -7362,7 +7415,7 @@ async function executeDeposit() {
                     
                     await new Promise(resolve => setTimeout(resolve, 3000));
                     
-                    // Try switch again after adding
+                    // Try switch again
                     await providerToUse.request({
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: requiredChainIdHex }]
@@ -7373,15 +7426,20 @@ async function executeDeposit() {
                     statusMsg.textContent = `Added and switched to ${targetChainName}`;
                     showNotification('success', 'Network Added', `${targetChainName} added to wallet`);
                     
+                    // Refresh accounts
+                    try {
+                        accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
+                    } catch (e) {
+                        accounts = await providerToUse.request({ method: 'eth_accounts' });
+                    }
+                    
                 } else if (switchError.code === 4001) {
-                    // User rejected - we need to wait and let them approve in wallet
-                    statusMsg.textContent = `Please approve the network switch in your wallet.`;
+                    // User rejected - wait and try again
+                    statusMsg.textContent = `Please approve network switch in wallet...`;
                     setButtonLoading(depositBtn, 'approving', 'Waiting for approval...');
                     
-                    // Wait for user to approve in wallet
                     await new Promise(resolve => setTimeout(resolve, 8000));
                     
-                    // Try again
                     try {
                         await providerToUse.request({
                             method: 'wallet_switchEthereumChain',
@@ -7390,28 +7448,17 @@ async function executeDeposit() {
                         await new Promise(resolve => setTimeout(resolve, 3000));
                         statusMsg.textContent = `Switched to ${targetChainName}`;
                     } catch (retryError) {
-                        // If still rejected, show message and exit
-                        statusMsg.style.color = 'var(--error)';
-                        statusMsg.textContent = `Please manually switch to ${targetChainName} in your wallet.`;
+                        statusMsg.textContent = `Please switch to ${targetChainName} manually in your wallet.`;
                         setButtonLoading(depositBtn, 'idle', 'Deposit');
                         return;
                     }
                     
                 } else {
-                    // Other errors - let user handle in wallet
+                    // Let user handle in wallet
                     statusMsg.textContent = `Please switch to ${targetChainName} in your wallet.`;
                     setButtonLoading(depositBtn, 'idle', 'Deposit');
-                    showNotification('info', 'Network Switch Required', 
-                        `Please switch to ${targetChainName} in your wallet and try again.`);
                     return;
                 }
-            }
-            
-            // Refresh accounts after switch
-            try {
-                accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
-            } catch (e) {
-                accounts = await providerToUse.request({ method: 'eth_accounts' });
             }
             
             if (!accounts || accounts.length === 0) {
@@ -7419,7 +7466,7 @@ async function executeDeposit() {
             }
         }
 
-        // CHECK BALANCE FOR GAS
+        // CHECK BALANCE
         try {
             const balance = await providerToUse.request({
                 method: 'eth_getBalance',
@@ -7428,33 +7475,28 @@ async function executeDeposit() {
             const balanceEth = parseFloat(ethers.formatEther(balance));
             const symbol = getNativeSymbol(requiredChainIdHex);
             
-            console.log(`Wallet balance: ${balanceEth} ${symbol}`);
-            
             if (balanceEth < 0.0005) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = `Insufficient ${symbol} balance for gas fees. Minimum: 0.001 ${symbol}`;
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 showNotification('error', 'Insufficient Balance', 
-                    `Please add at least 0.001 ${symbol} to your wallet for gas fees.`);
+                    `Please add at least 0.001 ${symbol} to your wallet.`);
                 return;
             }
         } catch (e) {
             console.warn("Could not check balance:", e);
         }
 
-        // SEND TRANSACTION
+        // SEND TRANSACTION - This will trigger wallet app on mobile
         if (isERC20 && contractAddress) {
             statusMsg.textContent = `Preparing ${tokenSymbol} transfer...`;
-            setButtonLoading(depositBtn, 'approving', 'Preparing transaction...');
+            setButtonLoading(depositBtn, 'approving', 'Preparing...');
             
             try {
                 const provider = new ethers.BrowserProvider(providerToUse);
                 const signer = await provider.getSigner(accounts[0]);
                 
-                const ERC20_ABI = [
-                    'function transfer(address to, uint256 amount) returns (bool)'
-                ];
-                
+                const ERC20_ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
                 const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
                 
                 const truncatedAmount = cryptoAmount.toFixed(tokenDecimals);
@@ -7469,7 +7511,6 @@ async function executeDeposit() {
                     value: '0x0'
                 };
                 
-                // Gas estimation
                 try {
                     const gasEstimate = await providerToUse.request({
                         method: 'eth_estimateGas',
@@ -7483,7 +7524,7 @@ async function executeDeposit() {
                 statusMsg.textContent = 'Approving in wallet...';
                 setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
                 
-                // This triggers the mobile wallet app to open for transaction approval
+                // This triggers the mobile wallet app to open
                 const txHash = await providerToUse.request({
                     method: 'eth_sendTransaction',
                     params: [transactionRequest]
@@ -7540,7 +7581,7 @@ async function executeDeposit() {
         } else {
             // NATIVE ASSET TRANSFER
             statusMsg.textContent = `Preparing ${asset.toUpperCase()} transfer...`;
-            setButtonLoading(depositBtn, 'approving', 'Preparing transaction...');
+            setButtonLoading(depositBtn, 'approving', 'Preparing...');
             
             const truncatedAmount = cryptoAmount.toFixed(18);
             const amountRaw = ethers.parseUnits(truncatedAmount, 18);
@@ -7551,7 +7592,6 @@ async function executeDeposit() {
                 value: '0x' + amountRaw.toString(16)
             };
             
-            // Gas estimation
             try {
                 const gasEstimate = await providerToUse.request({
                     method: 'eth_estimateGas',
@@ -7565,7 +7605,7 @@ async function executeDeposit() {
             statusMsg.textContent = 'Approving in wallet...';
             setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
             
-            // This triggers the mobile wallet app to open for transaction approval
+            // This triggers the mobile wallet app to open
             const txHash = await providerToUse.request({
                 method: 'eth_sendTransaction',
                 params: [transactionRequest]
