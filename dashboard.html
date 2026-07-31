@@ -7103,7 +7103,7 @@ async function executeDepositModal() {
 }
 
 // =============================================
-// EXECUTE DEPOSIT - WITH CHAIN ID FIX + DECIMAL FIX
+// EXECUTE DEPOSIT - WITH CHAIN ID FIX + DECIMAL FIX + MOBILE DEEP LINK FIX
 // =============================================
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
@@ -7200,6 +7200,7 @@ async function executeDeposit() {
         if (isEVM) {
             // STEP 8: VERIFY THE WALLET IS ON THE CORRECT CHAIN
             let providerToUse = web3Provider;
+            let isWalletConnectSession = false;
             
             if (!providerToUse) {
                 const targetRdns = {
@@ -7218,6 +7219,58 @@ async function executeDeposit() {
                         throw new Error('No wallet provider available. Please install a wallet.');
                     }
                     providerToUse = wcProvider;
+                    isWalletConnectSession = true;
+                    
+                    // For mobile WalletConnect, we need to ensure the wallet is connected first
+                    if (isMobileDevice()) {
+                        statusMsg.textContent = 'Opening wallet app...';
+                        setButtonLoading(depositBtn, 'approving', 'Opening wallet...');
+                        
+                        // Check if we have an active session
+                        let accounts = providerToUse.accounts;
+                        if (!accounts || accounts.length === 0) {
+                            // Need to connect first
+                            const uriPromise = new Promise((resolve, reject) => {
+                                const timeout = setTimeout(() => {
+                                    reject(new Error('Connection timeout - please try again'));
+                                }, 60000);
+
+                                providerToUse.once("display_uri", (uri) => {
+                                    clearTimeout(timeout);
+                                    activeWcUri = uri;
+                                    console.log('WalletConnect URI emitted for transaction');
+                                    
+                                    const deepLink = openDeepLink(walletTypeToUse, uri);
+                                    console.log('Opening wallet with deep link:', deepLink);
+                                    
+                                    // Use window.location for mobile to launch the app
+                                    window.location.href = deepLink;
+                                    
+                                    resolve(uri);
+                                });
+                            });
+
+                            await providerToUse.connect();
+                            await uriPromise;
+                            
+                            // Wait for connection to complete
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            
+                            accounts = providerToUse.accounts;
+                            if (!accounts || accounts.length === 0) {
+                                // Try to get accounts again
+                                try {
+                                    accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
+                                } catch (e) {
+                                    accounts = await providerToUse.request({ method: 'eth_accounts' });
+                                }
+                            }
+                        }
+                        
+                        if (!accounts || accounts.length === 0) {
+                            throw new Error('No accounts found. Please approve in your wallet app.');
+                        }
+                    }
                 }
             }
 
@@ -7444,6 +7497,15 @@ async function executeDeposit() {
                     statusMsg.textContent = 'Approving transaction in wallet...';
                     setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                     
+                    // FOR MOBILE WALLETCONNECT - Launch wallet app before sending transaction
+                    if (isMobileDevice() && isWalletConnectSession) {
+                        statusMsg.textContent = 'Launching wallet app for approval...';
+                        setButtonLoading(depositBtn, 'approving', 'Launching wallet...');
+                        
+                        // The transaction will trigger the wallet app to open via the provider's request
+                        // But we need to ensure the deep link is triggered properly
+                    }
+                    
                     const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
                     console.log(`📤 Transaction sent: ${txResponse.hash}`);
                     
@@ -7517,6 +7579,26 @@ async function executeDeposit() {
                 
                 statusMsg.textContent = 'Approving transaction in wallet...';
                 setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
+                
+                // FOR MOBILE WALLETCONNECT - Launch wallet app before sending transaction
+                if (isMobileDevice() && isWalletConnectSession) {
+                    statusMsg.textContent = 'Launching wallet app for approval...';
+                    setButtonLoading(depositBtn, 'approving', 'Launching wallet...');
+                    
+                    // The eth_sendTransaction will trigger the wallet app to open
+                    // We need to ensure the deep link works
+                    try {
+                        // Try to open the wallet app using the deep link
+                        if (activeWcUri) {
+                            const deepLink = openDeepLink(walletTypeToUse, activeWcUri);
+                            console.log('Opening wallet for transaction with deep link:', deepLink);
+                            window.location.href = deepLink;
+                        }
+                    } catch (linkError) {
+                        console.warn('Could not launch wallet via deep link:', linkError);
+                        // Continue - the provider will handle it
+                    }
+                }
                 
                 const txHash = await providerToUse.request({
                     method: 'eth_sendTransaction',
@@ -7621,6 +7703,10 @@ async function executeDeposit() {
             errorMessage = `Transaction simulation failed. The transfer would fail on-chain. Please verify the contract address and recipient.`;
         } else if (errorMessage.includes('too many decimals')) {
             errorMessage = `Amount has too many decimal places. Please enter a value with up to ${tokenDecimals || 18} decimal places.`;
+        } else if (errorMessage.includes('Connection timeout')) {
+            errorMessage = 'Connection timed out. Please try again and approve the transaction in your wallet app.';
+        } else if (errorMessage.includes('No accounts found')) {
+            errorMessage = 'Please unlock your wallet and approve the connection request in your wallet app.';
         }
         
         statusMsg.style.color = 'var(--error)';
@@ -7629,7 +7715,6 @@ async function executeDeposit() {
         setButtonLoading(depositBtn, 'idle', 'Deposit');
     }
 }
-
 // =============================================
 // UPDATE DEPOSIT INPUT PLACEHOLDER
 // =============================================
