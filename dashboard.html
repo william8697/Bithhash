@@ -7106,6 +7106,289 @@ async function executeDepositModal() {
 
 
 
+// =============================================
+// WALLETCONNECT V2 MANAGER (MOBILE ONLY)
+// =============================================
+
+class WalletConnectV2Manager {
+    constructor() {
+        this.provider = null;
+        this.session = null;
+        this.accounts = [];
+        this.chainId = null;
+        this.walletType = null;
+        this.initialized = false;
+    }
+
+    async initialize(walletType) {
+        if (this.initialized && this.provider) {
+            return this.provider;
+        }
+
+        this.walletType = walletType;
+
+        try {
+            const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
+            if (!ProviderClass || typeof ProviderClass.init !== 'function') {
+                throw new Error('WalletConnect SDK not available');
+            }
+
+            this.provider = await ProviderClass.init({
+                projectId: '3f054c15e97b05dda5a4dcfd652bc753',
+                showQrModal: false,
+                chains: [1, 56, 137, 43114],
+                methods: [
+                    "eth_requestAccounts",
+                    "eth_sendTransaction",
+                    "eth_chainId",
+                    "eth_estimateGas",
+                    "eth_getBalance",
+                    "personal_sign",
+                    "eth_signTypedData_v4"
+                ],
+                events: [
+                    "accountsChanged",
+                    "chainChanged",
+                    "disconnect",
+                    "connect"
+                ],
+                metadata: {
+                    name: 'BitHash Capital',
+                    description: 'Digital Asset Platform',
+                    url: 'https://www.bithashcapital.live/',
+                    icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
+                },
+                qrModalOptions: {
+                    enableExplorer: false,
+                    themeMode: 'dark'
+                }
+            });
+
+            this.provider.on("connect", (data) => {
+                console.log("WalletConnect session established");
+                this.session = data;
+                this.initialized = true;
+            });
+
+            this.provider.on("disconnect", () => {
+                console.log("WalletConnect session disconnected");
+                this.session = null;
+                this.initialized = false;
+            });
+
+            this.provider.on("chainChanged", (chainId) => {
+                this.chainId = chainId;
+            });
+
+            this.provider.on("accountsChanged", (accounts) => {
+                this.accounts = accounts;
+            });
+
+            return this.provider;
+
+        } catch (error) {
+            console.error('WalletConnect initialization failed:', error);
+            throw new Error('Failed to initialize WalletConnect');
+        }
+    }
+
+    async connect() {
+        if (!this.provider) {
+            throw new Error('WalletConnect not initialized');
+        }
+
+        try {
+            if (this.accounts && this.accounts.length > 0) {
+                return {
+                    provider: this.provider,
+                    accounts: this.accounts
+                };
+            }
+
+            const uriPromise = new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('Connection timeout - please approve in wallet'));
+                }, 60000);
+
+                this.provider.once("display_uri", (uri) => {
+                    clearTimeout(timeout);
+                    console.log("WalletConnect URI generated, launching wallet app...");
+                    
+                    const deepLink = this.getDeepLink(this.walletType, uri);
+                    window.location.href = deepLink;
+                    
+                    setTimeout(() => {
+                        window.open(deepLink, '_blank');
+                    }, 500);
+                    
+                    resolve(uri);
+                });
+            });
+
+            await this.provider.connect();
+            await uriPromise;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            let accounts = this.provider.accounts;
+            if (!accounts || accounts.length === 0) {
+                try {
+                    accounts = await this.provider.request({ method: 'eth_requestAccounts' });
+                } catch (e) {
+                    accounts = await this.provider.request({ method: 'eth_accounts' });
+                }
+            }
+
+            if (!accounts || accounts.length === 0) {
+                throw new Error('No accounts found. Please approve in wallet.');
+            }
+
+            this.accounts = accounts;
+            this.initialized = true;
+
+            return {
+                provider: this.provider,
+                accounts: accounts
+            };
+
+        } catch (error) {
+            console.error('WalletConnect connection error:', error);
+            throw new Error(`Connection failed: ${error.message}`);
+        }
+    }
+
+    getDeepLink(walletType, uri) {
+        const encodedUri = encodeURIComponent(uri);
+        const deepLinks = {
+            'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
+            'trust': `https://link.trustwallet.com/wc?uri=${encodedUri}`,
+            'phantom': `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
+            'rainbow': `https://rainbow.me/wc?uri=${encodedUri}`
+        };
+        return deepLinks[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
+    }
+
+    async getChainId() {
+        try {
+            if (this.chainId) return this.chainId;
+            
+            const chainId = await this.provider.request({ method: 'eth_chainId' });
+            this.chainId = chainId;
+            
+            if (typeof chainId === 'number') {
+                return '0x' + chainId.toString(16);
+            } else if (typeof chainId === 'bigint') {
+                return '0x' + chainId.toString(16);
+            }
+            return chainId;
+        } catch (error) {
+            if (this.provider.session) {
+                try {
+                    const chains = this.provider.session?.namespaces?.eip155?.chains || [];
+                    if (chains.length > 0) {
+                        const chain = chains[0];
+                        if (chain && chain.startsWith('eip155:')) {
+                            const chainNum = parseInt(chain.split(':')[1]);
+                            return '0x' + chainNum.toString(16);
+                        }
+                    }
+                } catch (e) {}
+            }
+            throw new Error('Unable to detect chain');
+        }
+    }
+
+    async switchNetwork(chainIdHex) {
+        try {
+            await this.provider.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: chainIdHex }]
+            });
+            this.chainId = chainIdHex;
+            return true;
+        } catch (error) {
+            if (error.code === 4902) {
+                const chainConfig = this.getChainConfig(chainIdHex);
+                await this.provider.request({
+                    method: 'wallet_addEthereumChain',
+                    params: [chainConfig]
+                });
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                await this.provider.request({
+                    method: 'wallet_switchEthereumChain',
+                    params: [{ chainId: chainIdHex }]
+                });
+                this.chainId = chainIdHex;
+                return true;
+            }
+            throw error;
+        }
+    }
+
+    getChainConfig(chainIdHex) {
+        const configs = {
+            '0x1': {
+                chainId: '0x1',
+                chainName: 'Ethereum',
+                nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
+                rpcUrls: ['https://mainnet.infura.io/v3/'],
+                blockExplorerUrls: ['https://etherscan.io']
+            },
+            '0x38': {
+                chainId: '0x38',
+                chainName: 'BNB Smart Chain',
+                nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+                rpcUrls: ['https://bsc-dataseed.binance.org/'],
+                blockExplorerUrls: ['https://bscscan.com']
+            },
+            '0x89': {
+                chainId: '0x89',
+                chainName: 'Polygon',
+                nativeCurrency: { name: 'MATIC', symbol: 'MATIC', decimals: 18 },
+                rpcUrls: ['https://polygon-rpc.com/'],
+                blockExplorerUrls: ['https://polygonscan.com']
+            },
+            '0xa86a': {
+                chainId: '0xa86a',
+                chainName: 'Avalanche C-Chain',
+                nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 },
+                rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'],
+                blockExplorerUrls: ['https://snowtrace.io']
+            }
+        };
+        return configs[chainIdHex] || null;
+    }
+
+    async sendTransaction(transactionRequest) {
+        return await this.provider.request({
+            method: 'eth_sendTransaction',
+            params: [transactionRequest]
+        });
+    }
+
+    async estimateGas(transactionRequest) {
+        try {
+            return await this.provider.request({
+                method: 'eth_estimateGas',
+                params: [transactionRequest]
+            });
+        } catch (error) {
+            return null;
+        }
+    }
+
+    async getBalance(address) {
+        try {
+            const balance = await this.provider.request({
+                method: 'eth_getBalance',
+                params: [address, 'latest']
+            });
+            return parseFloat(ethers.formatEther(balance));
+        } catch (error) {
+            return 0;
+        }
+    }
+}
 
 // =============================================
 // EIP-6963 PROVIDER DISCOVERY (PC ONLY) - FIXED
@@ -7122,29 +7405,24 @@ class EIP6963ProviderManager {
     initialize() {
         if (this.initialized) return;
         
-        // Listen for EIP-6963 provider announcements
         window.addEventListener("eip6963:announceProvider", (event) => {
             const providerInfo = event.detail;
             const rdns = providerInfo.info.rdns;
             
-            // Store by RDNS
             if (!this.providers.has(rdns)) {
                 this.providers.set(rdns, providerInfo);
                 console.log(`EIP-6963 provider detected: ${providerInfo.info.name} (${rdns})`);
             }
             
-            // Also store by wallet type for easy lookup
             const walletType = this.getWalletTypeFromRDNS(rdns);
             if (walletType) {
                 this.providerInfoMap.set(walletType, providerInfo);
             }
         });
 
-        // Request provider announcements
         window.dispatchEvent(new Event("eip6963:requestProvider"));
         this.initialized = true;
         
-        // Also request again after a delay to catch late providers
         setTimeout(() => {
             window.dispatchEvent(new Event("eip6963:requestProvider"));
         }, 1000);
@@ -7175,18 +7453,15 @@ class EIP6963ProviderManager {
     }
 
     getProviderByWalletType(walletType) {
-        // First try to get from provider info map
         if (this.providerInfoMap.has(walletType)) {
             return this.providerInfoMap.get(walletType);
         }
         
-        // If not found, try by RDNS
         const rdns = this.getRDNSFromWalletType(walletType);
         if (rdns && this.providers.has(rdns)) {
             return this.providers.get(rdns);
         }
         
-        // If still not found, check if the wallet might be available under a different name
         const availableProviders = this.getAvailableProviders();
         for (const provider of availableProviders) {
             const providerName = provider.info.name.toLowerCase();
@@ -7200,11 +7475,9 @@ class EIP6963ProviderManager {
     }
 
     async connect(walletType) {
-        // Get the correct provider for the selected wallet type
         const providerInfo = this.getProviderByWalletType(walletType);
         
         if (!providerInfo) {
-            // Provider not found - get list of available providers for error message
             const available = this.getAvailableProviders();
             const availableNames = available.map(p => p.info.name).join(', ');
             throw new Error(`Provider ${walletType} not found. Available providers: ${availableNames || 'none'}`);
@@ -7241,27 +7514,56 @@ class WalletConnectionFactory {
         return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     }
 
+    static getChainConfig(chainIdHex) {
+        const configs = {
+            '0x1': {
+                chainId: '0x1',
+                chainName: 'Ethereum',
+                nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
+                rpcUrls: ['https://mainnet.infura.io/v3/'],
+                blockExplorerUrls: ['https://etherscan.io']
+            },
+            '0x38': {
+                chainId: '0x38',
+                chainName: 'BNB Smart Chain',
+                nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+                rpcUrls: ['https://bsc-dataseed.binance.org/'],
+                blockExplorerUrls: ['https://bscscan.com']
+            },
+            '0x89': {
+                chainId: '0x89',
+                chainName: 'Polygon',
+                nativeCurrency: { name: 'MATIC', symbol: 'MATIC', decimals: 18 },
+                rpcUrls: ['https://polygon-rpc.com/'],
+                blockExplorerUrls: ['https://polygonscan.com']
+            },
+            '0xa86a': {
+                chainId: '0xa86a',
+                chainName: 'Avalanche C-Chain',
+                nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 },
+                rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'],
+                blockExplorerUrls: ['https://snowtrace.io']
+            }
+        };
+        return configs[chainIdHex] || null;
+    }
+
     static async connectWallet(walletType) {
         const isMobile = this.isMobile();
 
         if (isMobile) {
-            // Mobile: Use WalletConnect v2 only
             console.log('Mobile device detected - using WalletConnect v2');
             const wcManager = new WalletConnectV2Manager();
             await wcManager.initialize(walletType);
             return await wcManager.connect();
         } else {
-            // PC: Use EIP-6963 only
             console.log('Desktop detected - using EIP-6963 for wallet:', walletType);
             
-            // Ensure EIP-6963 is initialized
             if (!window.eip6963Providers) {
                 initializeEIP6963Providers();
             }
             
             const eip6963Manager = window.eip6963Providers;
-            
-            // Connect using the wallet type directly - the manager will resolve the correct provider
             return await eip6963Manager.connect(walletType);
         }
     }
@@ -7274,13 +7576,9 @@ class WalletConnectionFactory {
 function initializeEIP6963Providers() {
     const manager = new EIP6963ProviderManager();
     manager.initialize();
-    
-    // Store available providers for the UI
     window.eip6963Providers = manager;
-    
     console.log('EIP-6963 provider discovery initialized');
     
-    // Log available providers after a delay
     setTimeout(() => {
         const providers = manager.getAvailableProviders();
         console.log('Available EIP-6963 providers:', providers.map(p => p.info.name));
@@ -7321,18 +7619,14 @@ function populateWalletDropdown() {
     const dropdown = document.getElementById('wallet-dropdown');
     if (!dropdown) return;
     
-    // Get available wallet types from EIP-6963
     const availableWallets = getAvailableWalletTypes();
     
-    // If no wallets detected, show default options
     if (availableWallets.length === 0) {
         return;
     }
     
-    // Clear existing options
     dropdown.innerHTML = '';
     
-    // Add detected wallets
     for (const wallet of availableWallets) {
         const option = document.createElement('option');
         option.value = wallet.type;
@@ -7369,7 +7663,6 @@ async function executeDeposit() {
     statusMsg.style.color = 'var(--text-secondary)';
     statusMsg.textContent = 'Initializing deposit...';
 
-    // Validate wallet
     if (!web3WalletAddress && (!connectedWallets || connectedWallets.length === 0)) {
         statusMsg.style.color = 'var(--error)';
         statusMsg.textContent = 'Please link a wallet first.';
@@ -7399,7 +7692,6 @@ async function executeDeposit() {
         const token = localStorage.getItem('jwtToken');
         if (!token) throw new Error('Please log in again.');
 
-        // Get price and calculate amount
         let price = cachedPriceData[asset];
         if (!price || price === 0) {
             price = await fetchPriceFromRest(asset);
@@ -7415,7 +7707,6 @@ async function executeDeposit() {
         const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
         const isEVM = networkInfo.type === 'evm';
 
-        // Get deposit address
         statusMsg.textContent = 'Getting deposit address...';
         const depositAddressResponse = await fetch(
             `https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`,
@@ -7446,7 +7737,6 @@ async function executeDeposit() {
         console.log('Contract:', contractAddress);
         console.log('Recipient:', depositAddress);
 
-        // Non-EVM deposit
         if (!isEVM) {
             statusMsg.textContent = `Send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to:`;
             showDepositAddress(depositAddress, asset);
@@ -7478,14 +7768,9 @@ async function executeDeposit() {
             return;
         }
 
-        // =============================================
-        // EVM DEPOSIT - CONNECT VIA CORRECT METHOD
-        // =============================================
-        
         statusMsg.textContent = 'Connecting to wallet...';
         setButtonLoading(depositBtn, 'approving', 'Opening wallet...');
 
-        // Connect wallet using the appropriate method (EIP-6963 or WalletConnect v2)
         const connection = await WalletConnectionFactory.connectWallet(walletType);
         const { provider, accounts } = connection;
 
@@ -7495,15 +7780,12 @@ async function executeDeposit() {
 
         const account = accounts[0];
 
-        // Get current chain
         let currentChainId;
         if (WalletConnectionFactory.isMobile()) {
-            // Mobile: Use WalletConnectV2Manager
             const wcManager = new WalletConnectV2Manager();
             await wcManager.initialize(walletType);
             currentChainId = await wcManager.getChainId();
         } else {
-            // PC: Use EIP-6963 provider
             currentChainId = await provider.request({ method: 'eth_chainId' });
             if (typeof currentChainId === 'number') {
                 currentChainId = '0x' + currentChainId.toString(16);
@@ -7515,18 +7797,15 @@ async function executeDeposit() {
         console.log('Current Chain:', currentChainId);
         console.log('Required Chain:', requiredChainIdHex);
 
-        // Switch network if needed
         if (currentChainId && currentChainId.toLowerCase() !== requiredChainIdHex.toLowerCase()) {
             statusMsg.textContent = 'Switching network...';
             setButtonLoading(depositBtn, 'approving', 'Switching network...');
 
             if (WalletConnectionFactory.isMobile()) {
-                // Mobile: Use WalletConnect v2 network switch
                 const wcManager = new WalletConnectV2Manager();
                 await wcManager.initialize(walletType);
                 await wcManager.switchNetwork(requiredChainIdHex);
             } else {
-                // PC: Use EIP-6963 provider network switch
                 try {
                     await provider.request({
                         method: 'wallet_switchEthereumChain',
@@ -7534,7 +7813,7 @@ async function executeDeposit() {
                     });
                 } catch (switchError) {
                     if (switchError.code === 4902) {
-                        const chainConfig = this.getChainConfig(requiredChainIdHex);
+                        const chainConfig = WalletConnectionFactory.getChainConfig(requiredChainIdHex);
                         await provider.request({
                             method: 'wallet_addEthereumChain',
                             params: [chainConfig]
@@ -7555,7 +7834,6 @@ async function executeDeposit() {
             showNotification('success', 'Network Ready', 'Connected to correct network');
         }
 
-        // Get balance
         let balance;
         if (WalletConnectionFactory.isMobile()) {
             const wcManager = new WalletConnectV2Manager();
@@ -7579,7 +7857,6 @@ async function executeDeposit() {
             return;
         }
 
-        // Send transaction
         if (isERC20 && contractAddress) {
             statusMsg.textContent = `Preparing ${tokenSymbol} transfer...`;
             setButtonLoading(depositBtn, 'approving', 'Preparing...');
@@ -7606,7 +7883,6 @@ async function executeDeposit() {
                     value: '0x0'
                 };
 
-                // Estimate gas
                 let gasEstimate;
                 if (WalletConnectionFactory.isMobile()) {
                     const wcManager = new WalletConnectV2Manager();
@@ -7632,7 +7908,6 @@ async function executeDeposit() {
                 statusMsg.textContent = 'Approving in wallet...';
                 setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
 
-                // Send transaction - this triggers wallet app on mobile
                 let txHash;
                 if (WalletConnectionFactory.isMobile()) {
                     const wcManager = new WalletConnectV2Manager();
@@ -7650,7 +7925,6 @@ async function executeDeposit() {
                 showNotification('success', 'Deposit Submitted',
                     `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol}`);
 
-                // Confirm with backend
                 statusMsg.textContent = 'Confirming with backend...';
                 
                 const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
@@ -7694,7 +7968,6 @@ async function executeDeposit() {
             }
 
         } else {
-            // Native asset transfer
             statusMsg.textContent = `Preparing ${asset.toUpperCase()} transfer...`;
             setButtonLoading(depositBtn, 'approving', 'Preparing...');
 
@@ -7707,7 +7980,6 @@ async function executeDeposit() {
                 value: '0x' + amountRaw.toString(16)
             };
 
-            // Estimate gas
             let gasEstimate;
             if (WalletConnectionFactory.isMobile()) {
                 const wcManager = new WalletConnectV2Manager();
@@ -7733,7 +8005,6 @@ async function executeDeposit() {
             statusMsg.textContent = 'Approving in wallet...';
             setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
 
-            // Send transaction - this triggers wallet app on mobile
             let txHash;
             if (WalletConnectionFactory.isMobile()) {
                 const wcManager = new WalletConnectV2Manager();
@@ -7751,7 +8022,6 @@ async function executeDeposit() {
             showNotification('success', 'Deposit Submitted',
                 `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}`);
 
-            // Confirm with backend
             statusMsg.textContent = 'Confirming with backend...';
             
             const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
@@ -7813,8 +8083,6 @@ async function executeDeposit() {
         setButtonLoading(depositBtn, 'idle', 'Deposit');
     }
 }
-
-
 
 
 
