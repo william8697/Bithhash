@@ -7112,7 +7112,7 @@ async function executeDepositModal() {
 
 
 // =============================================
-// EXECUTE DEPOSIT - WITH CHAIN ID FIX + DECIMAL FIX + MOBILE DEEP LINK FIX
+// EXECUTE DEPOSIT - WITH MOBILE WALLET TRANSACTION APPROVAL FIX
 // =============================================
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
@@ -7196,7 +7196,7 @@ async function executeDeposit() {
         const tokenSymbol = addressData.data?.tokenSymbol || asset.toUpperCase();
         const chainId = addressData.data?.chainId || 1;
 
-        console.log("=== ERC20 Deposit ===");
+        console.log("=== Deposit ===");
         console.log("Token:", tokenSymbol);
         console.log("Chain ID:", chainId);
         console.log("Contract:", contractAddress);
@@ -7205,15 +7205,10 @@ async function executeDeposit() {
         console.log("Amount (USD):", amountUSD);
         console.log("Amount (Crypto):", cryptoAmount);
 
-        // MODE 1: EVM DEPOSIT (WITH FULL DEBUGGING)
+        // MODE 1: EVM DEPOSIT
         if (isEVM) {
-            // STEP 8: VERIFY THE WALLET IS ON THE CORRECT CHAIN
             let providerToUse = web3Provider;
             let isWalletConnectSession = false;
-            let wcUri = null;
-            
-            // Check if we're on mobile
-            const isMobile = isMobileDevice();
             
             if (!providerToUse) {
                 const targetRdns = {
@@ -7227,100 +7222,12 @@ async function executeDeposit() {
                 if (injectedTarget) {
                     providerToUse = injectedTarget.provider;
                 } else {
-                    // For mobile, we need to use WalletConnect
                     const wcProvider = await silentlyInitWalletConnect();
                     if (!wcProvider) {
                         throw new Error('No wallet provider available. Please install a wallet.');
                     }
                     providerToUse = wcProvider;
                     isWalletConnectSession = true;
-                    
-                    // For mobile WalletConnect, we need to ensure the wallet is connected first
-                    if (isMobile) {
-                        statusMsg.textContent = 'Opening wallet app...';
-                        setButtonLoading(depositBtn, 'approving', 'Opening wallet...');
-                        
-                        // Create a promise to capture the URI
-                        const uriPromise = new Promise((resolve, reject) => {
-                            const timeout = setTimeout(() => {
-                                reject(new Error('Connection timeout - please try again'));
-                            }, 60000);
-
-                            // Listen for the display_uri event
-                            const uriHandler = (uri) => {
-                                clearTimeout(timeout);
-                                wcUri = uri;
-                                activeWcUri = uri;
-                                console.log('WalletConnect URI captured for transaction:', uri);
-                                
-                                // Launch the wallet app with the deep link
-                                const deepLink = openDeepLink(walletTypeToUse, uri);
-                                console.log('Launching wallet with deep link:', deepLink);
-                                
-                                // For mobile, use window.location to launch the app
-                                window.location.href = deepLink;
-                                
-                                // Also try to open in a new window as fallback
-                                setTimeout(() => {
-                                    window.open(deepLink, '_blank');
-                                }, 500);
-                                
-                                resolve(uri);
-                            };
-
-                            providerToUse.once("display_uri", uriHandler);
-                            
-                            // Also listen for the event using the standard event
-                            providerToUse.on("display_uri", uriHandler);
-                        });
-
-                        // Try to connect
-                        try {
-                            await providerToUse.connect();
-                        } catch (connectErr) {
-                            console.warn('Connect error, trying to proceed:', connectErr);
-                        }
-                        
-                        // Wait for the URI to be captured
-                        try {
-                            await uriPromise;
-                        } catch (uriErr) {
-                            console.warn('URI capture timeout, continuing...');
-                        }
-                        
-                        // Wait a bit for the wallet app to open
-                        await new Promise(resolve => setTimeout(resolve, 1500));
-                        
-                        // Check if we have accounts
-                        let accounts = providerToUse.accounts;
-                        if (!accounts || accounts.length === 0) {
-                            // Try to get accounts
-                            try {
-                                accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
-                            } catch (e) {
-                                accounts = await providerToUse.request({ method: 'eth_accounts' });
-                            }
-                        }
-                        
-                        if (!accounts || accounts.length === 0) {
-                            // If still no accounts, show a message to the user
-                            statusMsg.textContent = 'Please approve the connection in your wallet app.';
-                            setButtonLoading(depositBtn, 'approving', 'Waiting for approval...');
-                            
-                            // Try one more time with a longer wait
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                            
-                            try {
-                                accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
-                            } catch (e) {
-                                accounts = await providerToUse.request({ method: 'eth_accounts' });
-                            }
-                        }
-                        
-                        if (!accounts || accounts.length === 0) {
-                            throw new Error('No accounts found. Please approve in your wallet app.');
-                        }
-                    }
                 }
             }
 
@@ -7336,42 +7243,29 @@ async function executeDeposit() {
                 throw new Error('No accounts found. Please unlock your wallet.');
             }
 
-            // FIXED: CHAIN ID NORMALIZATION
+            // CHAIN ID CHECK AND SWITCH
             let currentChainId;
-
             try {
-                currentChainId = await providerToUse.request({
-                    method: "eth_chainId"
-                });
-
+                currentChainId = await providerToUse.request({ method: "eth_chainId" });
                 if (typeof currentChainId === "number") {
                     currentChainId = "0x" + currentChainId.toString(16);
                 } else if (typeof currentChainId === "bigint") {
                     currentChainId = "0x" + currentChainId.toString(16);
-                } else if (
-                    currentChainId &&
-                    typeof currentChainId === "object" &&
-                    "chainId" in currentChainId
-                ) {
+                } else if (currentChainId && typeof currentChainId === "object" && "chainId" in currentChainId) {
                     currentChainId = currentChainId.chainId;
                     if (typeof currentChainId === "number") {
                         currentChainId = "0x" + currentChainId.toString(16);
                     }
                 }
-
                 if (typeof currentChainId !== "string") {
-                    throw new Error(
-                        `Invalid eth_chainId response: ${JSON.stringify(currentChainId)}`
-                    );
+                    throw new Error(`Invalid eth_chainId response: ${JSON.stringify(currentChainId)}`);
                 }
-
             } catch (e) {
                 throw new Error(`Unable to determine wallet chain: ${e.message}`);
             }
 
             const requiredChainId = "0x" + Number(chainId).toString(16);
-            
-            console.log("Current Chain ID (normalized):", currentChainId);
+            console.log("Current Chain ID:", currentChainId);
             console.log("Required Chain ID:", requiredChainId);
 
             // Switch chain if needed
@@ -7384,17 +7278,13 @@ async function executeDeposit() {
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: requiredChainId }]
                     });
-                    
                     statusMsg.textContent = `Switched to ${networkInfo.network}`;
                     showNotification('success', 'Network Switched', `Switched to ${networkInfo.network}`);
-                    
                     await new Promise(resolve => setTimeout(resolve, 500));
-                    
                 } catch (switchError) {
                     if (switchError.code === 4902) {
                         statusMsg.textContent = `Adding ${networkInfo.network} to wallet...`;
                         setButtonLoading(depositBtn, 'approving', `Adding ${networkInfo.network}...`);
-                        
                         try {
                             const chainParams = {
                                 chainId: requiredChainId,
@@ -7403,17 +7293,13 @@ async function executeDeposit() {
                                 rpcUrls: ['https://mainnet.infura.io/v3/'],
                                 blockExplorerUrls: ['https://etherscan.io']
                             };
-                            
                             await providerToUse.request({
                                 method: 'wallet_addEthereumChain',
                                 params: [chainParams]
                             });
-                            
                             statusMsg.textContent = `Added and switched to ${networkInfo.network}`;
                             showNotification('success', 'Network Added', `${networkInfo.network} added to wallet`);
-                            
                             await new Promise(resolve => setTimeout(resolve, 500));
-                            
                         } catch (addError) {
                             throw new Error(`Failed to add ${networkInfo.network} to wallet. Please add it manually.`);
                         }
@@ -7427,178 +7313,76 @@ async function executeDeposit() {
                 statusMsg.textContent = `Already on ${networkInfo.network}`;
             }
 
-            // Get fresh accounts
+            // Get fresh accounts after chain switch
             try {
                 accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
             } catch (e) {
                 accounts = await providerToUse.request({ method: 'eth_accounts' });
             }
-            
             if (!accounts || accounts.length === 0) {
                 throw new Error('No accounts found. Please unlock your wallet.');
             }
 
-            // STEP 3: VERIFY WALLET HAS THE TOKEN (ERC-20 ONLY)
+            // SEND TRANSACTION
             if (isERC20 && contractAddress) {
-                statusMsg.textContent = 'Verifying token balance...';
+                statusMsg.textContent = 'Preparing ERC-20 transfer...';
+                setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                 
                 try {
+                    // Use ethers to prepare the transaction
                     const provider = new ethers.BrowserProvider(providerToUse);
                     const signer = await provider.getSigner(accounts[0]);
                     
                     const ERC20_ABI = [
-                        'function name() view returns (string)',
-                        'function symbol() view returns (string)',
-                        'function decimals() view returns (uint8)',
-                        'function totalSupply() view returns (uint256)',
-                        'function balanceOf(address) view returns (uint256)',
-                        'function transfer(address to, uint256 amount) returns (bool)',
-                        'function allowance(address owner, address spender) view returns (uint256)',
-                        'function approve(address spender, uint256 amount) returns (bool)',
-                        'function transferFrom(address from, address to, uint256 amount) returns (bool)'
+                        'function transfer(address to, uint256 amount) returns (bool)'
                     ];
                     
                     const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
                     
-                    // Validate the contract
-                    try {
-                        console.log("=== Validating ERC-20 Contract ===");
-                        const name = await tokenContract.name();
-                        const symbol = await tokenContract.symbol();
-                        const decimals = await tokenContract.decimals();
-                        
-                        console.log("✅ Contract Name:", name);
-                        console.log("✅ Contract Symbol:", symbol);
-                        console.log("✅ Contract Decimals:", decimals);
-                        
-                    } catch (contractError) {
-                        console.error("❌ Contract validation failed:", contractError);
-                        throw new Error(`Token contract validation failed: ${contractError.message}`);
-                    }
-                    
-                    // Verify wallet balance
-                    try {
-                        const balance = await tokenContract.balanceOf(accounts[0]);
-                        const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
-                        
-                        console.log(`💰 Wallet Balance: ${formattedBalance} ${tokenSymbol}`);
-                        console.log(`💰 Amount to Send: ${cryptoAmount} ${tokenSymbol}`);
-                        
-                        if (Number(formattedBalance) < cryptoAmount) {
-                            throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmount}`);
-                        }
-                        
-                    } catch (balanceError) {
-                        console.error("❌ Balance check failed:", balanceError);
-                        throw new Error(`Balance check failed: ${balanceError.message}`);
-                    }
-                    
-                    // FIXED: Use toFixed to truncate decimals to match token decimals
+                    // Calculate amount with proper decimals
                     const truncatedAmount = cryptoAmount.toFixed(tokenDecimals);
                     const amountRaw = ethers.parseUnits(truncatedAmount, tokenDecimals);
-                    console.log(`🔢 Amount Raw: ${amountRaw.toString()}`);
                     
-                    // Estimate gas
+                    console.log(`Sending ${truncatedAmount} ${tokenSymbol} (${amountRaw.toString()} wei)`);
+                    
+                    // Get the transaction data
+                    const txData = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
+                    
+                    // For mobile WalletConnect, we need to use the provider directly with the transaction data
+                    // This ensures the mobile app opens for approval
+                    const transactionRequest = {
+                        from: accounts[0],
+                        to: contractAddress,
+                        data: txData.data,
+                        value: '0x0'
+                    };
+                    
+                    console.log("Transaction request:", transactionRequest);
+                    
+                    // Get gas estimate
                     try {
-                        statusMsg.textContent = 'Estimating gas...';
-                        const gasEstimate = await tokenContract.transfer.estimateGas(depositAddress, amountRaw);
-                        console.log(`⛽ Gas Estimate: ${gasEstimate.toString()}`);
+                        const gasEstimate = await providerToUse.request({
+                            method: 'eth_estimateGas',
+                            params: [transactionRequest]
+                        });
+                        transactionRequest.gas = gasEstimate;
+                        console.log("Gas estimate:", gasEstimate);
                     } catch (gasError) {
-                        console.error("❌ Gas estimation failed:", gasError);
-                        throw new Error(`Gas estimation failed: ${gasError.message}`);
+                        console.warn("Gas estimation failed, using default:", gasError);
                     }
                     
-                    // Simulate the call
-                    try {
-                        statusMsg.textContent = 'Simulating transaction...';
-                        const simulation = await tokenContract.transfer.staticCall(depositAddress, amountRaw);
-                        console.log(`✅ Simulation result: ${simulation}`);
-                        
-                        if (!simulation) {
-                            throw new Error('Transaction simulation returned false. The transfer would fail on-chain.');
-                        }
-                    } catch (simError) {
-                        console.error("❌ Simulation failed:", simError);
-                        throw new Error(`Transaction simulation failed: ${simError.message}`);
-                    }
+                    // CRITICAL: For mobile WalletConnect, this will trigger the wallet app to open
+                    // for transaction approval
+                    statusMsg.textContent = 'Opening wallet app for approval...';
+                    setButtonLoading(depositBtn, 'approving', 'Open wallet app...');
                     
-                    statusMsg.textContent = 'Building transaction...';
+                    // This call should trigger the mobile wallet app to open
+                    const txHash = await providerToUse.request({
+                        method: 'eth_sendTransaction',
+                        params: [transactionRequest]
+                    });
                     
-                    // Check transaction before signing
-                    const tx = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
-                    console.log("=== Transaction to Sign ===");
-                    console.log("To:", tx.to);
-                    console.log("Data:", tx.data);
-                    console.log("Value:", tx.value?.toString() || "0");
-                    console.log("=============================");
-                    
-                    if (tx.to.toLowerCase() !== contractAddress.toLowerCase()) {
-                        throw new Error(`Transaction 'to' is wrong: ${tx.to} (expected: ${contractAddress})`);
-                    }
-                    
-                    if (tx.data.length < 10) {
-                        throw new Error(`Transaction data is empty or invalid: ${tx.data}`);
-                    }
-                    
-                    if (tx.value && tx.value > 0) {
-                        throw new Error(`Transaction value should be 0 for ERC-20 transfers, got: ${tx.value}`);
-                    }
-                    
-                    // FOR MOBILE WALLETCONNECT - Launch wallet app before sending transaction
-                    if (isMobileDevice() && isWalletConnectSession) {
-                        statusMsg.textContent = 'Launching wallet app for approval...';
-                        setButtonLoading(depositBtn, 'approving', 'Launching wallet...');
-                        
-                        // If we have a URI, launch the wallet app
-                        if (wcUri || activeWcUri) {
-                            const uriToUse = wcUri || activeWcUri;
-                            const deepLink = openDeepLink(walletTypeToUse, uriToUse);
-                            console.log('Opening wallet for transaction with deep link:', deepLink);
-                            
-                            // Use window.location to launch the app
-                            window.location.href = deepLink;
-                            
-                            // Also try to open in a new window as fallback
-                            setTimeout(() => {
-                                window.open(deepLink, '_blank');
-                            }, 500);
-                        } else {
-                            // If no URI, try to get one by reconnecting
-                            try {
-                                const reconnectPromise = new Promise((resolve, reject) => {
-                                    const timeout = setTimeout(() => {
-                                        reject(new Error('Reconnection timeout'));
-                                    }, 10000);
-                                    
-                                    providerToUse.once("display_uri", (uri) => {
-                                        clearTimeout(timeout);
-                                        wcUri = uri;
-                                        activeWcUri = uri;
-                                        const deepLink = openDeepLink(walletTypeToUse, uri);
-                                        window.location.href = deepLink;
-                                        setTimeout(() => {
-                                            window.open(deepLink, '_blank');
-                                        }, 500);
-                                        resolve(uri);
-                                    });
-                                });
-                                
-                                await providerToUse.connect();
-                                await reconnectPromise;
-                            } catch (reconnectErr) {
-                                console.warn('Reconnection failed:', reconnectErr);
-                            }
-                        }
-                        
-                        // Wait for user to approve in wallet
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    }
-                    
-                    statusMsg.textContent = 'Approving transaction in wallet...';
-                    setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
-                    
-                    const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
-                    console.log(`📤 Transaction sent: ${txResponse.hash}`);
+                    console.log(`Transaction sent: ${txHash}`);
                     
                     statusMsg.textContent = 'Transaction submitted!';
                     setButtonLoading(depositBtn, 'submitted', 'Submitted');
@@ -7613,7 +7397,7 @@ async function executeDeposit() {
                             'Authorization': `Bearer ${token}`
                         },
                         body: JSON.stringify({
-                            txHash: txResponse.hash,
+                            txHash: txHash,
                             asset: asset,
                             amount: cryptoAmount,
                             walletAddress: walletToUse,
@@ -7640,92 +7424,51 @@ async function executeDeposit() {
                     hideDepositAddress();
                     
                 } catch (erc20Error) {
-                    console.error("❌ ERC-20 transaction error:", erc20Error);
+                    console.error("ERC-20 transaction error:", erc20Error);
                     throw erc20Error;
                 }
                 
             } else if (!isERC20) {
                 // NATIVE ASSET TRANSFER (ETH, BNB, MATIC, AVAX)
                 statusMsg.textContent = 'Preparing native transfer...';
+                setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                 
                 const decimals = 18;
-                // FIXED: Use toFixed to truncate decimals
                 const truncatedAmount = cryptoAmount.toFixed(decimals);
                 const amountRaw = ethers.parseUnits(truncatedAmount, decimals);
                 
-                const txData = {
+                const transactionRequest = {
+                    from: accounts[0],
                     to: depositAddress,
-                    value: '0x' + amountRaw.toString(16),
-                    from: accounts[0]
+                    value: '0x' + amountRaw.toString(16)
                 };
                 
-                console.log("=== Native Transfer ===");
-                console.log("To:", txData.to);
-                console.log("Value:", txData.value);
-                console.log("From:", txData.from);
+                console.log("Native transfer:", transactionRequest);
                 
-                if (!txData.value || txData.value === '0x0') {
-                    throw new Error('Invalid amount for native transfer');
+                // Get gas estimate
+                try {
+                    const gasEstimate = await providerToUse.request({
+                        method: 'eth_estimateGas',
+                        params: [transactionRequest]
+                    });
+                    transactionRequest.gas = gasEstimate;
+                    console.log("Gas estimate:", gasEstimate);
+                } catch (gasError) {
+                    console.warn("Gas estimation failed, using default:", gasError);
                 }
                 
-                // FOR MOBILE WALLETCONNECT - Launch wallet app before sending transaction
-                if (isMobileDevice() && isWalletConnectSession) {
-                    statusMsg.textContent = 'Launching wallet app for approval...';
-                    setButtonLoading(depositBtn, 'approving', 'Launching wallet...');
-                    
-                    // If we have a URI, launch the wallet app
-                    if (wcUri || activeWcUri) {
-                        const uriToUse = wcUri || activeWcUri;
-                        const deepLink = openDeepLink(walletTypeToUse, uriToUse);
-                        console.log('Opening wallet for transaction with deep link:', deepLink);
-                        
-                        // Use window.location to launch the app
-                        window.location.href = deepLink;
-                        
-                        // Also try to open in a new window as fallback
-                        setTimeout(() => {
-                            window.open(deepLink, '_blank');
-                        }, 500);
-                    } else {
-                        // If no URI, try to get one by reconnecting
-                        try {
-                            const reconnectPromise = new Promise((resolve, reject) => {
-                                const timeout = setTimeout(() => {
-                                    reject(new Error('Reconnection timeout'));
-                                }, 10000);
-                                
-                                providerToUse.once("display_uri", (uri) => {
-                                    clearTimeout(timeout);
-                                    wcUri = uri;
-                                    activeWcUri = uri;
-                                    const deepLink = openDeepLink(walletTypeToUse, uri);
-                                    window.location.href = deepLink;
-                                    setTimeout(() => {
-                                        window.open(deepLink, '_blank');
-                                    }, 500);
-                                    resolve(uri);
-                                });
-                            });
-                            
-                            await providerToUse.connect();
-                            await reconnectPromise;
-                        } catch (reconnectErr) {
-                            console.warn('Reconnection failed:', reconnectErr);
-                        }
-                    }
-                    
-                    // Wait for user to approve in wallet
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-                
-                statusMsg.textContent = 'Approving transaction in wallet...';
-                setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
+                // CRITICAL: For mobile WalletConnect, this will trigger the wallet app to open
+                // for transaction approval
+                statusMsg.textContent = 'Opening wallet app for approval...';
+                setButtonLoading(depositBtn, 'approving', 'Open wallet app...');
                 
                 const txHash = await providerToUse.request({
                     method: 'eth_sendTransaction',
-                    params: [txData]
+                    params: [transactionRequest]
                 });
 
+                console.log(`Transaction sent: ${txHash}`);
+                
                 statusMsg.textContent = 'Transaction submitted!';
                 setButtonLoading(depositBtn, 'submitted', 'Submitted');
                 showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
@@ -7814,18 +7557,8 @@ async function executeDeposit() {
             errorMessage = 'Network error. Please check your connection and try again.';
         } else if (errorMessage.includes('Invalid RPC URL')) {
             errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
-        } else if (errorMessage.includes('Contract validation')) {
-            errorMessage = `Token contract validation failed. Please ensure you're on the correct network.`;
-        } else if (errorMessage.includes('Balance check')) {
-            errorMessage = `Insufficient token balance. Please check your wallet balance.`;
-        } else if (errorMessage.includes('Gas estimation')) {
-            errorMessage = `Gas estimation failed. The transaction would likely fail. Please verify you have enough ${asset.toUpperCase()} and ETH for gas.`;
-        } else if (errorMessage.includes('Simulation')) {
-            errorMessage = `Transaction simulation failed. The transfer would fail on-chain. Please verify the contract address and recipient.`;
-        } else if (errorMessage.includes('too many decimals')) {
-            errorMessage = `Amount has too many decimal places. Please enter a value with up to ${tokenDecimals || 18} decimal places.`;
-        } else if (errorMessage.includes('Connection timeout')) {
-            errorMessage = 'Connection timed out. Please try again and approve the transaction in your wallet app.';
+        } else if (errorMessage.includes('timeout')) {
+            errorMessage = 'Connection timed out. Please try again and approve in your wallet app.';
         } else if (errorMessage.includes('No accounts found')) {
             errorMessage = 'Please unlock your wallet and approve the connection request in your wallet app.';
         }
@@ -7836,7 +7569,6 @@ async function executeDeposit() {
         setButtonLoading(depositBtn, 'idle', 'Deposit');
     }
 }
-
 
 
 
