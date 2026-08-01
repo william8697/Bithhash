@@ -5402,11 +5402,6 @@
 
 
 
-
-
-
-
-
 <script>
         // =============================================
         // GLOBAL STATE
@@ -5510,7 +5505,7 @@
         };
 
         // =============================================
-        // ASSET CLASSIFICATION
+        // ASSET CLASSIFICATION - NATIVE vs ERC-20
         // =============================================
         const NATIVE_ASSETS = ['eth', 'bnb', 'matic', 'avax'];
         const ERC20_ASSETS = ['usdt', 'usdc', 'shib', 'link', 'uni', 'wbtc'];
@@ -5531,6 +5526,7 @@
             'uni': { chainId: '0x1', chainName: 'Ethereum', nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 }, rpcUrls: ['https://mainnet.infura.io/v3/'], blockExplorerUrls: ['https://etherscan.io'] }
         };
 
+        // Asset network map - EVM vs Non-EVM
         const assetNetworkMap = {
             'btc': { network: 'Bitcoin', type: 'non-evm' },
             'eth': { network: 'Ethereum', type: 'evm' },
@@ -5554,9 +5550,13 @@
             'bch': { network: 'Bitcoin Cash', type: 'non-evm' }
         };
 
+        // EVM assets list
         const evmAssets = ['eth', 'usdt', 'usdc', 'bnb', 'shib', 'link', 'matic', 'avax', 'wbtc', 'uni'];
+
+        // Non-EVM assets list
         const nonEvmAssets = ['btc', 'sol', 'xrp', 'doge', 'ada', 'dot', 'trx', 'ltc', 'near', 'bch'];
 
+        // Top assets for display
         const topAssets = [
             { id: 'bitcoin', symbol: 'btc', name: 'Bitcoin', logo: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png' },
             { id: 'ethereum', symbol: 'eth', name: 'Ethereum', logo: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' },
@@ -5586,19 +5586,6 @@
         // =============================================
         // HELPER FUNCTIONS
         // =============================================
-        function normalizeChainId(chainId) {
-            if (typeof chainId === 'string') {
-                if (chainId.startsWith('0x')) {
-                    return chainId;
-                }
-                return '0x' + parseInt(chainId).toString(16);
-            }
-            if (typeof chainId === 'number') {
-                return '0x' + chainId.toString(16);
-            }
-            return '0x1';
-        }
-
         function formatNumber(num) {
             const numericNum = parseFloat(num) || 0;
             if (numericNum >= 1e12) return (numericNum / 1e12).toFixed(2) + 'T';
@@ -5642,6 +5629,31 @@
                 return parts[0] + '.' + parts[1];
             }
             return parts[0];
+        }
+
+        // =============================================
+        // CHAIN ID NORMALIZATION - FIXES THE toLowerCase() BUG
+        // =============================================
+        function normalizeChainId(chainId) {
+            if (chainId === null || chainId === undefined) return '0x1';
+            // Convert to string if it's a number
+            const strChainId = String(chainId);
+            // If it already starts with 0x, return as is (lowercased)
+            if (strChainId.startsWith('0x') || strChainId.startsWith('0X')) {
+                return strChainId.toLowerCase();
+            }
+            // If it's a decimal number, convert to hex
+            const num = parseInt(strChainId, 10);
+            if (!isNaN(num)) {
+                return '0x' + num.toString(16).toLowerCase();
+            }
+            return '0x1';
+        }
+
+        function compareChainIds(chainId1, chainId2) {
+            const normalized1 = normalizeChainId(chainId1);
+            const normalized2 = normalizeChainId(chainId2);
+            return normalized1 === normalized2;
         }
 
         function updateMobileBalances() {
@@ -6466,7 +6478,7 @@
         }
 
         // =============================================
-        // WALLETCONNECT INIT
+        // WALLETCONNECT INIT - FIXED: Better session handling
         // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
             if (universalWalletProvider) {
@@ -6489,7 +6501,7 @@
                     showQrModal: false,
                     chains: [1],
                     methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction"],
-                    events: ["accountsChanged", "chainChanged", "disconnect", "session_request"],
+                    events: ["accountsChanged", "chainChanged", "disconnect"],
                     metadata: {
                         name: 'BitHash Capital',
                         description: 'Digital Asset Platform',
@@ -6504,17 +6516,36 @@
                 signClient = universalWalletProvider;
                 walletConnectInitialized = true;
                 
+                // FIX: Add session_request listener to handle the "without any listeners" warning
+                universalWalletProvider.on("session_request", (data) => {
+                    console.log("WalletConnect session_request received:", data);
+                });
+                
                 universalWalletProvider.on("connect", (data) => {
                     console.log("WalletConnect CONNECT event fired");
+                    // Store session data after connect
+                    if (data && data.accounts) {
+                        web3WalletAddress = data.accounts[0];
+                    }
                 });
 
                 universalWalletProvider.on("disconnect", (data) => {
                     console.log("WalletConnect DISCONNECT event fired");
+                    web3WalletAddress = null;
                 });
-
-                universalWalletProvider.on("session_request", (data) => {
-                    console.log("WalletConnect SESSION_REQUEST event fired");
-                    wcSessionPending = true;
+                
+                // FIX: Add chainChanged listener
+                universalWalletProvider.on("chainChanged", (data) => {
+                    console.log("WalletConnect chainChanged:", data);
+                    web3Network = data;
+                });
+                
+                // FIX: Add accountsChanged listener
+                universalWalletProvider.on("accountsChanged", (data) => {
+                    console.log("WalletConnect accountsChanged:", data);
+                    if (data && data.length > 0) {
+                        web3WalletAddress = data[0];
+                    }
                 });
                 
                 return universalWalletProvider;
@@ -6590,7 +6621,7 @@
         }
 
         // =============================================
-        // CONNECT SELECTED WALLET - AUTO DETECT
+        // CONNECT SELECTED WALLET - FIXED: Better mobile flow
         // =============================================
         async function connectSelectedWallet() {
             const dropdown = document.getElementById('wallet-dropdown');
@@ -6692,12 +6723,14 @@
                     return;
                 }
 
+                // FIX: Better URI handling with timeout
                 const uriPromise = new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         reject(new Error('Connection timeout - please try again'));
                     }, 60000);
 
-                    provider.once("display_uri", (uri) => {
+                    // FIX: Listen for display_uri event
+                    const uriHandler = (uri) => {
                         clearTimeout(timeout);
                         activeWcUri = uri;
                         console.log('WalletConnect URI emitted');
@@ -6705,17 +6738,28 @@
                         const deepLink = openDeepLink(walletType, uri);
                         console.log('Opening wallet with deep link:', deepLink);
                         
+                        // Open the wallet app
                         window.location.href = deepLink;
                         
                         resolve(uri);
+                    };
+                    
+                    provider.once("display_uri", uriHandler);
+                    
+                    // Also handle the case where URI might be emitted differently
+                    provider.once("session_request", (data) => {
+                        console.log("session_request received:", data);
                     });
                 });
 
                 setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
                 await provider.connect();
                 
+                // FIX: Wait for session to be established before getting accounts
                 let accounts = provider.accounts;
                 if (!accounts || accounts.length === 0) {
+                    // Wait a bit for session to establish
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                     accounts = await provider.request({ method: "eth_requestAccounts" });
                 }
                 
@@ -6774,7 +6818,7 @@
         }
 
         // =============================================
-        // WALLET LOGO UPDATES
+        // WALLET LOGO UPDATES - FIXED: Trust Wallet at 90x90
         // =============================================
         function updateWalletLogo() {
             const dropdown = document.getElementById('wallet-dropdown');
@@ -6784,7 +6828,11 @@
             
             if (logoImg) {
                 logoImg.src = logoUrl;
+                
+                // Remove existing classes
                 logoImg.classList.remove('trust-logo');
+                
+                // Apply 90x90 size for Trust Wallet (matching login.html)
                 if (selected.value === 'trust') {
                     logoImg.classList.add('trust-logo');
                 } else {
@@ -7124,7 +7172,10 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED VERSION
+        // EXECUTE DEPOSIT - COMPLETE REWRITE WITH FIXES
+        // FIX 1: Chain ID comparison using normalizeChainId()
+        // FIX 2: Native ETH transfer without calldata (pure tx)
+        // FIX 3: Separated native and ERC-20 paths
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7170,7 +7221,9 @@
                 const token = localStorage.getItem('jwtToken');
                 if (!token) throw new Error('Please log in again.');
 
-                // Get price and calculate amount
+                // =============================================
+                // STEP 1: GET PRICE AND CALCULATE AMOUNT
+                // =============================================
                 let price = cachedPriceData[asset];
                 if (!price || price === 0) {
                     price = await fetchPriceFromRest(asset);
@@ -7186,7 +7239,9 @@
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
 
-                // Get deposit address from backend
+                // =============================================
+                // STEP 2: GET DEPOSIT ADDRESS FROM BACKEND
+                // =============================================
                 statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -7201,24 +7256,31 @@
                     throw new Error('No deposit address returned. Please try again.');
                 }
 
-                // Extract contract info for ERC-20 tokens
+                // =============================================
+                // EXTRACT CONTRACT INFO FOR ERC-20 TOKENS
+                // =============================================
                 const contractAddress = addressData.data?.contractAddress || null;
                 const tokenDecimals = addressData.data?.decimals || 18;
                 const isERC20 = addressData.data?.isERC20 || false;
                 const tokenSymbol = addressData.data?.tokenSymbol || asset.toUpperCase();
                 const chainId = addressData.data?.chainId || 1;
 
-                console.log("=== Deposit ===");
-                console.log("Asset:", asset);
-                console.log("Is ERC-20:", isERC20);
-                console.log("Contract:", contractAddress);
+                console.log("=== ERC20 Deposit ===");
+                console.log("Token:", tokenSymbol);
                 console.log("Chain ID:", chainId);
+                console.log("Contract:", contractAddress);
+                console.log("Decimals:", tokenDecimals);
                 console.log("Recipient:", depositAddress);
                 console.log("Amount (USD):", amountUSD);
                 console.log("Amount (Crypto):", cryptoAmount);
 
-                // EVM Deposit
+                // =============================================
+                // MODE 1: EVM DEPOSIT
+                // =============================================
                 if (isEVM) {
+                    // =============================================
+                    // STEP: GET PROVIDER
+                    // =============================================
                     let providerToUse = web3Provider;
                     
                     if (!providerToUse) {
@@ -7253,34 +7315,30 @@
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
 
-                    // Check chain ID - FIXED: use normalizeChainId()
+                    // =============================================
+                    // STEP: CHECK CHAIN ID - FIXED with normalizeChainId
+                    // =============================================
                     let currentChainId;
                     try {
                         currentChainId = await providerToUse.request({ method: 'eth_chainId' });
-                        console.log("Current Chain ID (raw):", currentChainId);
+                        console.log("Current Chain ID:", currentChainId);
+                        console.log("Required Chain ID:", chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`);
                     } catch (e) {
                         console.warn('Could not get chainId, assuming default:', e);
                         currentChainId = '0x1';
                     }
 
                     const requiredChainId = chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`;
-                    
-                    // Normalize both for comparison - FIXED
-                    const normalizedCurrent = normalizeChainId(currentChainId);
-                    const normalizedRequired = normalizeChainId(requiredChainId);
-                    
-                    console.log("Normalized Current:", normalizedCurrent);
-                    console.log("Normalized Required:", normalizedRequired);
 
-                    // Switch chain if needed - FIXED: use normalized comparison
-                    if (normalizedCurrent.toLowerCase() !== normalizedRequired.toLowerCase()) {
+                    // FIX: Use compareChainIds() for proper normalization
+                    if (!compareChainIds(currentChainId, requiredChainId)) {
                         statusMsg.textContent = `Switching to ${networkInfo.network}...`;
                         setButtonLoading(depositBtn, 'approving', `Switching to ${networkInfo.network}...`);
                         
                         try {
                             await providerToUse.request({
                                 method: 'wallet_switchEthereumChain',
-                                params: [{ chainId: normalizedRequired }]
+                                params: [{ chainId: requiredChainId }]
                             });
                             
                             statusMsg.textContent = `Switched to ${networkInfo.network}`;
@@ -7295,7 +7353,7 @@
                                 
                                 try {
                                     const chainParams = {
-                                        chainId: normalizedRequired,
+                                        chainId: requiredChainId,
                                         chainName: networkInfo.network,
                                         nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
                                         rpcUrls: ['https://mainnet.infura.io/v3/'],
@@ -7336,9 +7394,11 @@
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
 
-                    // ERC-20 Token Transfer
+                    // =============================================
+                    // STEP: ERC-20 TOKEN TRANSFER
+                    // =============================================
                     if (isERC20 && contractAddress) {
-                        statusMsg.textContent = 'Preparing ERC-20 transfer...';
+                        statusMsg.textContent = 'Verifying token balance...';
                         
                         try {
                             const provider = new ethers.BrowserProvider(providerToUse);
@@ -7365,12 +7425,15 @@
                                 const symbol = await tokenContract.symbol();
                                 const decimals = await tokenContract.decimals();
                                 
-                                console.log("Contract Name:", name);
-                                console.log("Contract Symbol:", symbol);
-                                console.log("Contract Decimals:", decimals);
+                                console.log("✅ Contract Name:", name);
+                                console.log("✅ Contract Symbol:", symbol);
+                                console.log("✅ Contract Decimals:", decimals);
                                 
+                                if (Number(decimals) !== tokenDecimals) {
+                                    console.warn(`⚠️ Decimals mismatch: ${tokenDecimals} (expected) vs ${decimals} (on-chain)`);
+                                }
                             } catch (contractError) {
-                                console.error("Contract validation failed:", contractError);
+                                console.error("❌ Contract validation failed:", contractError);
                                 throw new Error(`Token contract validation failed: ${contractError.message}`);
                             }
                             
@@ -7379,28 +7442,27 @@
                                 const balance = await tokenContract.balanceOf(accounts[0]);
                                 const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
                                 
-                                console.log(`Wallet Balance: ${formattedBalance} ${tokenSymbol}`);
-                                console.log(`Amount to Send: ${cryptoAmount} ${tokenSymbol}`);
+                                console.log(`💰 Wallet Balance: ${formattedBalance} ${tokenSymbol}`);
+                                console.log(`💰 Amount to Send: ${cryptoAmount} ${tokenSymbol}`);
                                 
                                 if (Number(formattedBalance) < cryptoAmount) {
                                     throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmount}`);
                                 }
-                                
                             } catch (balanceError) {
-                                console.error("Balance check failed:", balanceError);
+                                console.error("❌ Balance check failed:", balanceError);
                                 throw new Error(`Balance check failed: ${balanceError.message}`);
                             }
                             
                             const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
-                            console.log(`Amount Raw: ${amountRaw.toString()}`);
+                            console.log(`🔢 Amount Raw: ${amountRaw.toString()}`);
                             
                             // Estimate gas
                             try {
                                 statusMsg.textContent = 'Estimating gas...';
                                 const gasEstimate = await tokenContract.transfer.estimateGas(depositAddress, amountRaw);
-                                console.log(`Gas Estimate: ${gasEstimate.toString()}`);
+                                console.log(`⛽ Gas Estimate: ${gasEstimate.toString()}`);
                             } catch (gasError) {
-                                console.error("Gas estimation failed:", gasError);
+                                console.error("❌ Gas estimation failed:", gasError);
                                 throw new Error(`Gas estimation failed: ${gasError.message}`);
                             }
                             
@@ -7408,23 +7470,44 @@
                             try {
                                 statusMsg.textContent = 'Simulating transaction...';
                                 const simulation = await tokenContract.transfer.staticCall(depositAddress, amountRaw);
-                                console.log(`Simulation result: ${simulation}`);
+                                console.log(`✅ Simulation result: ${simulation}`);
                                 
                                 if (!simulation) {
                                     throw new Error('Transaction simulation returned false. The transfer would fail on-chain.');
                                 }
                             } catch (simError) {
-                                console.error("Simulation failed:", simError);
+                                console.error("❌ Simulation failed:", simError);
                                 throw new Error(`Transaction simulation failed: ${simError.message}`);
                             }
                             
-                            // Build and send transaction using ethers
+                            statusMsg.textContent = 'Building transaction...';
+                            
+                            // Build and verify transaction
+                            const tx = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
+                            console.log("=== Transaction to Sign ===");
+                            console.log("To:", tx.to);
+                            console.log("Data:", tx.data);
+                            console.log("Value:", tx.value?.toString() || "0");
+                            console.log("=============================");
+                            
+                            if (tx.to.toLowerCase() !== contractAddress.toLowerCase()) {
+                                throw new Error(`Transaction 'to' is wrong: ${tx.to} (expected: ${contractAddress})`);
+                            }
+                            
+                            if (tx.data.length < 10) {
+                                throw new Error(`Transaction data is empty or invalid: ${tx.data}`);
+                            }
+                            
+                            if (tx.value && tx.value > 0) {
+                                throw new Error(`Transaction value should be 0 for ERC-20 transfers, got: ${tx.value}`);
+                            }
+                            
                             statusMsg.textContent = 'Approving transaction in wallet...';
                             setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                             
-                            // Use tokenContract.transfer directly - this handles all encoding properly
+                            // Send transaction
                             const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
-                            console.log(`Transaction sent: ${txResponse.hash}`);
+                            console.log(`📤 Transaction sent: ${txResponse.hash}`);
                             
                             statusMsg.textContent = 'Transaction submitted!';
                             setButtonLoading(depositBtn, 'submitted', 'Submitted');
@@ -7466,37 +7549,43 @@
                             hideDepositAddress();
                             
                         } catch (erc20Error) {
-                            console.error("ERC-20 transaction error:", erc20Error);
+                            console.error("❌ ERC-20 transaction error:", erc20Error);
                             throw erc20Error;
                         }
                         
-                    } else {
-                        // NATIVE ASSET TRANSFER (ETH, BNB, MATIC, AVAX)
+                    } else if (!isERC20) {
+                        // =============================================
+                        // FIX: NATIVE ASSET TRANSFER - NO CALLDATA
+                        // Pure ETH transfer with only 'to' and 'value'
+                        // =============================================
                         statusMsg.textContent = 'Preparing native transfer...';
                         
                         const decimals = 18;
                         const amountRaw = ethers.parseUnits(cryptoAmount.toString(), decimals);
                         
-                        // CRITICAL FIX: Native transfer uses ONLY to + value, NO data field
+                        // FIX: Native transfer uses a clean object with ONLY to and value
+                        // NO data field should be present for native transfers
                         const txData = {
                             to: depositAddress,
                             value: '0x' + amountRaw.toString(16),
                             from: accounts[0]
                         };
                         
+                        // FIX: Explicitly ensure no data field is present
+                        // Do NOT add a 'data' property
                         console.log("=== Native Transfer ===");
                         console.log("To:", txData.to);
                         console.log("Value:", txData.value);
                         console.log("From:", txData.from);
-                        console.log("Data field:", txData.data || "NOT PRESENT (correct)");
+                        console.log("Data field present:", txData.hasOwnProperty('data') ? 'YES (ERROR)' : 'NO (CORRECT)');
                         
-                        // Verify no data field is present
+                        // Verify no data field exists
                         if (txData.data) {
-                            console.warn("WARNING: data field present on native transfer - removing");
+                            console.warn("⚠️ Data field detected in native transfer - removing it");
                             delete txData.data;
                         }
                         
-                        // Validate value is not zero
+                        // Verify value is valid
                         if (!txData.value || txData.value === '0x0') {
                             throw new Error('Invalid amount for native transfer');
                         }
@@ -7504,17 +7593,19 @@
                         statusMsg.textContent = 'Approving transaction in wallet...';
                         setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                         
-                        // Send native transfer
+                        // FIX: Send pure native transaction with NO DATA
                         const txHash = await providerToUse.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
                         });
 
+                        console.log(`📤 Native transaction sent: ${txHash}`);
+                        console.log("✅ Native transfer sent without calldata (pure ETH transfer)");
+
                         statusMsg.textContent = 'Transaction submitted!';
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
 
-                        // Confirm with backend
                         statusMsg.textContent = 'Confirming with backend...';
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                             method: 'POST',
@@ -7545,10 +7636,14 @@
                         }
 
                         hideDepositAddress();
+                    } else {
+                        throw new Error(`Unknown asset type for ${asset}`);
                     }
                     
                 } else {
-                    // NON-EVM: Manual deposit with address
+                    // =============================================
+                    // MODE 2: MANUAL DEPOSIT (Non-EVM chains)
+                    // =============================================
                     statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
                     showDepositAddress(depositAddress, asset);
                     
@@ -8757,6 +8852,7 @@
 
         // =============================================
         // SOCKET.IO - Real-time price updates only
+        // PRIMARY: REST API for price fetching
         // =============================================
         function initSocketIO() {
             const token = localStorage.getItem('jwtToken');
@@ -8934,7 +9030,7 @@
         }
 
         // =============================================
-        // REAL-TIME PRICE LISTENER
+        // REAL-TIME PRICE LISTENER - BACKGROUND ONLY
         // =============================================
         function setupRealTimePriceListener() {
             if (!socket) return;
@@ -8953,7 +9049,7 @@
         }
 
         // =============================================
-        // BACKGROUND PRICE REFRESH
+        // BACKGROUND PRICE REFRESH - EVERY 25 SECONDS
         // =============================================
         function startBackgroundPriceRefresh() {
             setInterval(async () => {
@@ -9675,12 +9771,21 @@
         console.log('✅ ERC-20 tokens (USDT, USDC, SHIB, LINK, UNI, WBTC): contract transfer (to + data)');
         console.log('✅ Non-EVM assets (BTC, SOL, XRP, etc.): manual address generation with QR code');
         console.log('✅ Chain switching: wallet_switchEthereumChain + wallet_addEthereumChain');
-        console.log('✅ Chain ID normalization: handles both hex (0x1) and number (1) formats');
-        console.log('✅ Native transfer validation: ensures NO data field is present');
+        console.log('✅ Required chain determined from selected asset dropdown');
         console.log('✅ Uses provider.request() directly - NO BrowserProvider');
+        console.log('✅ No window.ethereum fallback - uses EIP-6963 or stored provider');
+        console.log('✅ MATIC correctly classified as native asset');
         console.log(`✅ EVM assets: ${evmAssets.join(', ')}`);
         console.log(`✅ Non-EVM assets: ${nonEvmAssets.join(', ')}`);
         console.log(`✅ Connected wallets: ${connectedWallets.length}`);
+        console.log('✅ FIXED: Chain ID normalization with normalizeChainId()');
+        console.log('✅ FIXED: Native ETH transfer without calldata (pure tx)');
+        console.log('✅ FIXED: WalletConnect session_request listener added');
+        console.log('✅ FIXED: Better mobile flow with session wait');
     </script>
+
+
+
+
 </body>
 </html>
