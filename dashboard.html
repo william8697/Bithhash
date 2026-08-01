@@ -5398,10 +5398,6 @@
 
 
 
-
-
-
-
 <script>
         // =============================================
         // GLOBAL STATE
@@ -7176,6 +7172,7 @@
         // FIX 1: Chain ID comparison using normalizeChainId()
         // FIX 2: Native ETH transfer without calldata (pure tx)
         // FIX 3: Separated native and ERC-20 paths
+        // FIX 4: Mobile wallet wake-up via deep link before transaction
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7395,6 +7392,41 @@
                     }
 
                     // =============================================
+                    // STEP: WAKE UP MOBILE WALLET BEFORE TRANSACTION
+                    // =============================================
+                    const isMobile = isMobileDevice();
+                    if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
+                        statusMsg.textContent = 'Opening wallet app...';
+                        console.log('Mobile device detected - waking up wallet app');
+                        
+                        // Construct a wake-up deep link based on wallet type
+                        const walletDeepLink = {
+                            'metamask': 'https://metamask.app.link/',
+                            'trust': 'trust://',
+                            'rainbow': 'rainbow://',
+                            'phantom': 'phantom://'
+                        }[walletTypeToUse] || 'https://metamask.app.link/';
+                        
+                        // Try to wake up the wallet by opening the deep link in a new window
+                        // This ensures the wallet app is brought to foreground before the transaction request
+                        const wakeWindow = window.open(walletDeepLink, '_blank');
+                        
+                        // Give the wallet time to wake up
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        
+                        // Close the wake window if it was opened
+                        if (wakeWindow && !wakeWindow.closed) {
+                            try { wakeWindow.close(); } catch(e) {}
+                        }
+                        
+                        statusMsg.textContent = 'Ready to approve transaction in wallet...';
+                        setButtonLoading(depositBtn, 'approving', 'Open wallet to approve...');
+                        
+                        // Add a small delay before sending the transaction
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+
+                    // =============================================
                     // STEP: ERC-20 TOKEN TRANSFER
                     // =============================================
                     if (isERC20 && contractAddress) {
@@ -7590,6 +7622,21 @@
                             throw new Error('Invalid amount for native transfer');
                         }
                         
+                        // For mobile, we already woke up the wallet above
+                        // But we also need to ensure the provider is ready
+                        if (isMobileDevice()) {
+                            statusMsg.textContent = 'Opening wallet for approval...';
+                            setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
+                            
+                            // Try to ensure the wallet is still awake
+                            try {
+                                // Small ping to check if provider is responsive
+                                await providerToUse.request({ method: 'eth_chainId' });
+                            } catch (e) {
+                                console.log('Provider ping failed, will retry request directly');
+                            }
+                        }
+                        
                         statusMsg.textContent = 'Approving transaction in wallet...';
                         setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                         
@@ -7700,6 +7747,8 @@
                     errorMessage = `Gas estimation failed. The transaction would likely fail. Please verify you have enough ${asset.toUpperCase()} and ETH for gas.`;
                 } else if (errorMessage.includes('Simulation')) {
                     errorMessage = `Transaction simulation failed. The transfer would fail on-chain. Please verify the contract address and recipient.`;
+                } else if (errorMessage.includes('No wallet provider')) {
+                    errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -9782,7 +9831,9 @@
         console.log('✅ FIXED: Native ETH transfer without calldata (pure tx)');
         console.log('✅ FIXED: WalletConnect session_request listener added');
         console.log('✅ FIXED: Better mobile flow with session wait');
+        console.log('✅ FIXED: Mobile wallet wake-up via deep link before transaction');
     </script>
+
 
 
 
