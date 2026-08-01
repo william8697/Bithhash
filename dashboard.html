@@ -6493,8 +6493,8 @@
                 projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                 showQrModal: false,
                 chains: [1],
-                methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction"],
-                events: ["accountsChanged", "chainChanged", "disconnect"],
+                methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction", "wallet_switchEthereumChain", "wallet_addEthereumChain"],
+                events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update"],
                 metadata: {
                     name: 'BitHash Capital',
                     description: 'Digital Asset Platform',
@@ -6524,6 +6524,8 @@
             universalWalletProvider.on("disconnect", (data) => {
                 console.log("WalletConnect DISCONNECT event fired");
                 web3WalletAddress = null;
+                universalWalletProvider = null;
+                walletConnectInitialized = false;
             });
 
             // FIX: Add chainChanged listener
@@ -6537,6 +6539,14 @@
                 console.log("WalletConnect accountsChanged:", data);
                 if (data && data.length > 0) {
                     web3WalletAddress = data[0];
+                }
+            });
+
+            // FIX: Add session_update listener for better session management
+            universalWalletProvider.on("session_update", (data) => {
+                console.log("WalletConnect session_update:", data);
+                if (data && data.accounts) {
+                    web3WalletAddress = data.accounts[0];
                 }
             });
 
@@ -7167,6 +7177,8 @@
     // FIX 2: Native ETH transfer without calldata (pure tx)
     // FIX 3: Separated native and ERC-20 paths
     // FIX 4: Mobile wallet wake-up via deep link before transaction
+    // FIX 5: Wait for chainChanged event before sending transaction
+    // FIX 6: Proper session reuse (no re-initialization)
     // =============================================
     async function executeDeposit() {
         const assetSelect = document.getElementById('deposit-asset-select');
@@ -7270,27 +7282,39 @@
             // =============================================
             if (isEVM) {
                 // =============================================
-                // STEP: GET PROVIDER
+                // STEP: GET PROVIDER - REUSE EXISTING SESSION
                 // =============================================
                 let providerToUse = web3Provider;
 
+                // FIX: Don't reinitialize WalletConnect during deposit - reuse existing
                 if (!providerToUse) {
-                    const targetRdns = {
-                        'metamask': 'io.metamask',
-                        'trust': 'com.trustwallet.app',
-                        'phantom': 'app.phantom',
-                        'rainbow': 'me.rainbow'
-                    }[walletTypeToUse] || 'io.metamask';
-
-                    const injectedTarget = getProviderByRDNS(targetRdns);
-                    if (injectedTarget) {
-                        providerToUse = injectedTarget.provider;
+                    // Check if we have a WalletConnect session already
+                    if (universalWalletProvider && walletConnectInitialized) {
+                        providerToUse = universalWalletProvider;
+                        console.log('Reusing existing WalletConnect session');
                     } else {
-                        const wcProvider = await silentlyInitWalletConnect();
-                        if (!wcProvider) {
-                            throw new Error('No wallet provider available. Please install a wallet.');
+                        const targetRdns = {
+                            'metamask': 'io.metamask',
+                            'trust': 'com.trustwallet.app',
+                            'phantom': 'app.phantom',
+                            'rainbow': 'me.rainbow'
+                        }[walletTypeToUse] || 'io.metamask';
+
+                        const injectedTarget = getProviderByRDNS(targetRdns);
+                        if (injectedTarget) {
+                            providerToUse = injectedTarget.provider;
+                        } else {
+                            // FIX: Only initialize if absolutely needed, and reuse if already exists
+                            if (!universalWalletProvider) {
+                                const wcProvider = await silentlyInitWalletConnect();
+                                if (!wcProvider) {
+                                    throw new Error('No wallet provider available. Please install a wallet.');
+                                }
+                                providerToUse = wcProvider;
+                            } else {
+                                providerToUse = universalWalletProvider;
+                            }
                         }
-                        providerToUse = wcProvider;
                     }
                 }
 
@@ -7326,15 +7350,53 @@
                     statusMsg.textContent = `Switching to ${networkInfo.network}...`;
                     setButtonLoading(depositBtn, 'approving', `Switching to ${networkInfo.network}...`);
 
+                    // FIX: Wait for chainChanged event before proceeding
+                    let chainSwitchResolved = false;
+                    const chainSwitchPromise = new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            if (!chainSwitchResolved) {
+                                reject(new Error('Chain switch timeout - please approve in your wallet'));
+                            }
+                        }, 30000);
+
+                        const chainChangeHandler = (data) => {
+                            console.log('Chain changed to:', data);
+                            chainSwitchResolved = true;
+                            clearTimeout(timeout);
+                            // Remove listener after it fires
+                            try {
+                                providerToUse.removeListener('chainChanged', chainChangeHandler);
+                            } catch (e) {}
+                            resolve(data);
+                        };
+
+                        try {
+                            providerToUse.on('chainChanged', chainChangeHandler);
+                        } catch (e) {
+                            console.warn('Could not add chainChanged listener:', e);
+                            // If we can't listen, just resolve after a delay
+                            setTimeout(() => {
+                                if (!chainSwitchResolved) {
+                                    chainSwitchResolved = true;
+                                    resolve('unknown');
+                                }
+                            }, 3000);
+                        }
+                    });
+
                     try {
                         await providerToUse.request({
                             method: 'wallet_switchEthereumChain',
                             params: [{ chainId: requiredChainId }]
                         });
 
+                        // Wait for chain change confirmation
+                        await chainSwitchPromise;
+
                         statusMsg.textContent = `Switched to ${networkInfo.network}`;
                         showNotification('success', 'Network Switched', `Switched to ${networkInfo.network}`);
 
+                        // Small delay to ensure wallet is ready
                         await new Promise(resolve => setTimeout(resolve, 500));
 
                     } catch (switchError) {
@@ -7355,6 +7417,9 @@
                                     method: 'wallet_addEthereumChain',
                                     params: [chainParams]
                                 });
+
+                                // Wait for chain change confirmation
+                                await chainSwitchPromise;
 
                                 statusMsg.textContent = `Added and switched to ${networkInfo.network}`;
                                 showNotification('success', 'Network Added', `${networkInfo.network} added to wallet`);
@@ -7387,6 +7452,7 @@
 
                 // =============================================
                 // STEP: WAKE UP MOBILE WALLET BEFORE TRANSACTION
+                // FIX: Proper wake-up with deep link and request waiting
                 // =============================================
                 const isMobile = isMobileDevice();
                 if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
@@ -7402,7 +7468,6 @@
                     }[walletTypeToUse] || 'https://metamask.app.link/';
 
                     // Try to wake up the wallet by opening the deep link in a new window
-                    // This ensures the wallet app is brought to foreground before the transaction request
                     const wakeWindow = window.open(walletDeepLink, '_blank');
 
                     // Give the wallet time to wake up
@@ -7617,14 +7682,12 @@
                     }
 
                     // For mobile, we already woke up the wallet above
-                    // But we also need to ensure the provider is ready
                     if (isMobileDevice()) {
                         statusMsg.textContent = 'Opening wallet for approval...';
                         setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
 
                         // Try to ensure the wallet is still awake
                         try {
-                            // Small ping to check if provider is responsive
                             await providerToUse.request({ method: 'eth_chainId' });
                         } catch (e) {
                             console.log('Provider ping failed, will retry request directly');
@@ -7743,6 +7806,8 @@
                 errorMessage = `Transaction simulation failed. The transfer would fail on-chain. Please verify the contract address and recipient.`;
             } else if (errorMessage.includes('No wallet provider')) {
                 errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
+            } else if (errorMessage.includes('Chain switch timeout')) {
+                errorMessage = 'Network switch timed out. Please approve the network switch in your wallet and try again.';
             }
 
             statusMsg.style.color = 'var(--error)';
@@ -9826,9 +9891,11 @@
     console.log('✅ FIXED: WalletConnect session_request listener added');
     console.log('✅ FIXED: Better mobile flow with session wait');
     console.log('✅ FIXED: Mobile wallet wake-up via deep link before transaction');
+    console.log('✅ FIXED: eth_sendTransaction added to WalletConnect methods');
+    console.log('✅ FIXED: wallet_switchEthereumChain and wallet_addEthereumChain added to methods');
+    console.log('✅ FIXED: Wait for chainChanged event before sending transaction');
+    console.log('✅ FIXED: Reuse existing WalletConnect session during deposits');
 </script>
-
-
 
 </body>
 </html>
