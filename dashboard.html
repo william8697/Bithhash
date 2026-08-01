@@ -7180,7 +7180,6 @@
 
 
 
-
 async function executeDeposit() {
     const assetSelect = document.getElementById('deposit-asset-select');
     const amountInput = document.getElementById('deposit-amount-input');
@@ -7378,9 +7377,9 @@ async function executeDeposit() {
             }
 
             // =============================================
-            // HELPER: Wake up mobile wallet
+            // HELPER: Wake up mobile wallet with retry logic
             // =============================================
-            const wakeMobileWallet = async () => {
+            const wakeMobileWallet = async (retryCount = 0) => {
                 const isMobile = isMobileDevice();
                 const isWalletConnect = universalWalletProvider !== null || 
                     (typeof providerToUse !== 'undefined' && providerToUse && 
@@ -7388,35 +7387,81 @@ async function executeDeposit() {
                 
                 if (isMobile && isWalletConnect) {
                     try {
-                        // Try to get the session URI from the provider
-                        let sessionUri = activeWcUri;
+                        let sessionUri = null;
                         
-                        // If activeWcUri is null, try to get it from the provider
+                        // Try multiple sources for the session URI
+                        // 1. Check activeWcUri global
+                        if (activeWcUri) {
+                            sessionUri = activeWcUri;
+                            console.log('✅ Found URI from activeWcUri');
+                        }
+                        
+                        // 2. Check localStorage for stored URI
+                        if (!sessionUri) {
+                            const storedUri = localStorage.getItem('wc_session_uri');
+                            if (storedUri) {
+                                sessionUri = storedUri;
+                                console.log('✅ Found URI from localStorage');
+                            }
+                        }
+                        
+                        // 3. Check the provider object directly
                         if (!sessionUri && universalWalletProvider) {
-                            // Check if the provider has a uri property
+                            // Check various properties where the URI might be stored
                             if (universalWalletProvider.uri) {
                                 sessionUri = universalWalletProvider.uri;
-                            }
-                            // Check if the provider has a session with a uri
-                            if (universalWalletProvider.session && universalWalletProvider.session.uri) {
+                                console.log('✅ Found URI from provider.uri');
+                            } else if (universalWalletProvider.session && universalWalletProvider.session.uri) {
                                 sessionUri = universalWalletProvider.session.uri;
-                            }
-                            // Check if the provider has a pairing topic
-                            if (universalWalletProvider.pairing && universalWalletProvider.pairing.topic) {
+                                console.log('✅ Found URI from provider.session.uri');
+                            } else if (universalWalletProvider._session && universalWalletProvider._session.uri) {
+                                sessionUri = universalWalletProvider._session.uri;
+                                console.log('✅ Found URI from provider._session.uri');
+                            } else if (universalWalletProvider.pairing && universalWalletProvider.pairing.topic) {
                                 // Construct URI from pairing topic if possible
                                 const topic = universalWalletProvider.pairing.topic;
                                 sessionUri = `wc:${topic}@2?relay-protocol=irn&symKey=${topic.substring(0, 32)}`;
+                                console.log('✅ Constructed URI from pairing topic');
+                            }
+                        }
+                        
+                        // 4. Check providerToUse for URI
+                        if (!sessionUri && providerToUse) {
+                            if (providerToUse.uri) {
+                                sessionUri = providerToUse.uri;
+                                console.log('✅ Found URI from providerToUse.uri');
+                            } else if (providerToUse._uri) {
+                                sessionUri = providerToUse._uri;
+                                console.log('✅ Found URI from providerToUse._uri');
                             }
                         }
                         
                         if (sessionUri) {
                             const deepLink = openDeepLink(walletTypeToUse, sessionUri);
                             console.log('🔗 Opening wallet for approval:', deepLink);
+                            
+                            // Store the URI for future use
+                            localStorage.setItem('wc_session_uri', sessionUri);
+                            activeWcUri = sessionUri;
+                            
+                            // Open the wallet app
                             window.location.href = deepLink;
-                            await new Promise(resolve => setTimeout(resolve, 1500));
+                            
+                            // Wait for the wallet to open
+                            await new Promise(resolve => setTimeout(resolve, 2000));
                             return true;
                         } else {
                             console.warn('⚠️ No session URI available for deep link');
+                            
+                            // Try to get a fresh URI by re-initializing
+                            if (retryCount < 2) {
+                                console.log(`🔄 Retrying to get session URI (attempt ${retryCount + 1})...`);
+                                const wcProvider = await silentlyInitWalletConnect();
+                                if (wcProvider) {
+                                    universalWalletProvider = wcProvider;
+                                    return await wakeMobileWallet(retryCount + 1);
+                                }
+                            }
                             return false;
                         }
                     } catch (linkError) {
