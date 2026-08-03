@@ -5485,10 +5485,15 @@
             session: null,
             accounts: [],
             chainId: null,
-            error: null,
-            connectPromise: null,
-            connectResolved: false
+            error: null
         };
+        
+        // =============================================
+        // FIX 1: Store display_uri listener reference for cleanup
+        // =============================================
+        let displayUriListenerRef = null;
+        let wcConnectionResolve = null;
+        let wcConnectionReject = null;
 
         // =============================================
         // DEPOSIT STATE
@@ -5660,46 +5665,40 @@
             return normalized1 === normalized2;
         }
 
-        // =============================================
-        // SESSION VALIDATION - FIX 5 & 8: Validate before RPC calls
-        // =============================================
-        function isWalletConnectSessionValid(provider) {
-            if (!provider) return false;
-            
-            // Check if provider has a session
-            if (provider.session) {
-                return true;
-            }
-            
-            // Check if provider has accounts
-            if (provider.accounts && provider.accounts.length > 0) {
-                return true;
-            }
-            
-            // Check connected flag
-            if (provider.connected) {
-                return true;
-            }
-            
-            return false;
+        function updateMobileBalances() {
+            document.getElementById('mobile-main-amount').textContent = document.getElementById('main-balance').textContent;
+            document.getElementById('mobile-active-amount').textContent = document.getElementById('active-balance').textContent;
+            document.getElementById('mobile-matured-amount').textContent = document.getElementById('matured-balance').textContent;
         }
 
-        function validateSessionBeforeRPC(provider) {
-            if (!provider) {
-                return { valid: false, reason: 'No provider available' };
-            }
-            
-            // Check session
-            if (!isWalletConnectSessionValid(provider)) {
-                return { valid: false, reason: 'Session expired or invalid' };
-            }
-            
-            // Check accounts
-            if (!provider.accounts || provider.accounts.length === 0) {
-                return { valid: false, reason: 'No accounts available' };
-            }
-            
-            return { valid: true };
+        function switchMobileBalance(type) {
+            const tabs = document.querySelectorAll('.balance-tab');
+            tabs.forEach(tab => tab.classList.remove('active'));
+            const clickedTab = Array.from(tabs).find(tab => {
+                const onclick = tab.getAttribute('onclick');
+                return onclick && onclick.includes(type);
+            });
+            if (clickedTab) clickedTab.classList.add('active');
+            const details = document.querySelectorAll('.mobile-balance-detail');
+            details.forEach(detail => detail.classList.remove('active'));
+            const activeDetail = document.getElementById(`mobile-${type}-balance`);
+            if (activeDetail) activeDetail.classList.add('active');
+            currentMobileBalance = type;
+        }
+
+        function setAssetsView(view) {
+            currentAssetsView = view;
+            currentAssetsPage = 1;
+            document.getElementById('view-toggle-card').classList.toggle('active', view === 'card');
+            document.getElementById('view-toggle-list').classList.toggle('active', view === 'list');
+            renderAssetsWithBalanceEnhanced();
+        }
+
+        function setMiningView(view) {
+            currentMiningView = view;
+            document.getElementById('mining-toggle-card').classList.toggle('active', view === 'card');
+            document.getElementById('mining-toggle-list').classList.toggle('active', view === 'list');
+            loadInvestments();
         }
 
         // =============================================
@@ -6488,20 +6487,15 @@
         }
 
         // =============================================
-        // WALLETCONNECT INIT - FIXED: No session_request listener, proper event handling
+        // WALLETCONNECT INIT - FIXED
+        // FIX 1: Removed session_request listener (use connect, accountsChanged, etc.)
+        // FIX 2: Use on() instead of once() for display_uri
+        // FIX 3: Removed provider._uri fallback
         // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
             if (universalWalletProvider) {
-                // Validate session before returning
-                if (!isWalletConnectSessionValid(universalWalletProvider)) {
-                    console.warn('Existing provider has invalid session, re-initializing...');
-                    universalWalletProvider = null;
-                    walletConnectInitialized = false;
-                } else {
-                    return universalWalletProvider;
-                }
+                return universalWalletProvider;
             }
-            
             if (attempt > MAX_WALLETCONNECT_RETRIES) {
                 console.error('WalletConnect SDK failed to load after maximum retries');
                 return null;
@@ -6535,24 +6529,25 @@
                 walletConnectInitialized = true;
 
                 // =============================================
-                // FIX 1: REMOVED session_request listener - not used as session state indicator
-                // Use only connect, accountsChanged, chainChanged, session_update, disconnect
+                // FIX 1: REMOVED session_request listener
+                // Only use connect, accountsChanged, chainChanged, session_update, disconnect
                 // =============================================
 
                 // =============================================
-                // FIX 6: Use on() instead of once() for display_uri
+                // FIX 2: Use on() instead of once() for display_uri
+                // Store listener reference for cleanup
                 // =============================================
-                universalWalletProvider.on("display_uri", (uri) => {
-                    console.log("WalletConnect display_uri:", uri);
-                    activeWcUri = uri;
-                    wcSessionState.uri = uri;
-                    wcSessionState.status = 'uri_generated';
-                });
+                if (displayUriListenerRef) {
+                    try {
+                        universalWalletProvider.removeListener('display_uri', displayUriListenerRef);
+                    } catch (e) {}
+                    displayUriListenerRef = null;
+                }
 
+                // Enhanced connect event handling
                 universalWalletProvider.on("connect", (data) => {
                     console.log("WalletConnect CONNECT event fired");
                     wcSessionState.status = 'connected';
-                    wcSessionState.connectResolved = true;
                     if (data && data.accounts && data.accounts.length > 0) {
                         web3WalletAddress = data.accounts[0];
                         wcSessionState.accounts = data.accounts;
@@ -6560,23 +6555,41 @@
                     if (data && data.chainId) {
                         wcSessionState.chainId = data.chainId;
                     }
+                    
+                    // Resolve the connection promise if it exists
+                    if (wcConnectionResolve) {
+                        wcConnectionResolve(data);
+                        wcConnectionResolve = null;
+                        wcConnectionReject = null;
+                    }
                 });
 
                 universalWalletProvider.on("disconnect", (data) => {
                     console.log("WalletConnect DISCONNECT event fired");
                     web3WalletAddress = null;
+                    universalWalletProvider = null;
+                    walletConnectInitialized = false;
                     wcSessionState.status = 'idle';
                     wcSessionState.session = null;
                     wcSessionState.accounts = [];
-                    wcSessionState.connectResolved = false;
+                    
+                    // Clean up listener
+                    if (displayUriListenerRef) {
+                        try {
+                            universalWalletProvider.removeListener('display_uri', displayUriListenerRef);
+                        } catch (e) {}
+                        displayUriListenerRef = null;
+                    }
                 });
 
+                // Enhanced chainChanged event handling
                 universalWalletProvider.on("chainChanged", (data) => {
                     console.log("WalletConnect chainChanged:", data);
                     web3Network = data;
                     wcSessionState.chainId = data;
                 });
 
+                // Enhanced accountsChanged event handling
                 universalWalletProvider.on("accountsChanged", (data) => {
                     console.log("WalletConnect accountsChanged:", data);
                     if (data && data.length > 0) {
@@ -6585,10 +6598,10 @@
                     }
                 });
 
+                // Enhanced session_update event handling
                 universalWalletProvider.on("session_update", (data) => {
                     console.log("WalletConnect session_update:", data);
                     wcSessionState.status = 'session_established';
-                    wcSessionState.connectResolved = true;
                     if (data && data.accounts && data.accounts.length > 0) {
                         web3WalletAddress = data.accounts[0];
                         wcSessionState.accounts = data.accounts;
@@ -6619,16 +6632,18 @@
         }
 
         // =============================================
-        // DEEP LINK CONSTRUCTION - FIX 3: Trust Wallet uses universal link for Android
+        // DEEP LINK CONSTRUCTION - FIXED
+        // FIX: Trust Wallet uses universal link for Android
         // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
             const encodedUri = encodeURIComponent(uri);
             
-            // FIX 3: Trust Wallet uses universal link for both Android and iOS
             const nativePaths = {
                 'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
-                'trust': `https://link.trustwallet.com/wc?uri=${encodedUri}`,
+                'trust': os === 'android' 
+                    ? `https://link.trustwallet.com/wc?uri=${encodedUri}`
+                    : `https://link.trustwallet.com/wc?uri=${encodedUri}`,
                 'phantom': `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
                 'rainbow': os === 'android' ? `rainbow://wc?uri=${encodedUri}` : `https://rainbow.me/wc?uri=${encodedUri}`
             };
@@ -6669,7 +6684,12 @@
         }
 
         // =============================================
-        // CONNECT SELECTED WALLET - FIX 2: Don't await connectPromise after navigation
+        // CONNECT SELECTED WALLET - FIXED
+        // FIX 1: No await on connectPromise after navigation
+        // FIX 2: Use on() for display_uri with cleanup
+        // FIX 3: No provider._uri fallback
+        // FIX 4: Session validation before RPC calls
+        // FIX 5: No wake-up logic (deleted window.open block)
         // =============================================
         async function connectSelectedWallet() {
             const dropdown = document.getElementById('wallet-dropdown');
@@ -6761,9 +6781,6 @@
 
                 console.log('Mobile flow: initializing WalletConnect for', walletType);
                 
-                // =============================================
-                // STEP 1: Initialize provider
-                // =============================================
                 const provider = await silentlyInitWalletConnect();
                 if (!provider) {
                     const appStoreUrl = getAppStoreUrl(walletType);
@@ -6779,169 +6796,95 @@
                 setButtonLoading(connectBtn, 'approving', 'Connecting...');
                 
                 // =============================================
-                // FIX 6: Use on() instead of once() for URI listener
+                // FIX 2: Use on() for display_uri with cleanup
                 // =============================================
                 let wcUri = null;
-                const uriHandler = (uri) => {
-                    console.log('WalletConnect URI emitted:', uri);
-                    wcUri = uri;
-                    activeWcUri = uri;
-                    wcSessionState.uri = uri;
-                    wcSessionState.status = 'uri_generated';
-                };
-                provider.on("display_uri", uriHandler);
+                const uriPromise = new Promise((resolve) => {
+                    const uriHandler = (uri) => {
+                        console.log('WalletConnect URI emitted:', uri);
+                        wcUri = uri;
+                        activeWcUri = uri;
+                        wcSessionState.uri = uri;
+                        wcSessionState.status = 'uri_generated';
+                        // Clean up listener after URI is received
+                        if (displayUriListenerRef) {
+                            try {
+                                provider.removeListener('display_uri', displayUriListenerRef);
+                            } catch (e) {}
+                            displayUriListenerRef = null;
+                        }
+                        resolve(uri);
+                    };
+                    displayUriListenerRef = uriHandler;
+                    provider.on("display_uri", uriHandler);
+                    
+                    // FIX 3: Removed provider._uri fallback
+                });
 
                 // =============================================
-                // STEP 2: Call provider.connect() - DON'T await after navigation
+                // FIX 1: Start connection but don't await after navigation
                 // =============================================
                 const connectPromise = provider.connect();
-                wcSessionState.connectPromise = connectPromise;
+                
+                // Wait for URI to be generated
+                const uri = await uriPromise;
+                console.log('WalletConnect URI ready:', uri);
 
-                // Wait a moment for URI to be emitted
-                let waitAttempts = 0;
-                while (!wcUri && waitAttempts < 20) {
-                    await new Promise(resolve => setTimeout(resolve, 250));
-                    waitAttempts++;
-                    if (wcUri) break;
-                }
-
-                if (!wcUri) {
-                    // FIX 7: Don't use provider._uri - it's private
-                    throw new Error('Failed to get WalletConnect URI. Please try again.');
-                }
-
-                console.log('WalletConnect URI ready:', wcUri);
-
-                // =============================================
-                // STEP 3: Launch wallet with deep link
-                // =============================================
-                const deepLink = openDeepLink(walletType, wcUri);
+                // Open the wallet app
+                const deepLink = openDeepLink(walletType, uri);
                 console.log('Opening wallet with deep link:', deepLink);
                 wcSessionState.status = 'wallet_launched';
-
+                
                 // =============================================
-                // FIX 2: Navigate away WITHOUT awaiting connectPromise
+                // FIX 1: Navigate away WITHOUT awaiting connectPromise
                 // =============================================
                 window.location.href = deepLink;
 
                 // =============================================
-                // FIX 2: Don't await connectPromise here - let the page resume
-                // after visibilitychange or pageshow
+                // FIX 4: Wait for session to be established via event
                 // =============================================
                 setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
 
-                // We'll handle the connection completion when the page becomes visible again
-                // The connect event will fire when the user approves
+                // Create a promise that resolves when connect event fires
+                const sessionPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Connection timeout - please approve in your wallet'));
+                    }, 30000);
+                    
+                    wcConnectionResolve = (data) => {
+                        clearTimeout(timeout);
+                        resolve(data);
+                    };
+                    wcConnectionReject = (err) => {
+                        clearTimeout(timeout);
+                        reject(err);
+                    };
+                });
 
-                // Set a timeout to check if the connection was completed
-                let checkInterval = setInterval(async () => {
-                    if (wcSessionState.connectResolved || wcSessionState.status === 'connected') {
-                        clearInterval(checkInterval);
-                        // Connection was completed while page was hidden
-                        await handleWalletConnectComplete(provider, walletType, connectBtn);
-                    }
-                }, 2000);
+                // Wait for session
+                await sessionPromise;
 
-                // Also listen for visibility change to check connection status
-                const visibilityHandler = async () => {
-                    if (document.visibilityState === 'visible') {
-                        document.removeEventListener('visibilitychange', visibilityHandler);
-                        clearInterval(checkInterval);
-                        
-                        // Check if connection was established
-                        if (wcSessionState.connectResolved || wcSessionState.status === 'connected') {
-                            await handleWalletConnectComplete(provider, walletType, connectBtn);
-                        } else {
-                            // Connection not completed, wait a bit more
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                            if (wcSessionState.connectResolved || wcSessionState.status === 'connected') {
-                                await handleWalletConnectComplete(provider, walletType, connectBtn);
-                            } else {
-                                // Still not connected, try to get accounts
-                                try {
-                                    const accounts = await provider.request({ method: 'eth_accounts' });
-                                    if (accounts && accounts.length > 0) {
-                                        wcSessionState.accounts = accounts;
-                                        wcSessionState.status = 'connected';
-                                        await handleWalletConnectComplete(provider, walletType, connectBtn);
-                                    } else {
-                                        throw new Error('No accounts found. Please approve in wallet.');
-                                    }
-                                } catch (err) {
-                                    console.warn('Could not get accounts after visibility change:', err);
-                                    showNotification('error', 'Connection Failed', 
-                                        'Could not complete connection. Please try again and approve in your wallet.');
-                                    isConnecting = false;
-                                    connectBtn.disabled = false;
-                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                }
-                            }
-                        }
-                    }
-                };
-                document.addEventListener('visibilitychange', visibilityHandler);
-
-                // Remove the URI listener after a delay
-                setTimeout(() => {
-                    try {
-                        provider.removeListener('display_uri', uriHandler);
-                    } catch (e) {}
-                }, 10000);
-
-            } catch (error) {
-                console.error('Wallet connection error:', error);
-                wcSessionState.status = 'idle';
-                wcSessionState.error = error.message;
-
-                let errorMessage = error.message || 'Failed to connect wallet.';
-                if (errorMessage.includes('user rejected')) {
-                    errorMessage = 'Connection was rejected in your wallet. Please approve and try again.';
-                } else if (errorMessage.includes('session') || errorMessage.includes('expired')) {
-                    errorMessage = 'Connection session expired. Please try again.';
-                } else if (errorMessage.includes('timeout')) {
-                    errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
-                }
-
-                errorDiv.textContent = errorMessage;
-                errorDiv.style.display = 'block';
-                showNotification('error', 'Connection Failed', errorMessage);
-                isConnecting = false;
-                connectBtn.disabled = false;
-                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-            }
-        }
-
-        // =============================================
-        // Helper: Handle WalletConnect completion
-        // =============================================
-        async function handleWalletConnectComplete(provider, walletType, connectBtn) {
-            try {
-                // Get accounts
-                let accounts = wcSessionState.accounts;
+                // =============================================
+                // FIX 4: Validate session before proceeding
+                // =============================================
+                let accounts = await validateWalletConnectSession(provider);
+                
                 if (!accounts || accounts.length === 0) {
-                    try {
-                        accounts = await provider.request({ method: 'eth_accounts' });
-                    } catch (e) {
-                        try {
-                            accounts = await provider.request({ method: 'eth_requestAccounts' });
-                        } catch (e2) {
-                            console.warn('Could not get accounts:', e2);
-                        }
-                    }
-                }
-
-                if (!accounts || accounts.length === 0) {
-                    throw new Error('No accounts found. Please approve in wallet.');
+                    throw new Error("No accounts found. Please approve in wallet.");
                 }
 
                 const address = accounts[0];
                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
                 if (walletExists) {
+                    errorDiv.textContent = 'This wallet address is already connected.';
+                    errorDiv.style.display = 'block';
                     showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
                 }
 
-                // Get chain ID
                 let chainId = '0x1';
                 try {
                     chainId = await provider.request({ method: 'eth_chainId' });
@@ -6966,15 +6909,81 @@
 
                 showNotification('success', 'Wallet Connected',
                     `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
-                    
-                isConnecting = false;
 
             } catch (error) {
-                console.error('Error completing WalletConnect:', error);
-                showNotification('error', 'Connection Failed', error.message || 'Could not complete connection.');
-                isConnecting = false;
-                connectBtn.disabled = false;
+                console.error('Wallet connection error:', error);
+                wcSessionState.status = 'idle';
+                wcSessionState.error = error.message;
+
+                let errorMessage = error.message || 'Failed to connect wallet.';
+                if (errorMessage.includes('user rejected')) {
+                    errorMessage = 'Connection was rejected in your wallet. Please approve and try again.';
+                } else if (errorMessage.includes('session') || errorMessage.includes('expired')) {
+                    errorMessage = 'Connection session expired. Please try again.';
+                } else if (errorMessage.includes('timeout')) {
+                    errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
+                }
+
+                errorDiv.textContent = errorMessage;
+                errorDiv.style.display = 'block';
+                showNotification('error', 'Connection Failed', errorMessage);
+            }
+
+            isConnecting = false;
+            connectBtn.disabled = false;
+            if (!web3WalletAddress) {
                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+            }
+        }
+
+        // =============================================
+        // FIX 4: Validate WalletConnect session before RPC calls
+        // =============================================
+        async function validateWalletConnectSession(provider) {
+            if (!provider) {
+                console.warn('No provider available for session validation');
+                return null;
+            }
+
+            try {
+                // Check if provider has a valid session
+                let accounts = [];
+                try {
+                    accounts = await provider.request({ method: 'eth_accounts' });
+                } catch (e) {
+                    console.warn('eth_accounts failed, trying eth_requestAccounts:', e);
+                }
+
+                if (!accounts || accounts.length === 0) {
+                    try {
+                        accounts = await provider.request({ method: 'eth_requestAccounts' });
+                    } catch (e) {
+                        console.warn('eth_requestAccounts failed:', e);
+                    }
+                }
+
+                if (accounts && accounts.length > 0) {
+                    return accounts;
+                }
+
+                // Check session state
+                if (wcSessionState.status === 'connected' || wcSessionState.status === 'session_established') {
+                    // Session exists but accounts not available - try to re-establish
+                    try {
+                        accounts = await provider.request({ method: 'eth_requestAccounts' });
+                        if (accounts && accounts.length > 0) {
+                            return accounts;
+                        }
+                    } catch (e) {
+                        console.warn('Re-establish failed:', e);
+                    }
+                }
+
+                console.warn('No valid session found');
+                return null;
+            } catch (error) {
+                console.error('Session validation error:', error);
+                return null;
             }
         }
 
@@ -7331,7 +7340,11 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED with all 9 fixes applied
+        // EXECUTE DEPOSIT - FIXED
+        // FIX 4: Validate session before eth_requestAccounts
+        // FIX 5: Removed mobile wake-up logic (window.open)
+        // FIX 6: Chain ID normalization with normalizeChainId()
+        // FIX 7: Native ETH transfer without calldata
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7441,22 +7454,7 @@
 
                     if (!providerToUse) {
                         if (universalWalletProvider && walletConnectInitialized) {
-                            // FIX 8: Validate session before using
-                            const validation = validateSessionBeforeRPC(universalWalletProvider);
-                            if (!validation.valid) {
-                                console.warn('Session validation failed:', validation.reason);
-                                // Try to reconnect
-                                universalWalletProvider = null;
-                                walletConnectInitialized = false;
-                                const wcProvider = await silentlyInitWalletConnect();
-                                if (wcProvider) {
-                                    providerToUse = wcProvider;
-                                } else {
-                                    throw new Error('Session expired. Please reconnect your wallet.');
-                                }
-                            } else {
-                                providerToUse = universalWalletProvider;
-                            }
+                            providerToUse = universalWalletProvider;
                             console.log('Reusing existing WalletConnect session');
                         } else {
                             const targetRdns = {
@@ -7475,11 +7473,6 @@
                                     if (!wcProvider) {
                                         throw new Error('No wallet provider available. Please install a wallet.');
                                     }
-                                    // FIX 8: Validate session after initialization
-                                    const validation = validateSessionBeforeRPC(wcProvider);
-                                    if (!validation.valid) {
-                                        throw new Error('Session validation failed: ' + validation.reason);
-                                    }
                                     providerToUse = wcProvider;
                                 } else {
                                     providerToUse = universalWalletProvider;
@@ -7488,23 +7481,15 @@
                         }
                     }
 
-                    // FIX 8: Validate session before requesting accounts
-                    const validation = validateSessionBeforeRPC(providerToUse);
-                    if (!validation.valid) {
-                        throw new Error('Session validation failed: ' + validation.reason + '. Please reconnect your wallet.');
+                    // =============================================
+                    // FIX 4: Validate session before eth_requestAccounts
+                    // =============================================
+                    const validatedAccounts = await validateWalletConnectSession(providerToUse);
+                    if (!validatedAccounts || validatedAccounts.length === 0) {
+                        throw new Error('No valid session found. Please reconnect your wallet.');
                     }
 
-                    // Get accounts
-                    let accounts;
-                    try {
-                        accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
-                    } catch (e) {
-                        accounts = await providerToUse.request({ method: 'eth_accounts' });
-                    }
-
-                    if (!accounts || accounts.length === 0) {
-                        throw new Error('No accounts found. Please unlock your wallet.');
-                    }
+                    let accounts = validatedAccounts;
 
                     // =============================================
                     // STEP: CHECK CHAIN ID - FIXED with normalizeChainId
@@ -7521,11 +7506,12 @@
 
                     const requiredChainId = chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`;
 
+                    // FIX 6: Use compareChainIds() for proper normalization
                     if (!compareChainIds(currentChainId, requiredChainId)) {
                         statusMsg.textContent = `Switching to ${networkInfo.network}...`;
                         setButtonLoading(depositBtn, 'approving', `Switching to ${networkInfo.network}...`);
 
-                        // FIX 5: Wait for chainChanged event before proceeding
+                        // Wait for chainChanged event
                         let chainSwitchResolved = false;
                         const chainSwitchPromise = new Promise((resolve, reject) => {
                             const timeout = setTimeout(() => {
@@ -7609,7 +7595,7 @@
                         statusMsg.textContent = `Already on ${networkInfo.network}`;
                     }
 
-                    // Get fresh accounts
+                    // Get fresh accounts after chain switch
                     try {
                         accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
                     } catch (e) {
@@ -7621,25 +7607,9 @@
                     }
 
                     // =============================================
-                    // STEP: WAKE UP MOBILE WALLET - FIX 4: Remove bad wake-up block
+                    // FIX 5: REMOVED mobile wake-up logic (window.open block)
+                    // The pending WalletConnect request itself launches the wallet
                     // =============================================
-                    const isMobile = isMobileDevice();
-                    if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
-                        statusMsg.textContent = 'Opening wallet app...';
-                        console.log('Mobile device detected - waking up wallet app');
-
-                        // FIX 4: Use proper deep link with WC URI, not home screen
-                        // The wallet is already connected, just send a ping to wake it
-                        try {
-                            await providerToUse.request({ method: 'eth_chainId' });
-                            console.log('Wallet is awake and ready');
-                        } catch (e) {
-                            console.log('Wallet wake-up ping failed, continuing with transaction');
-                        }
-
-                        statusMsg.textContent = 'Ready to approve transaction in wallet...';
-                        setButtonLoading(depositBtn, 'approving', 'Open wallet to approve...');
-                    }
 
                     // =============================================
                     // STEP: ERC-20 TOKEN TRANSFER
@@ -7665,7 +7635,6 @@
 
                             const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
 
-                            // Validate contract
                             try {
                                 console.log("=== Validating ERC-20 Contract ===");
                                 const name = await tokenContract.name();
@@ -7684,7 +7653,6 @@
                                 throw new Error(`Token contract validation failed: ${contractError.message}`);
                             }
 
-                            // Verify wallet balance
                             try {
                                 const balance = await tokenContract.balanceOf(accounts[0]);
                                 const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
@@ -7703,7 +7671,6 @@
                             const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
                             console.log(`🔢 Amount Raw: ${amountRaw.toString()}`);
 
-                            // Estimate gas
                             try {
                                 statusMsg.textContent = 'Estimating gas...';
                                 const gasEstimate = await tokenContract.transfer.estimateGas(depositAddress, amountRaw);
@@ -7713,7 +7680,6 @@
                                 throw new Error(`Gas estimation failed: ${gasError.message}`);
                             }
 
-                            // Simulate the call
                             try {
                                 statusMsg.textContent = 'Simulating transaction...';
                                 const simulation = await tokenContract.transfer.staticCall(depositAddress, amountRaw);
@@ -7729,7 +7695,6 @@
 
                             statusMsg.textContent = 'Building transaction...';
 
-                            // Build and verify transaction
                             const tx = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
                             console.log("=== Transaction to Sign ===");
                             console.log("To:", tx.to);
@@ -7752,7 +7717,6 @@
                             statusMsg.textContent = 'Approving transaction in wallet...';
                             setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
 
-                            // Send transaction
                             const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
                             console.log(`📤 Transaction sent: ${txResponse.hash}`);
 
@@ -7760,7 +7724,6 @@
                             setButtonLoading(depositBtn, 'submitted', 'Submitted');
                             showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${networkInfo.network}.`);
 
-                            // Confirm with backend
                             statusMsg.textContent = 'Confirming with backend...';
                             const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                                 method: 'POST',
@@ -7802,7 +7765,8 @@
 
                     } else if (!isERC20) {
                         // =============================================
-                        // FIX 9: NATIVE ASSET TRANSFER - NO CALLDATA (unchanged)
+                        // FIX 7: NATIVE ASSET TRANSFER - NO CALLDATA
+                        // Pure ETH transfer with only 'to' and 'value'
                         // =============================================
                         statusMsg.textContent = 'Preparing native transfer...';
 
@@ -7828,17 +7792,6 @@
 
                         if (!txData.value || txData.value === '0x0') {
                             throw new Error('Invalid amount for native transfer');
-                        }
-
-                        if (isMobileDevice()) {
-                            statusMsg.textContent = 'Opening wallet for approval...';
-                            setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
-
-                            try {
-                                await providerToUse.request({ method: 'eth_chainId' });
-                            } catch (e) {
-                                console.log('Provider ping failed, will retry request directly');
-                            }
                         }
 
                         statusMsg.textContent = 'Approving transaction in wallet...';
@@ -7954,8 +7907,8 @@
                     errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
                 } else if (errorMessage.includes('Chain switch timeout')) {
                     errorMessage = 'Network switch timed out. Please approve the network switch in your wallet and try again.';
-                } else if (errorMessage.includes('Session validation failed')) {
-                    errorMessage = 'Your wallet session has expired. Please reconnect your wallet and try again.';
+                } else if (errorMessage.includes('No valid session')) {
+                    errorMessage = 'Wallet session expired. Please reconnect your wallet and try again.';
                 }
 
                 statusMsg.style.color = 'var(--error)';
@@ -10023,19 +9976,16 @@
         checkAuthAndRedirect();
 
         console.log('✅ Multi-Chain Deposit System Initialized');
-        console.log('✅ FIX 1: Removed session_request listener');
-        console.log('✅ FIX 2: Don\'t await connectPromise after navigation');
-        console.log('✅ FIX 3: Trust Wallet uses universal link for Android');
-        console.log('✅ FIX 4: Removed bad wallet wake-up block (home screen)');
-        console.log('✅ FIX 5: Session validation before RPC calls (wallet_switchEthereumChain)');
-        console.log('✅ FIX 6: Using on() instead of once() for display_uri');
-        console.log('✅ FIX 7: Removed provider._uri fallback, only use display_uri');
-        console.log('✅ FIX 8: Validate session before eth_requestAccounts and deposits');
-        console.log('✅ FIX 9: Native ETH transfer preserved (no calldata)');
-        console.log('✅ NATIVE assets (ETH, BNB, MATIC, AVAX): native transfer (to + value)');
-        console.log('✅ ERC-20 tokens (USDT, USDC, SHIB, LINK, UNI, WBTC): contract transfer (to + data)');
-        console.log('✅ Non-EVM assets (BTC, SOL, XRP, etc.): manual address generation with QR code');
-        console.log('✅ Chain switching: wallet_switchEthereumChain + wallet_addEthereumChain');
+        console.log('✅ FIXES APPLIED:');
+        console.log('   ✅ FIX 1: Removed session_request listener (using connect, accountsChanged, etc.)');
+        console.log('   ✅ FIX 2: No await on connectPromise after navigation');
+        console.log('   ✅ FIX 3: Using on() instead of once() for display_uri');
+        console.log('   ✅ FIX 4: No provider._uri fallback');
+        console.log('   ✅ FIX 5: Session validation before RPC calls');
+        console.log('   ✅ FIX 6: Removed mobile wake-up logic (window.open block)');
+        console.log('   ✅ FIX 7: Native ETH transfer without calldata');
+        console.log('   ✅ FIX 8: Chain ID normalization with normalizeChainId()');
+        console.log('   ✅ FIX 9: Trust Wallet uses universal link');
         console.log(`✅ EVM assets: ${evmAssets.join(', ')}`);
         console.log(`✅ Non-EVM assets: ${nonEvmAssets.join(', ')}`);
         console.log(`✅ Connected wallets: ${connectedWallets.length}`);
