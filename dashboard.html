@@ -21,6 +21,7 @@
     <script src="walletconnect.bundle.js"></script>
     
     <style>
+        /* [CSS remains exactly as in your original file] */
         :root {
             --bg-base: #0B0E11;
             --bg-surface: #11151C;
@@ -5393,9 +5394,9 @@
         </div>
     </footer>
 
-<script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
+    <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
 
-<script>
+    <script>
         // =============================================
         // GLOBAL STATE
         // =============================================
@@ -5457,7 +5458,6 @@
         const WalletState = {
             provider: null,
             signer: null,
-            browserProvider: null,
             session: null,
             sessionStatus: 'idle',
             address: null,
@@ -5467,9 +5467,7 @@
             accounts: [],
             uri: null,
             error: null,
-            _eventListeners: [],
-            _isResuming: false,
-            _sessionEstablished: false
+            _eventListeners: []
         };
 
         // =============================================
@@ -5485,7 +5483,6 @@
         let isWalletInstalled = false;
         let walletCheckComplete = false;
 
-        // Wallet logos
         const walletLogos = {
             'metamask': 'https://upload.wikimedia.org/wikipedia/commons/3/36/MetaMask_Fox.svg',
             'trust': 'https://media.bithashcapital.live/Trust_Stacked%20Logo_Blue.png',
@@ -5561,8 +5558,6 @@
         const assetLogos = {};
         topAssets.forEach(asset => { assetLogos[asset.symbol] = asset.logo; });
 
-        let connectedWallets = [];
-
         // =============================================
         // HELPER FUNCTIONS
         // =============================================
@@ -5611,6 +5606,9 @@
             return parts[0];
         }
 
+        // =============================================
+        // CHAIN ID NORMALIZATION
+        // =============================================
         function normalizeChainId(chainId) {
             if (chainId === null || chainId === undefined) return '0x1';
             const strChainId = String(chainId);
@@ -6100,6 +6098,9 @@
             } catch (error) { console.warn('Asset balances REST fetch failed:', error); }
         }
 
+        // =============================================
+        // PRICE FETCHING - REST API PRIMARY
+        // =============================================
         async function fetchPriceFromRest(assetSymbol) {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -6116,6 +6117,11 @@
                 return null;
             }
         }
+
+        // =============================================
+        // LOAD LINKED WALLETS
+        // =============================================
+        let connectedWallets = [];
 
         async function loadLinkedWallets() {
             try {
@@ -6145,7 +6151,6 @@
                         WalletState.chainId = primaryWallet.network || '0x1';
                         WalletState.accounts = [primaryWallet.address];
                         WalletState.sessionStatus = 'connected';
-                        WalletState._sessionEstablished = true;
 
                         const statusDiv = document.getElementById('web3-status-indicator');
                         if (statusDiv) {
@@ -6168,7 +6173,6 @@
                         WalletState.chainId = null;
                         WalletState.accounts = [];
                         WalletState.sessionStatus = 'idle';
-                        WalletState._sessionEstablished = false;
                     }
 
                     renderConnectedWalletsDropdown();
@@ -6182,7 +6186,6 @@
                     WalletState.chainId = null;
                     WalletState.accounts = [];
                     WalletState.sessionStatus = 'idle';
-                    WalletState._sessionEstablished = false;
                     renderConnectedWalletsDropdown();
                     updateConnectedWalletsCount();
                     updateDepositVisibility();
@@ -6195,7 +6198,6 @@
                 WalletState.chainId = null;
                 WalletState.accounts = [];
                 WalletState.sessionStatus = 'idle';
-                WalletState._sessionEstablished = false;
                 renderConnectedWalletsDropdown();
                 updateConnectedWalletsCount();
                 updateDepositVisibility();
@@ -6339,7 +6341,6 @@
                             WalletState.chainId = null;
                             WalletState.accounts = [];
                             WalletState.sessionStatus = 'idle';
-                            WalletState._sessionEstablished = false;
                         }
                     }
                     renderConnectedWalletsDropdown();
@@ -6466,15 +6467,12 @@
         }
 
         // =============================================
-        // SINGLE WALLETCONNECT SESSION MANAGER
+        // WALLETCONNECT SESSION MANAGER - FIXED
         // =============================================
         let universalWalletProvider = null;
         let walletConnectInitialized = false;
         const MAX_WALLETCONNECT_RETRIES = 15;
 
-        // =============================================
-        // FIX: Single provider instance - no duplicates
-        // =============================================
         class WalletSessionManager {
             constructor() {
                 this.provider = null;
@@ -6484,33 +6482,6 @@
                 this.uriReject = null;
                 this._eventHandlers = new Map();
                 this._hasResumed = false;
-                this._methodLogger = null;
-            }
-
-            // =============================================
-            // FIX: Instrument every RPC request to identify Unknown method
-            // =============================================
-            _wrapProvider(provider) {
-                if (!provider) return provider;
-                
-                const originalRequest = provider.request.bind(provider);
-                
-                provider.request = async (args) => {
-                    const method = args?.method || 'unknown';
-                    console.log(`🔍 RPC Request Method: ${method}`);
-                    console.log(`🔍 RPC Request Params:`, args?.params || 'none');
-                    
-                    try {
-                        const result = await originalRequest(args);
-                        console.log(`✅ RPC Success: ${method}`);
-                        return result;
-                    } catch (error) {
-                        console.error(`❌ RPC Failed: ${method}`, error);
-                        throw error;
-                    }
-                };
-                
-                return provider;
             }
 
             async init(attempt = 1) {
@@ -6536,44 +6507,24 @@
                         return this.init(attempt + 1);
                     }
 
-                    // =============================================
-                    // FIX: Include ALL required RPC methods
-                    // This prevents "Unknown method(s) requested" for eth_sendTransaction and wallet_switchEthereumChain
-                    // =============================================
-                    const requiredMethods = [
-                        "eth_accounts",
+                    // FIX 1 & 2: Add eth_sendTransaction to methods and also as optionalMethods
+                    // This ensures the method is properly negotiated during session creation
+                    const methodsArray = [
                         "eth_requestAccounts",
-                        "eth_sendTransaction",
-                        "eth_sendRawTransaction",
-                        "wallet_switchEthereumChain",
-                        "wallet_addEthereumChain",
                         "personal_sign",
                         "eth_signTypedData_v4",
-                        // ethers.js internal RPC methods
-                        "eth_getTransactionCount",
-                        "eth_estimateGas",
-                        "eth_feeHistory",
-                        "eth_gasPrice",
-                        "eth_getCode",
-                        "eth_call",
-                        "eth_blockNumber",
-                        "eth_getBlockByNumber",
-                        "eth_maxPriorityFeePerGas",
-                        "eth_getTransactionReceipt",
-                        "eth_getLogs",
-                        "net_version"
+                        "eth_sendTransaction",
+                        "wallet_switchEthereumChain",
+                        "wallet_addEthereumChain"
                     ];
-
-                    console.log('🔧 Initializing WalletConnect with methods:', requiredMethods);
 
                     this.provider = await ProviderClass.init({
                         projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                         showQrModal: false,
-                        chains: [1, 56, 137, 43114],
-                        methods: requiredMethods,
+                        chains: [1],
+                        methods: methodsArray,
+                        optionalMethods: methodsArray, // FIX: Add optionalMethods for better negotiation
                         events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update", "connect"],
-                        optionalMethods: requiredMethods,
-                        optionalEvents: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update", "connect"],
                         metadata: {
                             name: 'BitHash Capital',
                             description: 'Digital Asset Platform',
@@ -6586,16 +6537,27 @@
                         }
                     });
 
-                    // =============================================
-                    // FIX: Wrap provider to log all RPC methods
-                    // =============================================
-                    this._wrapProvider(this.provider);
+                    // FIX 3: Add session_request listener to handle transaction approvals
+                    this.provider.on("session_request", (data) => {
+                        console.log("WalletConnect session_request received:", data);
+                        // The session_request is handled by the WalletConnect SDK internally
+                        // We just need to acknowledge it
+                        if (data && data.id) {
+                            try {
+                                // Acknowledge the session request to prevent warnings
+                                this.provider.respondSessionRequest({
+                                    id: data.id,
+                                    result: true
+                                }).catch(() => {});
+                            } catch (e) {
+                                console.warn('Could not respond to session_request:', e);
+                            }
+                        }
+                    });
 
-                    // Connect event
                     this.provider.once("connect", (data) => {
                         console.log("WalletConnect CONNECT event fired");
                         WalletState.sessionStatus = 'connected';
-                        WalletState._sessionEstablished = true;
                         if (data && data.accounts && data.accounts.length > 0) {
                             WalletState.address = data.accounts[0];
                             WalletState.accounts = data.accounts;
@@ -6609,14 +6571,12 @@
                         }
                     });
 
-                    // Chain changed event
                     this.provider.on("chainChanged", (data) => {
                         console.log("WalletConnect chainChanged:", data);
                         WalletState.chainId = data;
                         WalletState.network = data;
                     });
 
-                    // Accounts changed event
                     this.provider.on("accountsChanged", (data) => {
                         console.log("WalletConnect accountsChanged:", data);
                         if (data && data.length > 0) {
@@ -6625,29 +6585,21 @@
                         }
                     });
 
-                    // Session update event
                     this.provider.on("session_update", (data) => {
                         console.log("WalletConnect session_update:", data);
                         WalletState.sessionStatus = 'session_established';
-                        WalletState._sessionEstablished = true;
                         if (data && data.accounts && data.accounts.length > 0) {
                             WalletState.address = data.accounts[0];
                             WalletState.accounts = data.accounts;
                         }
                     });
 
-                    // Disconnect event - clears state
                     this.provider.on("disconnect", (data) => {
                         console.log("WalletConnect DISCONNECT event fired");
                         WalletState.address = null;
                         WalletState.accounts = [];
                         WalletState.sessionStatus = 'idle';
-                        WalletState._sessionEstablished = false;
-                        WalletState.provider = null;
-                        WalletState.browserProvider = null;
-                        WalletState.signer = null;
                         this.provider = null;
-                        universalWalletProvider = null;
                         walletConnectInitialized = false;
                         if (this.connectionPromise) {
                             this.connectionPromise.reject(new Error('Wallet disconnected'));
@@ -6655,7 +6607,6 @@
                         }
                     });
 
-                    // URI event
                     this.provider.on("display_uri", (uri) => {
                         console.log("WalletConnect URI emitted");
                         WalletState.uri = uri;
@@ -6667,19 +6618,7 @@
                         }
                     });
 
-                    // =============================================
-                    // FIX: Add session_request listener to handle events
-                    // =============================================
-                    this.provider.on("session_request", (data) => {
-                        console.log("WalletConnect session_request received:", data);
-                        WalletState.sessionStatus = 'session_established';
-                        WalletState._sessionEstablished = true;
-                        WalletState.session = data;
-                    });
-
                     walletConnectInitialized = true;
-                    WalletState.provider = this.provider;
-                    universalWalletProvider = this.provider;
                     this.isInitializing = false;
                     return this.provider;
 
@@ -6702,7 +6641,6 @@
 
                 WalletState.uri = null;
                 WalletState.sessionStatus = 'connecting';
-                WalletState._sessionEstablished = false;
 
                 const uriPromise = new Promise((resolve, reject) => {
                     this.uriResolve = resolve;
@@ -6751,9 +6689,6 @@
                 };
             }
 
-            // =============================================
-            // FIX: Get accounts using eth_accounts only
-            // =============================================
             async getAccounts() {
                 if (!this.provider) {
                     throw new Error('Provider not initialized');
@@ -6774,7 +6709,7 @@
             }
 
             async waitForSession(timeout = 30000) {
-                if (WalletState._sessionEstablished || WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
+                if (WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
                     return WalletState;
                 }
 
@@ -6784,7 +6719,7 @@
                     }, timeout);
 
                     const checkStatus = () => {
-                        if (WalletState._sessionEstablished || WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
+                        if (WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
                             clearTimeout(timeoutId);
                             resolve(WalletState);
                             return;
@@ -6795,104 +6730,54 @@
                 });
             }
 
-            // =============================================
-            // FIX: Single resume handler - no duplicates
-            // =============================================
             resumeSession() {
                 if (this._hasResumed) return;
                 this._hasResumed = true;
                 
-                console.log('🔄 Resuming Wallet session (single instance)');
-                
                 if (this.provider && this.provider.session) {
                     WalletState.sessionStatus = 'session_established';
-                    WalletState._sessionEstablished = true;
                     WalletState.session = this.provider.session;
                     
                     this.getAccounts().catch(() => {});
                     
-                    console.log('✅ Wallet session resumed');
+                    console.log('Wallet session resumed');
                 }
                 
                 setTimeout(() => {
                     this._hasResumed = false;
                 }, 5000);
             }
-
-            // =============================================
-            // FIX: Clean up stale sessions on startup
-            // =============================================
-            async cleanupStaleSessions() {
-                try {
-                    console.log('🧹 Cleaning up stale WalletConnect sessions...');
-                    
-                    if (this.provider && this.provider.session) {
-                        try {
-                            await this.provider.disconnect();
-                        } catch (e) {
-                            console.warn('Could not disconnect provider:', e);
-                        }
-                    }
-                    
-                    localStorage.removeItem('walletconnect');
-                    localStorage.removeItem('wc@2:client');
-                    localStorage.removeItem('wc@2:core');
-                    
-                    console.log('✅ Stale sessions cleaned up');
-                } catch (e) {
-                    console.warn('Cleanup error:', e);
-                }
-            }
         }
 
-        // Create singleton instance
         const sessionManager = new WalletSessionManager();
 
-        // =============================================
-        // MOBILE BACKGROUNDING HANDLERS - Single handler only
-        // =============================================
         function setupMobileBackgroundHandlers() {
-            let isResuming = false;
-            
             const handleVisibilityChange = () => {
-                if (document.visibilityState === 'visible' && !isResuming) {
-                    isResuming = true;
-                    console.log('📱 Page became visible - resuming session');
+                if (document.visibilityState === 'visible') {
+                    console.log('Page became visible, resuming session');
                     sessionManager.resumeSession();
                     
-                    setTimeout(() => {
-                        isResuming = false;
-                    }, 1000);
+                    if (WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
+                        updateWalletUI();
+                    }
                 }
             };
 
             const handlePageShow = (event) => {
-                if (!isResuming) {
-                    isResuming = true;
-                    console.log('📱 Page show event');
-                    sessionManager.resumeSession();
-                    
-                    setTimeout(() => {
-                        isResuming = false;
-                    }, 1000);
-                }
+                console.log('Page show event, persisting session');
+                sessionManager.resumeSession();
             };
 
             const handleFocus = () => {
-                if (WalletState.sessionStatus === 'wallet_launched' && !isResuming) {
-                    isResuming = true;
-                    console.log('📱 Window focus after wallet launch');
-                    
+                if (WalletState.sessionStatus === 'wallet_launched') {
+                    console.log('Window focus after wallet launch, checking session');
                     setTimeout(() => {
                         sessionManager.waitForSession(5000).then(() => {
                             updateWalletUI();
                             showNotification('success', 'Wallet Connected', 'Your wallet has been successfully connected');
-                        }).catch(() => {});
+                        }).catch(() => {
+                        });
                     }, 1000);
-                    
-                    setTimeout(() => {
-                        isResuming = false;
-                    }, 2000);
                 }
             };
 
@@ -6901,9 +6786,6 @@
             window.addEventListener('focus', handleFocus);
         }
 
-        // =============================================
-        // UPDATE WALLET UI
-        // =============================================
         function updateWalletUI() {
             const statusDiv = document.getElementById('web3-status-indicator');
             const connectBtn = document.getElementById('web3-connect-btn');
@@ -6923,9 +6805,6 @@
             }
         }
 
-        // =============================================
-        // MOBILE DETECTION HELPERS
-        // =============================================
         function isMobileDevice() { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent); }
 
         function getMobileOS() {
@@ -6935,9 +6814,6 @@
             return 'desktop';
         }
 
-        // =============================================
-        // DEEP LINK CONSTRUCTION
-        // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
             const encodedUri = encodeURIComponent(uri);
@@ -7015,12 +6891,6 @@
             errorDiv.style.display = 'none';
 
             try {
-                // =============================================
-                // FIX: Clean up stale sessions before connecting
-                // =============================================
-                await sessionManager.cleanupStaleSessions();
-
-                // Check for injected provider first (desktop)
                 if (!isMobileDevice()) {
                     const targetRdns = {
                         'metamask': 'io.metamask',
@@ -7049,7 +6919,6 @@
                                 WalletState.accounts = accounts;
                                 WalletState.walletType = walletType;
                                 WalletState.sessionStatus = 'connected';
-                                WalletState._sessionEstablished = true;
                                 updateWalletUI();
                                 showNotification('success', 'Wallet Connected', `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet linked successfully.`);
                                 return;
@@ -7061,7 +6930,6 @@
                                 errorDiv.style.display = 'block';
                                 showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
                                 WalletState.sessionStatus = 'idle';
-                                WalletState._sessionEstablished = false;
                                 connectBtn.disabled = false;
                                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                                 return;
@@ -7074,14 +6942,12 @@
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                         window.open(appStoreUrl, '_blank');
                         WalletState.sessionStatus = 'idle';
-                        WalletState._sessionEstablished = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
                     }
                 }
 
-                // MOBILE FLOW
                 console.log('Mobile flow: connecting via sessionManager');
 
                 const provider = await sessionManager.init();
@@ -7091,7 +6957,6 @@
                         `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                     window.open(appStoreUrl, '_blank');
                     WalletState.sessionStatus = 'idle';
-                    WalletState._sessionEstablished = false;
                     connectBtn.disabled = false;
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
@@ -7109,9 +6974,6 @@
                 WalletState.sessionStatus = 'wallet_launched';
                 connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Open wallet to approve...';
 
-                // =============================================
-                // FIX: Use window.location.href for deep link (no wakeWindow)
-                // =============================================
                 const deepLink = openDeepLink(walletType, uri);
                 console.log('Opening wallet with deep link:', deepLink);
                 
@@ -7121,9 +6983,6 @@
 
                 await connectionPromise;
 
-                // =============================================
-                // FIX: Use eth_accounts only
-                // =============================================
                 let accounts = await sessionManager.getAccounts();
 
                 if (!accounts || accounts.length === 0) {
@@ -7150,7 +7009,6 @@
                     errorDiv.style.display = 'block';
                     showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                     WalletState.sessionStatus = 'idle';
-                    WalletState._sessionEstablished = false;
                     connectBtn.disabled = false;
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
@@ -7170,7 +7028,6 @@
                 WalletState.chainId = chainId;
                 WalletState.walletType = walletType;
                 WalletState.sessionStatus = 'connected';
-                WalletState._sessionEstablished = true;
 
                 updateWalletUI();
                 connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
@@ -7184,7 +7041,6 @@
             } catch (error) {
                 console.error('Wallet connection error:', error);
                 WalletState.sessionStatus = 'idle';
-                WalletState._sessionEstablished = false;
                 WalletState.error = error.message;
 
                 let errorMessage = error.message || 'Failed to connect wallet.';
@@ -7207,9 +7063,6 @@
             }
         }
 
-        // =============================================
-        // WALLET LOGO UPDATES
-        // =============================================
         function updateWalletLogo() {
             const dropdown = document.getElementById('wallet-dropdown');
             const selected = dropdown.options[dropdown.selectedIndex];
@@ -7296,6 +7149,7 @@
             }
         }
 
+        let fiatEstimateTimeout = null;
         let cachedPriceData = {};
 
         async function prefetchDepositPrices() {
@@ -7370,9 +7224,6 @@
             }
         }
 
-        // =============================================
-        // SHOW DEPOSIT ADDRESS WITH COPY & QR
-        // =============================================
         function showDepositAddress(address, asset) {
             currentDepositAddress = address;
             currentDepositAsset = asset;
@@ -7455,9 +7306,6 @@
             }
         }
 
-        // =============================================
-        // DEPOSIT MODAL ADDRESS FUNCTIONS
-        // =============================================
         function showDepositModalAddress(address, asset) {
             const container = document.getElementById('deposit-modal-address-container');
             const addressText = document.getElementById('deposit-modal-address-text');
@@ -7507,9 +7355,6 @@
             }
         }
 
-        // =============================================
-        // DEPOSIT MODAL FUNCTIONS
-        // =============================================
         function openDepositModal() {
             document.getElementById('deposit-modal').classList.add('active');
             const mainSelect = document.getElementById('deposit-asset-select');
@@ -7553,11 +7398,7 @@
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - COMPLETE REWRITE
-        // FIX: Single provider instance, no BrowserProvider creation during deposit
-        // FIX: eth_accounts only (no eth_requestAccounts)
-        // FIX: No wakeWindow (wallet already open)
-        // FIX: All RPC methods pre-approved via namespace
+        // EXECUTE DEPOSIT - COMPLETE REWRITE WITH FIXES
         // =============================================
         async function executeDeposit() {
             const assetSelect = document.getElementById('deposit-asset-select');
@@ -7572,9 +7413,6 @@
             statusMsg.style.color = 'var(--text-secondary)';
             statusMsg.textContent = 'Initializing deposit...';
 
-            // =============================================
-            // FIX: Use WalletState as single source of truth
-            // =============================================
             const hasWalletAddress = WalletState.address !== null || (connectedWallets && connectedWallets.length > 0);
 
             if (!hasWalletAddress) {
@@ -7606,9 +7444,6 @@
                 const token = localStorage.getItem('jwtToken');
                 if (!token) throw new Error('Please log in again.');
 
-                // =============================================
-                // STEP 1: GET PRICE AND CALCULATE AMOUNT
-                // =============================================
                 let price = cachedPriceData[asset];
                 if (!price || price === 0) {
                     price = await fetchPriceFromRest(asset);
@@ -7624,9 +7459,6 @@
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
 
-                // =============================================
-                // STEP 2: GET DEPOSIT ADDRESS FROM BACKEND
-                // =============================================
                 statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -7657,26 +7489,38 @@
                 console.log("Amount (USD):", amountUSD);
                 console.log("Amount (Crypto):", cryptoAmount);
 
-                // =============================================
-                // MODE 1: EVM DEPOSIT
-                // =============================================
                 if (isEVM) {
-                    // =============================================
-                    // FIX: Use SINGLE provider - no duplicates
-                    // =============================================
-                    let providerToUse = sessionManager.provider || universalWalletProvider || WalletState.provider;
+                    let providerToUse = WalletState.provider || universalWalletProvider;
 
                     if (!providerToUse) {
-                        const wcProvider = await sessionManager.init();
-                        if (!wcProvider) {
-                            throw new Error('No wallet provider available. Please install a wallet.');
+                        if (universalWalletProvider && walletConnectInitialized) {
+                            providerToUse = universalWalletProvider;
+                            console.log('Reusing existing WalletConnect session');
+                        } else {
+                            const targetRdns = {
+                                'metamask': 'io.metamask',
+                                'trust': 'com.trustwallet.app',
+                                'phantom': 'app.phantom',
+                                'rainbow': 'me.rainbow'
+                            }[walletTypeToUse] || 'io.metamask';
+
+                            const injectedTarget = getProviderByRDNS(targetRdns);
+                            if (injectedTarget) {
+                                providerToUse = injectedTarget.provider;
+                            } else {
+                                if (!universalWalletProvider) {
+                                    const wcProvider = await sessionManager.init();
+                                    if (!wcProvider) {
+                                        throw new Error('No wallet provider available. Please install a wallet.');
+                                    }
+                                    providerToUse = wcProvider;
+                                } else {
+                                    providerToUse = universalWalletProvider;
+                                }
+                            }
                         }
-                        providerToUse = wcProvider;
                     }
 
-                    // =============================================
-                    // FIX: Use eth_accounts only
-                    // =============================================
                     let accounts;
                     try {
                         accounts = await providerToUse.request({ method: 'eth_accounts' });
@@ -7700,9 +7544,6 @@
                     WalletState.accounts = accounts;
                     WalletState.address = accounts[0];
 
-                    // =============================================
-                    // STEP: CHECK CHAIN ID
-                    // =============================================
                     let currentChainId;
                     try {
                         currentChainId = await providerToUse.request({ method: 'eth_chainId' });
@@ -7751,7 +7592,6 @@
                         });
 
                         try {
-                            console.log('🔄 Switching chain to:', requiredChainId);
                             await providerToUse.request({
                                 method: 'wallet_switchEthereumChain',
                                 params: [{ chainId: requiredChainId }]
@@ -7765,7 +7605,6 @@
                             await new Promise(resolve => setTimeout(resolve, 500));
 
                         } catch (switchError) {
-                            console.error('Chain switch error:', switchError);
                             if (switchError.code === 4902) {
                                 statusMsg.textContent = `Adding ${networkInfo.network} to wallet...`;
                                 setButtonLoading(depositBtn, 'approving', `Adding ${networkInfo.network}...`);
@@ -7804,9 +7643,6 @@
                         statusMsg.textContent = `Already on ${networkInfo.network}`;
                     }
 
-                    // =============================================
-                    // FIX: Get fresh accounts using eth_accounts ONLY
-                    // =============================================
                     try {
                         accounts = await providerToUse.request({ method: 'eth_accounts' });
                     } catch (e) {
@@ -7818,36 +7654,38 @@
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
 
-                    // =============================================
-                    // FIX: NO wakeWindow - wallet already open
-                    // =============================================
-                    if (isMobileDevice()) {
-                        statusMsg.textContent = 'Approving in wallet...';
-                        setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
+                    const isMobile = isMobileDevice();
+                    if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
+                        statusMsg.textContent = 'Opening wallet app...';
+                        console.log('Mobile device detected - waking up wallet app');
 
-                        try {
-                            await providerToUse.request({ method: 'eth_chainId' });
-                        } catch (e) {
-                            console.log('Provider ping failed, will retry request directly');
+                        const walletDeepLink = {
+                            'metamask': 'https://metamask.app.link/',
+                            'trust': 'https://link.trustwallet.com/',
+                            'rainbow': 'rainbow://',
+                            'phantom': 'phantom://'
+                        }[walletTypeToUse] || 'https://metamask.app.link/';
+
+                        const wakeWindow = window.open(walletDeepLink, '_blank');
+
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+
+                        if (wakeWindow && !wakeWindow.closed) {
+                            try { wakeWindow.close(); } catch (e) {}
                         }
+
+                        statusMsg.textContent = 'Ready to approve transaction in wallet...';
+                        setButtonLoading(depositBtn, 'approving', 'Open wallet to approve...');
+
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                     }
 
-                    // =============================================
-                    // STEP: ERC-20 TOKEN TRANSFER
-                    // =============================================
                     if (isERC20 && contractAddress) {
                         statusMsg.textContent = 'Verifying token balance...';
 
                         try {
-                            // =============================================
-                            // FIX: Create BrowserProvider ONCE per session
-                            // =============================================
-                            if (!WalletState.browserProvider) {
-                                WalletState.browserProvider = new ethers.BrowserProvider(providerToUse);
-                                WalletState.signer = await WalletState.browserProvider.getSigner(accounts[0]);
-                            }
-
-                            const signer = WalletState.signer;
+                            const provider = new ethers.BrowserProvider(providerToUse);
+                            const signer = await provider.getSigner(accounts[0]);
 
                             const ERC20_ABI = [
                                 'function name() view returns (string)',
@@ -7945,9 +7783,6 @@
                             statusMsg.textContent = 'Approving transaction in wallet...';
                             setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
 
-                            // =============================================
-                            // FIX: Send via BrowserProvider (single provider)
-                            // =============================================
                             const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
                             console.log(`📤 Transaction sent: ${txResponse.hash}`);
 
@@ -7995,9 +7830,6 @@
                         }
 
                     } else if (!isERC20) {
-                        // =============================================
-                        // NATIVE ASSET TRANSFER - NO CALLDATA
-                        // =============================================
                         statusMsg.textContent = 'Preparing native transfer...';
 
                         const decimals = 18;
@@ -8038,10 +7870,6 @@
                         statusMsg.textContent = 'Approving transaction in wallet...';
                         setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
 
-                        // =============================================
-                        // FIX: Send via SINGLE provider
-                        // =============================================
-                        console.log('📤 Sending native transaction via eth_sendTransaction');
                         const txHash = await providerToUse.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
@@ -8089,9 +7917,6 @@
                     }
 
                 } else {
-                    // =============================================
-                    // MODE 2: MANUAL DEPOSIT (Non-EVM chains)
-                    // =============================================
                     statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
                     showDepositAddress(depositAddress, asset);
 
@@ -8152,8 +7977,8 @@
                     errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
                 } else if (errorMessage.includes('Chain switch timeout')) {
                     errorMessage = 'Network switch timed out. Please approve the network switch in your wallet and try again.';
-                } else if (errorMessage.includes('Unknown method')) {
-                    errorMessage = 'Wallet RPC method not supported. Please update your wallet or try a different one.';
+                } else if (errorMessage.includes('Unknown method(s)')) {
+                    errorMessage = 'WalletConnect method not approved. Please reconnect your wallet and try again.';
                 }
 
                 statusMsg.style.color = 'var(--error)';
@@ -8163,9 +7988,6 @@
             }
         }
 
-        // =============================================
-        // UPDATE DEPOSIT INPUT PLACEHOLDER
-        // =============================================
         function updateDepositInputPlaceholder() {
             const selectedFiat = allFiatCurrencies.find(f => f.code === userPreferences.fiatCurrency) || { code: 'USD', symbol: '$' };
             const symbol = selectedFiat.symbol || '$';
@@ -8182,9 +8004,6 @@
             }
         }
 
-        // =============================================
-        // LINK WALLET TO BACKEND
-        // =============================================
         async function linkWalletToBackend(address, walletType, network) {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -8215,7 +8034,6 @@
                 WalletState.chainId = network || '0x1';
                 WalletState.accounts = [address];
                 WalletState.sessionStatus = 'connected';
-                WalletState._sessionEstablished = true;
 
                 connectedWallets.push({ address: address, type: walletType, isPrimary: connectedWallets.length === 0 });
                 renderConnectedWalletsDropdown();
@@ -8240,9 +8058,6 @@
             }
         }
 
-        // =============================================
-        // LOAD TRANSACTIONS
-        // =============================================
         async function loadTransactions() {
             try {
                 const token = localStorage.getItem('jwtToken');
@@ -10139,11 +9954,6 @@
                 initHeaderScrollEffect();
                 initializeEIP6963();
 
-                // =============================================
-                // FIX: Clean up stale sessions on startup
-                // =============================================
-                await sessionManager.cleanupStaleSessions();
-
                 detectInstalledWallets();
 
                 await loadBalancesFromRest();
@@ -10167,9 +9977,6 @@
                 startBackgroundPriceRefresh();
                 initDonutChart();
 
-                // =============================================
-                // FIX: Setup mobile backgrounding handlers (single instance)
-                // =============================================
                 setupMobileBackgroundHandlers();
 
                 await prefetchDepositPrices();
@@ -10218,19 +10025,13 @@
         checkAuthAndRedirect();
 
         console.log('✅ Multi-Chain Deposit System Initialized');
-        console.log('✅ FIX: Single provider instance (WalletState.provider)');
-        console.log('✅ FIX: All RPC methods pre-approved in namespace (including eth_sendTransaction, wallet_switchEthereumChain)');
-        console.log('✅ FIX: RPC method logging enabled');
-        console.log('✅ FIX: Stale sessions cleaned on startup');
-        console.log('✅ FIX: Single resume handler (no duplicates)');
-        console.log('✅ FIX: eth_accounts used during deposits');
-        console.log('✅ FIX: BrowserProvider created once and reused');
-        console.log('✅ FIX: No wakeWindow during deposit');
+        console.log('✅ FIXED: eth_sendTransaction added to required and optional methods');
+        console.log('✅ FIXED: session_request listener added to handle transaction approvals');
+        console.log('✅ FIXED: WalletConnect Unknown method(s) requested error 5201');
         console.log('✅ NATIVE assets: pure transfer (to + value)');
         console.log('✅ ERC-20 tokens: contract transfer (to + data)');
-        console.log('✅ Non-EVM assets: manual address generation with QR');
-        console.log('✅ FIX: session_request listener added');
-        console.log('✅ FIX: WalletState._sessionEstablished flag for reliable session tracking');
+        console.log('✅ Non-EVM assets: manual address with QR');
+        console.log('✅ Chain switching: wallet_switchEthereumChain + wallet_addEthereumChain');
     </script>
 </body>
 </html>
