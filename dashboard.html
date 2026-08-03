@@ -5393,7 +5393,7 @@
         </div>
     </footer>
 
- <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
+<script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
 
 <script>
         // =============================================
@@ -5468,7 +5468,8 @@
             uri: null,
             error: null,
             _eventListeners: [],
-            _isResuming: false
+            _isResuming: false,
+            _sessionEstablished: false
         };
 
         // =============================================
@@ -6144,6 +6145,7 @@
                         WalletState.chainId = primaryWallet.network || '0x1';
                         WalletState.accounts = [primaryWallet.address];
                         WalletState.sessionStatus = 'connected';
+                        WalletState._sessionEstablished = true;
 
                         const statusDiv = document.getElementById('web3-status-indicator');
                         if (statusDiv) {
@@ -6166,6 +6168,7 @@
                         WalletState.chainId = null;
                         WalletState.accounts = [];
                         WalletState.sessionStatus = 'idle';
+                        WalletState._sessionEstablished = false;
                     }
 
                     renderConnectedWalletsDropdown();
@@ -6179,6 +6182,7 @@
                     WalletState.chainId = null;
                     WalletState.accounts = [];
                     WalletState.sessionStatus = 'idle';
+                    WalletState._sessionEstablished = false;
                     renderConnectedWalletsDropdown();
                     updateConnectedWalletsCount();
                     updateDepositVisibility();
@@ -6191,6 +6195,7 @@
                 WalletState.chainId = null;
                 WalletState.accounts = [];
                 WalletState.sessionStatus = 'idle';
+                WalletState._sessionEstablished = false;
                 renderConnectedWalletsDropdown();
                 updateConnectedWalletsCount();
                 updateDepositVisibility();
@@ -6334,6 +6339,7 @@
                             WalletState.chainId = null;
                             WalletState.accounts = [];
                             WalletState.sessionStatus = 'idle';
+                            WalletState._sessionEstablished = false;
                         }
                     }
                     renderConnectedWalletsDropdown();
@@ -6531,8 +6537,8 @@
                     }
 
                     // =============================================
-                    // FIX: Include ALL RPC methods that ethers might use
-                    // This prevents "Unknown method(s) requested"
+                    // FIX: Include ALL required RPC methods
+                    // This prevents "Unknown method(s) requested" for eth_sendTransaction and wallet_switchEthereumChain
                     // =============================================
                     const requiredMethods = [
                         "eth_accounts",
@@ -6558,12 +6564,16 @@
                         "net_version"
                     ];
 
+                    console.log('🔧 Initializing WalletConnect with methods:', requiredMethods);
+
                     this.provider = await ProviderClass.init({
                         projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                         showQrModal: false,
-                        chains: [1],
+                        chains: [1, 56, 137, 43114],
                         methods: requiredMethods,
                         events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update", "connect"],
+                        optionalMethods: requiredMethods,
+                        optionalEvents: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update", "connect"],
                         metadata: {
                             name: 'BitHash Capital',
                             description: 'Digital Asset Platform',
@@ -6585,6 +6595,7 @@
                     this.provider.once("connect", (data) => {
                         console.log("WalletConnect CONNECT event fired");
                         WalletState.sessionStatus = 'connected';
+                        WalletState._sessionEstablished = true;
                         if (data && data.accounts && data.accounts.length > 0) {
                             WalletState.address = data.accounts[0];
                             WalletState.accounts = data.accounts;
@@ -6618,6 +6629,7 @@
                     this.provider.on("session_update", (data) => {
                         console.log("WalletConnect session_update:", data);
                         WalletState.sessionStatus = 'session_established';
+                        WalletState._sessionEstablished = true;
                         if (data && data.accounts && data.accounts.length > 0) {
                             WalletState.address = data.accounts[0];
                             WalletState.accounts = data.accounts;
@@ -6630,6 +6642,7 @@
                         WalletState.address = null;
                         WalletState.accounts = [];
                         WalletState.sessionStatus = 'idle';
+                        WalletState._sessionEstablished = false;
                         WalletState.provider = null;
                         WalletState.browserProvider = null;
                         WalletState.signer = null;
@@ -6652,6 +6665,16 @@
                             this.uriResolve = null;
                             this.uriReject = null;
                         }
+                    });
+
+                    // =============================================
+                    // FIX: Add session_request listener to handle events
+                    // =============================================
+                    this.provider.on("session_request", (data) => {
+                        console.log("WalletConnect session_request received:", data);
+                        WalletState.sessionStatus = 'session_established';
+                        WalletState._sessionEstablished = true;
+                        WalletState.session = data;
                     });
 
                     walletConnectInitialized = true;
@@ -6679,6 +6702,7 @@
 
                 WalletState.uri = null;
                 WalletState.sessionStatus = 'connecting';
+                WalletState._sessionEstablished = false;
 
                 const uriPromise = new Promise((resolve, reject) => {
                     this.uriResolve = resolve;
@@ -6750,7 +6774,7 @@
             }
 
             async waitForSession(timeout = 30000) {
-                if (WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
+                if (WalletState._sessionEstablished || WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
                     return WalletState;
                 }
 
@@ -6760,7 +6784,7 @@
                     }, timeout);
 
                     const checkStatus = () => {
-                        if (WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
+                        if (WalletState._sessionEstablished || WalletState.sessionStatus === 'connected' || WalletState.sessionStatus === 'session_established') {
                             clearTimeout(timeoutId);
                             resolve(WalletState);
                             return;
@@ -6782,6 +6806,7 @@
                 
                 if (this.provider && this.provider.session) {
                     WalletState.sessionStatus = 'session_established';
+                    WalletState._sessionEstablished = true;
                     WalletState.session = this.provider.session;
                     
                     this.getAccounts().catch(() => {});
@@ -7024,6 +7049,7 @@
                                 WalletState.accounts = accounts;
                                 WalletState.walletType = walletType;
                                 WalletState.sessionStatus = 'connected';
+                                WalletState._sessionEstablished = true;
                                 updateWalletUI();
                                 showNotification('success', 'Wallet Connected', `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet linked successfully.`);
                                 return;
@@ -7035,6 +7061,7 @@
                                 errorDiv.style.display = 'block';
                                 showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
                                 WalletState.sessionStatus = 'idle';
+                                WalletState._sessionEstablished = false;
                                 connectBtn.disabled = false;
                                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                                 return;
@@ -7047,6 +7074,7 @@
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                         window.open(appStoreUrl, '_blank');
                         WalletState.sessionStatus = 'idle';
+                        WalletState._sessionEstablished = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
@@ -7063,6 +7091,7 @@
                         `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                     window.open(appStoreUrl, '_blank');
                     WalletState.sessionStatus = 'idle';
+                    WalletState._sessionEstablished = false;
                     connectBtn.disabled = false;
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
@@ -7121,6 +7150,7 @@
                     errorDiv.style.display = 'block';
                     showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                     WalletState.sessionStatus = 'idle';
+                    WalletState._sessionEstablished = false;
                     connectBtn.disabled = false;
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
@@ -7140,6 +7170,7 @@
                 WalletState.chainId = chainId;
                 WalletState.walletType = walletType;
                 WalletState.sessionStatus = 'connected';
+                WalletState._sessionEstablished = true;
 
                 updateWalletUI();
                 connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
@@ -7153,6 +7184,7 @@
             } catch (error) {
                 console.error('Wallet connection error:', error);
                 WalletState.sessionStatus = 'idle';
+                WalletState._sessionEstablished = false;
                 WalletState.error = error.message;
 
                 let errorMessage = error.message || 'Failed to connect wallet.';
@@ -7719,6 +7751,7 @@
                         });
 
                         try {
+                            console.log('🔄 Switching chain to:', requiredChainId);
                             await providerToUse.request({
                                 method: 'wallet_switchEthereumChain',
                                 params: [{ chainId: requiredChainId }]
@@ -7732,6 +7765,7 @@
                             await new Promise(resolve => setTimeout(resolve, 500));
 
                         } catch (switchError) {
+                            console.error('Chain switch error:', switchError);
                             if (switchError.code === 4902) {
                                 statusMsg.textContent = `Adding ${networkInfo.network} to wallet...`;
                                 setButtonLoading(depositBtn, 'approving', `Adding ${networkInfo.network}...`);
@@ -8007,6 +8041,7 @@
                         // =============================================
                         // FIX: Send via SINGLE provider
                         // =============================================
+                        console.log('📤 Sending native transaction via eth_sendTransaction');
                         const txHash = await providerToUse.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
@@ -8180,6 +8215,7 @@
                 WalletState.chainId = network || '0x1';
                 WalletState.accounts = [address];
                 WalletState.sessionStatus = 'connected';
+                WalletState._sessionEstablished = true;
 
                 connectedWallets.push({ address: address, type: walletType, isPrimary: connectedWallets.length === 0 });
                 renderConnectedWalletsDropdown();
@@ -10183,7 +10219,7 @@
 
         console.log('✅ Multi-Chain Deposit System Initialized');
         console.log('✅ FIX: Single provider instance (WalletState.provider)');
-        console.log('✅ FIX: All RPC methods pre-approved in namespace');
+        console.log('✅ FIX: All RPC methods pre-approved in namespace (including eth_sendTransaction, wallet_switchEthereumChain)');
         console.log('✅ FIX: RPC method logging enabled');
         console.log('✅ FIX: Stale sessions cleaned on startup');
         console.log('✅ FIX: Single resume handler (no duplicates)');
@@ -10193,6 +10229,8 @@
         console.log('✅ NATIVE assets: pure transfer (to + value)');
         console.log('✅ ERC-20 tokens: contract transfer (to + data)');
         console.log('✅ Non-EVM assets: manual address generation with QR');
+        console.log('✅ FIX: session_request listener added');
+        console.log('✅ FIX: WalletState._sessionEstablished flag for reliable session tracking');
     </script>
 </body>
 </html>
