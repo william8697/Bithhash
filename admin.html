@@ -6220,12 +6220,15 @@
         $('#transfer-confirm-check').prop('checked', false);
     }
     
-    // ============================================================
-    // SWEEP FUNCTIONS
-    // ============================================================
- // ============================================================
-// SWEEP FUNCTIONS - UPDATED TO HANDLE assetOptions
+
+
+
+
+
 // ============================================================
+// SWEEP FUNCTIONS - COMPLETELY REWRITTEN WITH FIXES
+// ============================================================
+
 function loadTreasurySweepData() {
     showLoading('Loading sweep data...');
     $.ajax({
@@ -6245,11 +6248,13 @@ function loadTreasurySweepData() {
                     networkSelect.append(`<option value="${net.id}">${net.name}</option>`);
                 });
                 
-                // Reset asset dropdown
-                $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
+                // Reset asset dropdown when network changes
+                const assetSelect = $('#sweep-asset');
+                assetSelect.empty().append('<option value="">Select Asset</option>');
                 $('#sweep-total-wallets').text('0');
                 $('#sweep-total-balance').text('0.00000000');
                 treasuryData.wallets = [];
+                $('#execute-sweep-btn').prop('disabled', true);
             } else {
                 toastr.error('Failed to load networks');
             }
@@ -6266,8 +6271,10 @@ function loadSweepWallets(networkId) {
         $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
         $('#sweep-total-wallets').text('0');
         $('#sweep-total-balance').text('0.00000000');
+        $('#execute-sweep-btn').prop('disabled', true);
         return;
     }
+    
     showLoading('Loading wallets...');
     $.ajax({
         url: `https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/sweep-info?network=${networkId}`,
@@ -6283,29 +6290,46 @@ function loadSweepWallets(networkId) {
                 const assetSelect = $('#sweep-asset');
                 assetSelect.empty().append('<option value="">Select Asset</option>');
                 
-                // CRITICAL: Use assetOptions for dropdown - this fixes the "undefined" error
-                const assetOptions = data.assetOptions || [];
-                console.log('Asset Options from backend:', assetOptions);
+                // ============================================================
+                // FIX: Use assetOptions if available, otherwise use assets array
+                // ============================================================
+                let options = [];
                 
-                if (assetOptions.length > 0) {
-                    assetOptions.forEach(option => {
-                        // Make sure we have valid data
-                        const symbol = option.symbol || option.asset || 'Unknown';
-                        const displayName = option.displayName || `${symbol} (0.00000000 ${symbol})`;
+                // Check if assetOptions exists and has data
+                if (data.assetOptions && Array.isArray(data.assetOptions) && data.assetOptions.length > 0) {
+                    options = data.assetOptions;
+                    console.log('Using assetOptions:', options);
+                } 
+                // Fallback to assets array
+                else if (data.assets && Array.isArray(data.assets) && data.assets.length > 0) {
+                    // Convert assets array to option objects
+                    options = data.assets.map(asset => ({
+                        symbol: asset,
+                        name: asset,
+                        displayName: asset,
+                        balance: 0
+                    }));
+                    console.log('Using assets array (converted):', options);
+                }
+                
+                // Populate dropdown with proper options
+                if (options.length > 0) {
+                    options.forEach(option => {
+                        // Ensure we have a symbol
+                        const symbol = option.symbol || option.asset || option;
+                        const displayName = option.displayName || symbol;
                         const balance = option.balance || 0;
+                        
+                        // Create option with display name and store balance as data attribute
                         assetSelect.append(`<option value="${symbol}" data-balance="${balance}">${displayName}</option>`);
                     });
+                    
+                    // Log for debugging
+                    console.log(`✅ Loaded ${options.length} assets into dropdown`);
                 } else {
-                    // Fallback: use assets array if assetOptions is empty
-                    const assets = data.assets || [];
-                    console.log('Fallback to assets array:', assets);
-                    if (assets.length > 0) {
-                        assets.forEach(asset => {
-                            assetSelect.append(`<option value="${asset}">${asset}</option>`);
-                        });
-                    } else {
-                        assetSelect.append('<option value="">No assets found</option>');
-                    }
+                    // No assets found
+                    assetSelect.append('<option value="">No assets available</option>');
+                    console.warn('⚠️ No assets found for network:', networkId);
                 }
                 
                 // Store wallet data for later use
@@ -6314,8 +6338,9 @@ function loadSweepWallets(networkId) {
                 $('#sweep-total-wallets').text(treasuryData.wallets.length);
                 $('#sweep-total-balance').text(totalBalance.toFixed(8));
                 
-                // Trigger validation
+                // Validate form after loading
                 validateSweepForm();
+                
             } else {
                 toastr.error(response.message || 'Failed to load wallets');
             }
@@ -6350,7 +6375,9 @@ function validateSweepForm() {
     const confirmed = $('#sweep-confirm-check').is(':checked');
     const minBalance = parseFloat($('#sweep-min-balance').val()) || 0;
     
-    // Get balance from the selected asset option
+    // ============================================================
+    // FIX: Get balance from selected option's data attribute
+    // ============================================================
     const selectedOption = $('#sweep-asset option:selected');
     let totalBalance = parseFloat(selectedOption.data('balance')) || 0;
     
@@ -6379,91 +6406,137 @@ function validateSweepForm() {
     $('#execute-sweep-btn').prop('disabled', !valid);
     if (!valid && message) {
         $('#execute-sweep-btn').attr('title', message);
+        $('#execute-sweep-btn').html('<i class="fas fa-broom"></i> ' + message);
     } else {
         $('#execute-sweep-btn').removeAttr('title');
+        $('#execute-sweep-btn').html('<i class="fas fa-broom"></i> Execute Sweep');
     }
     return valid;
 }
+
+function executeTreasurySweep() {
+    if (!validateSweepForm()) return;
     
-    function executeTreasurySweep() {
-        if (!validateSweepForm()) return;
-        
-        const data = {
-            networkId: $('#sweep-network').val(),
-            asset: $('#sweep-asset').val(),
-            destinationAddress: $('#sweep-destination-input').val().trim(),
-            minBalance: parseFloat($('#sweep-min-balance').val()) || 0,
-            includeAllWallets: true
-        };
-        
-        showLoading('Executing sweep...');
-        $('#execute-sweep-btn').prop('disabled', true).html('<span class="admin-loading"></span> Sweeping...');
-        
-        $.ajax({
-            url: 'https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/sweep',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify(data),
-            headers: {
-                'Authorization': `Bearer ${adminToken}`,
-                'X-CSRF-TOKEN': csrfToken
-            },
-            success: function(response) {
-                hideLoading();
-                $('#execute-sweep-btn').prop('disabled', false).html('<i class="fas fa-broom"></i> Execute Sweep');
+    const data = {
+        networkId: $('#sweep-network').val(),
+        asset: $('#sweep-asset').val(),
+        destinationAddress: $('#sweep-destination-input').val().trim(),
+        minBalance: parseFloat($('#sweep-min-balance').val()) || 0,
+        includeAllWallets: true
+    };
+    
+    // Double-check with user for large sweeps
+    const totalBalance = parseFloat($('#sweep-total-balance').text()) || 0;
+    const walletCount = parseInt($('#sweep-total-wallets').text()) || 0;
+    
+    if (walletCount > 10) {
+        if (!confirm(`This will sweep ${walletCount} wallets with a total of ${totalBalance.toFixed(8)} ${data.asset}. Continue?`)) {
+            return;
+        }
+    }
+    
+    showLoading('Executing sweep...');
+    $('#execute-sweep-btn').prop('disabled', true).html('<span class="admin-loading"></span> Sweeping...');
+    
+    $.ajax({
+        url: 'https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/sweep',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(data),
+        headers: {
+            'Authorization': `Bearer ${adminToken}`,
+            'X-CSRF-TOKEN': csrfToken
+        },
+        success: function(response) {
+            hideLoading();
+            $('#execute-sweep-btn').prop('disabled', false).html('<i class="fas fa-broom"></i> Execute Sweep');
+            
+            if (response.status === 'success') {
+                const result = response.data;
+                const statusDiv = $('#sweep-status-message');
+                let detailsHtml = '';
                 
-                if (response.status === 'success') {
-                    const result = response.data;
-                    const statusDiv = $('#sweep-status-message');
-                    statusDiv
-                        .removeClass('error pending')
-                        .addClass('success')
-                        .html(`
-                            <i class="fas fa-check-circle"></i>
-                            <strong>Sweep Successful!</strong><br>
-                            Wallets Swept: ${result.walletsSwept || 0}<br>
-                            Total Amount: ${result.totalAmount || 0} ${result.asset}<br>
-                            Tx Count: ${result.transactionCount || 0}
-                            ${result.txHashes ? `<br>Tx Hashes: ${result.txHashes.join(', ')}` : ''}
-                        `)
-                        .show();
-                    
-                    toastr.success(`Sweep completed: ${result.walletsSwept || 0} wallets swept`);
-                    resetSweepForm();
-                    loadTreasurySummary();
-                    loadTransferHistory();
-                } else {
-                    const statusDiv = $('#sweep-status-message');
-                    statusDiv
-                        .removeClass('success pending')
-                        .addClass('error')
-                        .html(`<i class="fas fa-exclamation-circle"></i> ${response.message || 'Sweep failed'}`)
-                        .show();
-                    toastr.error(response.message || 'Sweep failed');
+                // Show sweep details if available
+                if (result.sweepDetails && result.sweepDetails.length > 0) {
+                    detailsHtml = '<br><br><strong>Details:</strong><br>';
+                    result.sweepDetails.slice(0, 5).forEach(detail => {
+                        const statusColor = detail.status === 'success' ? '#10B981' : '#EF4444';
+                        const statusText = detail.status === 'success' ? '✅' : '❌';
+                        detailsHtml += `<div style="font-size: 11px; color: var(--text-secondary);">${statusText} ${detail.address.substring(0, 20)}... → ${(detail.amount || 0).toFixed(8)} ${result.asset} ${detail.status === 'success' ? '✓' : '✗'}</div>`;
+                    });
+                    if (result.sweepDetails.length > 5) {
+                        detailsHtml += `<div style="font-size: 11px; color: var(--text-muted);">... and ${result.sweepDetails.length - 5} more transactions</div>`;
+                    }
                 }
-            },
-            error: function(xhr) {
-                hideLoading();
-                $('#execute-sweep-btn').prop('disabled', false).html('<i class="fas fa-broom"></i> Execute Sweep');
+                
+                statusDiv
+                    .removeClass('error pending')
+                    .addClass('success')
+                    .html(`
+                        <i class="fas fa-check-circle"></i>
+                        <strong>Sweep Successful!</strong><br>
+                        Wallets Swept: ${result.walletsSwept || 0}<br>
+                        Successful: ${result.successful || 0} | Failed: ${result.failed || 0}<br>
+                        Total Amount: ${(result.totalAmount || 0).toFixed(8)} ${result.asset || data.asset}<br>
+                        Total Fees: ${(result.totalFees || 0).toFixed(8)} ${result.asset || data.asset}
+                        ${result.transactionHashes && result.transactionHashes.length > 0 ? `<br>Tx Hashes: ${result.transactionHashes.join(', ')}` : ''}
+                        ${detailsHtml}
+                    `)
+                    .show();
+                
+                toastr.success(`Sweep completed: ${result.successful || 0} wallets swept successfully`);
+                resetSweepForm();
+                loadTreasurySummary();
+                loadTransferHistory();
+            } else {
                 const statusDiv = $('#sweep-status-message');
                 statusDiv
                     .removeClass('success pending')
                     .addClass('error')
-                    .html(`<i class="fas fa-exclamation-circle"></i> ${xhr.responseJSON?.message || 'Sweep failed. Please try again.'}`)
+                    .html(`<i class="fas fa-exclamation-circle"></i> ${response.message || 'Sweep failed'}`)
                     .show();
-                toastr.error(xhr.responseJSON?.message || 'Sweep failed');
+                toastr.error(response.message || 'Sweep failed');
             }
-        });
-    }
+        },
+        error: function(xhr) {
+            hideLoading();
+            $('#execute-sweep-btn').prop('disabled', false).html('<i class="fas fa-broom"></i> Execute Sweep');
+            
+            const errorMsg = xhr.responseJSON?.message || 'Sweep failed. Please try again.';
+            const statusDiv = $('#sweep-status-message');
+            statusDiv
+                .removeClass('success pending')
+                .addClass('error')
+                .html(`<i class="fas fa-exclamation-circle"></i> ${errorMsg}`)
+                .show();
+            toastr.error(errorMsg);
+        }
+    });
+}
+
+function resetSweepForm() {
+    // Reset form fields but keep network selection
+    const network = $('#sweep-network').val();
+    $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
+    $('#sweep-destination-input').val('');
+    $('#sweep-min-balance').val('0.0001');
+    $('#sweep-total-wallets').text('0');
+    $('#sweep-total-balance').text('0.00000000');
+    $('#sweep-status-message').hide().removeClass('success error pending');
+    $('#execute-sweep-btn').prop('disabled', true).html('<i class="fas fa-broom"></i> Execute Sweep');
+    $('#sweep-confirm-check').prop('checked', false);
+    treasuryData.wallets = [];
     
-    function resetSweepForm() {
-        $('#treasury-sweep-form')[0]?.reset();
-        $('#sweep-total-wallets').text('0');
-        $('#sweep-total-balance').text('0.00000000');
-        $('#sweep-status-message').hide().removeClass('success error pending');
-        $('#execute-sweep-btn').prop('disabled', true);
-        $('#sweep-confirm-check').prop('checked', false);
+    // Reload wallets if network is still selected
+    if (network) {
+        loadSweepWallets(network);
     }
+}
+
+
+
+
+
     
     // ============================================================
     // WITHDRAW FUNCTIONS
