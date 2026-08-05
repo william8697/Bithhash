@@ -6223,119 +6223,167 @@
     // ============================================================
     // SWEEP FUNCTIONS
     // ============================================================
-    function loadTreasurySweepData() {
-        showLoading('Loading sweep data...');
-        $.ajax({
-            url: 'https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/networks',
-            type: 'GET',
-            headers: {
-                'Authorization': `Bearer ${adminToken}`,
-                'X-CSRF-TOKEN': csrfToken
-            },
-            success: function(response) {
-                hideLoading();
-                if (response.status === 'success') {
-                    const networks = response.data.networks || [];
-                    const networkSelect = $('#sweep-network');
-                    networkSelect.empty().append('<option value="">Select Network</option>');
-                    networks.forEach(net => {
-                        networkSelect.append(`<option value="${net.id}">${net.name}</option>`);
+ // ============================================================
+// SWEEP FUNCTIONS - UPDATED TO HANDLE assetOptions
+// ============================================================
+function loadTreasurySweepData() {
+    showLoading('Loading sweep data...');
+    $.ajax({
+        url: 'https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/networks',
+        type: 'GET',
+        headers: {
+            'Authorization': `Bearer ${adminToken}`,
+            'X-CSRF-TOKEN': csrfToken
+        },
+        success: function(response) {
+            hideLoading();
+            if (response.status === 'success') {
+                const networks = response.data.networks || [];
+                const networkSelect = $('#sweep-network');
+                networkSelect.empty().append('<option value="">Select Network</option>');
+                networks.forEach(net => {
+                    networkSelect.append(`<option value="${net.id}">${net.name}</option>`);
+                });
+                
+                // Reset asset dropdown
+                $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
+                $('#sweep-total-wallets').text('0');
+                $('#sweep-total-balance').text('0.00000000');
+                treasuryData.wallets = [];
+            } else {
+                toastr.error('Failed to load networks');
+            }
+        },
+        error: function() {
+            hideLoading();
+            toastr.error('Failed to load sweep data');
+        }
+    });
+}
+
+function loadSweepWallets(networkId) {
+    if (!networkId) {
+        $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
+        $('#sweep-total-wallets').text('0');
+        $('#sweep-total-balance').text('0.00000000');
+        return;
+    }
+    showLoading('Loading wallets...');
+    $.ajax({
+        url: `https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/sweep-info?network=${networkId}`,
+        type: 'GET',
+        headers: {
+            'Authorization': `Bearer ${adminToken}`,
+            'X-CSRF-TOKEN': csrfToken
+        },
+        success: function(response) {
+            hideLoading();
+            if (response.status === 'success') {
+                const data = response.data;
+                const assetSelect = $('#sweep-asset');
+                assetSelect.empty().append('<option value="">Select Asset</option>');
+                
+                // CRITICAL: Use assetOptions for dropdown - this fixes the "undefined" error
+                const assetOptions = data.assetOptions || [];
+                console.log('Asset Options from backend:', assetOptions);
+                
+                if (assetOptions.length > 0) {
+                    assetOptions.forEach(option => {
+                        // Make sure we have valid data
+                        const symbol = option.symbol || option.asset || 'Unknown';
+                        const displayName = option.displayName || `${symbol} (0.00000000 ${symbol})`;
+                        const balance = option.balance || 0;
+                        assetSelect.append(`<option value="${symbol}" data-balance="${balance}">${displayName}</option>`);
                     });
                 } else {
-                    toastr.error('Failed to load networks');
-                }
-            },
-            error: function() {
-                hideLoading();
-                toastr.error('Failed to load sweep data');
-            }
-        });
-    }
-    
-    function loadSweepWallets(networkId) {
-        if (!networkId) {
-            $('#sweep-asset').empty().append('<option value="">Select Asset</option>');
-            $('#sweep-total-wallets').text('0');
-            $('#sweep-total-balance').text('0.00000000');
-            return;
-        }
-        showLoading('Loading wallets...');
-        $.ajax({
-            url: `https://bithash-backend-ycuf.onrender.com/api/admin/wallet-management/treasury/sweep-info?network=${networkId}`,
-            type: 'GET',
-            headers: {
-                'Authorization': `Bearer ${adminToken}`,
-                'X-CSRF-TOKEN': csrfToken
-            },
-            success: function(response) {
-                hideLoading();
-                if (response.status === 'success') {
-                    const data = response.data;
-                    const assetSelect = $('#sweep-asset');
-                    assetSelect.empty().append('<option value="">Select Asset</option>');
+                    // Fallback: use assets array if assetOptions is empty
                     const assets = data.assets || [];
-                    assets.forEach(asset => {
-                        assetSelect.append(`<option value="${asset.symbol}">${asset.symbol}</option>`);
-                    });
-                    
-                    // Store wallet data for later use
-                    treasuryData.wallets = data.wallets || [];
-                    $('#sweep-total-wallets').text(treasuryData.wallets.length);
-                    const totalBalance = treasuryData.wallets.reduce((sum, w) => sum + (w.balance || 0), 0);
-                    $('#sweep-total-balance').text(totalBalance.toFixed(8));
+                    console.log('Fallback to assets array:', assets);
+                    if (assets.length > 0) {
+                        assets.forEach(asset => {
+                            assetSelect.append(`<option value="${asset}">${asset}</option>`);
+                        });
+                    } else {
+                        assetSelect.append('<option value="">No assets found</option>');
+                    }
                 }
-            },
-            error: function() {
-                hideLoading();
-                toastr.error('Failed to load wallets');
+                
+                // Store wallet data for later use
+                treasuryData.wallets = data.wallets || [];
+                const totalBalance = treasuryData.wallets.reduce((sum, w) => sum + (w.balance || 0), 0);
+                $('#sweep-total-wallets').text(treasuryData.wallets.length);
+                $('#sweep-total-balance').text(totalBalance.toFixed(8));
+                
+                // Trigger validation
+                validateSweepForm();
+            } else {
+                toastr.error(response.message || 'Failed to load wallets');
             }
-        });
-    }
-    
-    function loadSweepWalletsByAsset(assetSymbol) {
-        if (!assetSymbol) return;
-        const networkId = $('#sweep-network').val();
-        if (!networkId) return;
-        
-        const filtered = treasuryData.wallets.filter(w => w.asset === assetSymbol);
-        $('#sweep-total-wallets').text(filtered.length);
-        const totalBalance = filtered.reduce((sum, w) => sum + (w.balance || 0), 0);
+        },
+        error: function(xhr) {
+            hideLoading();
+            toastr.error(xhr.responseJSON?.message || 'Failed to load wallets');
+        }
+    });
+}
+
+function loadSweepWalletsByAsset(assetSymbol) {
+    if (!assetSymbol) {
+        // Show all wallets if no asset selected
+        const totalBalance = treasuryData.wallets.reduce((sum, w) => sum + (w.balance || 0), 0);
+        $('#sweep-total-wallets').text(treasuryData.wallets.length);
         $('#sweep-total-balance').text(totalBalance.toFixed(8));
         validateSweepForm();
+        return;
     }
     
-    function validateSweepForm() {
-        const asset = $('#sweep-asset').val();
-        const destination = $('#sweep-destination-input').val().trim();
-        const confirmed = $('#sweep-confirm-check').is(':checked');
-        const minBalance = parseFloat($('#sweep-min-balance').val()) || 0;
-        const totalBalance = parseFloat($('#sweep-total-balance').text()) || 0;
-        
-        let valid = true;
-        let message = '';
-        
-        if (!asset) {
-            valid = false;
-            message = 'Please select an asset';
-        } else if (!destination || destination.length < 10) {
-            valid = false;
-            message = 'Please enter a valid destination address';
-        } else if (totalBalance <= minBalance) {
-            valid = false;
-            message = `No wallets with balance above minimum (${minBalance.toFixed(8)})`;
-        } else if (!confirmed) {
-            valid = false;
-            message = 'Please confirm the sweep';
-        }
-        
-        $('#execute-sweep-btn').prop('disabled', !valid);
-        if (!valid && message) {
-            $('#execute-sweep-btn').attr('title', message);
-        } else {
-            $('#execute-sweep-btn').removeAttr('title');
-        }
-        return valid;
+    const filtered = treasuryData.wallets.filter(w => w.asset === assetSymbol);
+    $('#sweep-total-wallets').text(filtered.length);
+    const totalBalance = filtered.reduce((sum, w) => sum + (w.balance || 0), 0);
+    $('#sweep-total-balance').text(totalBalance.toFixed(8));
+    validateSweepForm();
+}
+
+function validateSweepForm() {
+    const asset = $('#sweep-asset').val();
+    const destination = $('#sweep-destination-input').val().trim();
+    const confirmed = $('#sweep-confirm-check').is(':checked');
+    const minBalance = parseFloat($('#sweep-min-balance').val()) || 0;
+    
+    // Get balance from the selected asset option
+    const selectedOption = $('#sweep-asset option:selected');
+    let totalBalance = parseFloat(selectedOption.data('balance')) || 0;
+    
+    // If no asset selected, use total from all wallets
+    if (!asset) {
+        totalBalance = parseFloat($('#sweep-total-balance').text()) || 0;
     }
+    
+    let valid = true;
+    let message = '';
+    
+    if (!asset) {
+        valid = false;
+        message = 'Please select an asset';
+    } else if (!destination || destination.length < 10) {
+        valid = false;
+        message = 'Please enter a valid destination address';
+    } else if (totalBalance <= minBalance) {
+        valid = false;
+        message = `No wallets with balance above minimum (${minBalance.toFixed(8)})`;
+    } else if (!confirmed) {
+        valid = false;
+        message = 'Please confirm the sweep';
+    }
+    
+    $('#execute-sweep-btn').prop('disabled', !valid);
+    if (!valid && message) {
+        $('#execute-sweep-btn').attr('title', message);
+    } else {
+        $('#execute-sweep-btn').removeAttr('title');
+    }
+    return valid;
+}
     
     function executeTreasurySweep() {
         if (!validateSweepForm()) return;
