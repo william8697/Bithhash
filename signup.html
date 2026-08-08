@@ -2459,7 +2459,7 @@
   <script>
     // ============================================================
     // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
-    // MULTICHAIN WALLETCONNECT IMPLEMENTATION
+    // MULTICHAIN WALLETCONNECT IMPLEMENTATION - FIXED
     // ============================================================
 
     // =============================================
@@ -2468,6 +2468,7 @@
     const WALLETCONNECT_PROJECT_ID = '3f054c15e97b05dda5a4dcfd652bc753';
     const WALLETCONNECT_RELAY_URL = 'wss://relay.walletconnect.com';
     const BACKEND_BASE = 'https://bithash-backend-ycuf.onrender.com';
+    const DEFAULT_AUTH_CHAIN_ID = 1;
 
     // =============================================
     // SUPPORTED CHAINS - SINGLE SOURCE OF TRUTH
@@ -2519,7 +2520,7 @@
     };
 
     // =============================================
-    // GLOBAL STATE (Connection Manager)
+    // GLOBAL STATE (Connection Manager) - FIXED: Added multichain properties
     // =============================================
     const connectionManager = {
       signClient: null,
@@ -2527,9 +2528,13 @@
       sessionTopic: null,
       provider: null,
       walletType: null,
+      // Currently selected account/chain for authentication
       address: null,
       chainId: null,
       chainName: null,
+      // Complete WalletConnect multichain state
+      accountsByChain: {},
+      approvedChains: [],
       connected: false
     };
 
@@ -2596,7 +2601,7 @@
           throw new Error('No provider available for the selected wallet.');
         }
 
-        // Stage 3: Connection Manager - store state
+        // Stage 3: Connection Manager - store state including multichain data
         connectionManager.walletType = walletType;
         connectionManager.provider = provider;
         connectionManager.session = session;
@@ -2655,8 +2660,13 @@
           throw new Error('Signature rejected. Please sign the message to create your account.');
         }
 
-        // Stage 8: Authentication - IS SIGNUP = TRUE
-        const authResult = await authenticateWithSignature(address, signature, nonceData, true);
+        // Stage 8: Authentication - IS SIGNUP = TRUE - FIXED: Send all multichain data
+        const authResult = await authenticateWithSignature(
+          address,
+          signature,
+          nonceData,
+          true
+        );
         if (authResult.token) {
           localStorage.setItem('jwtToken', authResult.token);
           window.location.href = 'dashboard';
@@ -2821,12 +2831,99 @@
 
       document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
 
+      // FIXED: Use the new multichain session parser
       const session = await waitForWalletConnectSession(wcUri);
-      if (session && session.accounts && session.accounts.length > 0) {
-        return { provider: createProviderFromSession(session), session };
+      
+      // FIXED: Extract all accounts from the session
+      const { accountsByChain, approvedChains } = extractEip155Accounts(session);
+      
+      // Store multichain state
+      connectionManager.accountsByChain = accountsByChain;
+      connectionManager.approvedChains = approvedChains;
+      
+      // Use the first account as the primary one for authentication
+      const firstCaipId = approvedChains[0];
+      const primaryAddress = accountsByChain[firstCaipId];
+      
+      if (!primaryAddress) {
+        throw new Error('No accounts returned from wallet.');
       }
 
-      throw new Error('No accounts returned from wallet.');
+      // Set the primary address for authentication
+      session.primaryAddress = primaryAddress;
+      session.accountsByChain = accountsByChain;
+      session.approvedChains = approvedChains;
+
+      return { provider: createProviderFromSession(session), session };
+    }
+
+    // =============================================
+    // extractEip155Accounts - FIXED: Extract all accounts from session
+    // =============================================
+    function extractEip155Accounts(session) {
+      const ns = session?.namespaces?.eip155;
+
+      if (!ns || !Array.isArray(ns.accounts)) {
+        throw new Error('WalletConnect session contains no EVM accounts.');
+      }
+
+      const accountsByChain = {};
+      const approvedChains = [];
+
+      for (const caip10Account of ns.accounts) {
+        const parts = caip10Account.split(':');
+
+        if (parts.length !== 3) {
+          continue;
+        }
+
+        const namespace = parts[0];
+        const chainId = parts[1];
+        const address = parts[2];
+
+        if (namespace !== 'eip155') {
+          continue;
+        }
+
+        const caip2ChainId = `eip155:${chainId}`;
+
+        accountsByChain[caip2ChainId] = address;
+
+        if (!approvedChains.includes(caip2ChainId)) {
+          approvedChains.push(caip2ChainId);
+        }
+      }
+
+      if (Object.keys(accountsByChain).length === 0) {
+        throw new Error('No approved EVM accounts found in WalletConnect session.');
+      }
+
+      return {
+        accountsByChain,
+        approvedChains
+      };
+    }
+
+    // =============================================
+    // selectWalletChain - FIXED: Select a specific chain for authentication
+    // =============================================
+    function selectWalletChain(chainId) {
+      const caipChainId = `eip155:${chainId}`;
+
+      const address = connectionManager.accountsByChain[caipChainId];
+
+      if (!address) {
+        throw new Error(`Wallet did not approve ${caipChainId}.`);
+      }
+
+      connectionManager.chainId = chainId;
+      connectionManager.address = address;
+      connectionManager.chainName = SUPPORTED_CHAINS[chainId]?.name || `Chain ${chainId}`;
+
+      return {
+        chainId,
+        address
+      };
     }
 
     // =============================================
@@ -2890,11 +2987,10 @@
     });
 
     // =============================================
-    // RESTORE WALLETCONNECT STATE after BFCache
+    // RESTORE WALLETCONNECT STATE after BFCache - FIXED: Multichain restoration
     // =============================================
     async function restoreWalletConnectState() {
       if (!connectionManager.signClient) {
-        // Try to re-initialize
         try {
           await silentlyInitWalletConnect();
         } catch (e) {
@@ -2915,12 +3011,10 @@
           return;
         }
 
-        // Find the session belonging to this connection attempt
         let restoredSession = null;
         const targetTopic = connectionManager.sessionTopic;
 
         if (targetTopic) {
-          // Try to find the specific session by topic
           for (const s of sessions) {
             if (s.topic === targetTopic) {
               restoredSession = s;
@@ -2929,7 +3023,6 @@
           }
         }
 
-        // If not found by topic, use the most recent session
         if (!restoredSession && sessions.length > 0) {
           restoredSession = sessions[sessions.length - 1];
           console.log('[WalletConnect] Using most recent session');
@@ -2943,27 +3036,33 @@
         connectionManager.sessionTopic = restoredSession.topic;
         connectionManager.connected = true;
 
-        // Extract account and chain from session
-        const ns = restoredSession.namespaces?.eip155;
-        if (ns && ns.accounts && ns.accounts.length > 0) {
-          const account = ns.accounts[0];
-          const parts = account.split(':');
-          if (parts.length >= 3) {
-            const chainId = parseInt(parts[1], 10);
-            const address = parts[2];
-            connectionManager.address = address;
-            connectionManager.chainId = chainId;
-            connectionManager.chainName = SUPPORTED_CHAINS[chainId] ? SUPPORTED_CHAINS[chainId].name : `Chain ${chainId}`;
-            connectionManager.provider = createProviderFromSession({ accounts: [address], session: restoredSession });
+        // FIXED: Extract all accounts from the restored session
+        const { accountsByChain, approvedChains } = extractEip155Accounts(restoredSession);
+        
+        connectionManager.accountsByChain = accountsByChain;
+        connectionManager.approvedChains = approvedChains;
 
-            // Show connected state
-            showWalletConnectedState(address, chainId);
-            console.log('[WalletConnect] Session restored successfully:', restoredSession.topic);
-            return;
-          }
+        // Use the first approved chain as the primary for display
+        const firstCaipId = approvedChains[0];
+        if (firstCaipId) {
+          const primaryAddress = accountsByChain[firstCaipId];
+          const chainId = parseInt(firstCaipId.split(':')[1], 10);
+          
+          connectionManager.address = primaryAddress;
+          connectionManager.chainId = chainId;
+          connectionManager.chainName = SUPPORTED_CHAINS[chainId] ? SUPPORTED_CHAINS[chainId].name : `Chain ${chainId}`;
+          
+          connectionManager.provider = createProviderFromSession({
+            accounts: [primaryAddress],
+            session: restoredSession,
+            accountsByChain: accountsByChain,
+            approvedChains: approvedChains
+          });
+
+          showWalletConnectedState(primaryAddress, chainId);
+          console.log('[WalletConnect] Session restored successfully:', restoredSession.topic);
         }
 
-        console.log('[WalletConnect] Session restored but no accounts found');
       } catch (err) {
         console.error('[WalletConnect] Error restoring session:', err);
       }
@@ -2973,7 +3072,6 @@
     // WALLETCONNECT HELPERS - MULTICHAIN IMPLEMENTATION
     // =============================================
     async function generateWalletConnectURI(walletType) {
-      // Ensure WalletConnect is initialized
       if (!wcInitPromise) {
         wcInitPromise = silentlyInitWalletConnect();
       }
@@ -2983,7 +3081,6 @@
         throw new Error('WalletConnect client not available.');
       }
 
-      // Use optionalNamespaces with multichain support
       const connectParams = {
         optionalNamespaces: WC_NAMESPACE
       };
@@ -2991,14 +3088,13 @@
       const { uri, approval } = await connectionManager.signClient.connect(connectParams);
       if (!uri) throw new Error('Failed to generate pairing URI.');
       
-      // Store the approval function
       window._wcApproval = approval;
       
       return uri;
     }
 
     // =============================================
-    // waitForWalletConnectSession - uses optionalNamespaces
+    // waitForWalletConnectSession - FIXED: Uses optionalNamespaces with multichain
     // =============================================
     async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
       return new Promise((resolve, reject) => {
@@ -3019,38 +3115,19 @@
           approvalPromise.then(session => {
             clearTimeout(timeout);
             if (session && session.namespaces) {
-              // Extract accounts from the session - check eip155 namespace
+              // Extract all accounts from the session
               const ns = session.namespaces.eip155;
               if (ns && ns.accounts && ns.accounts.length > 0) {
-                const account = ns.accounts[0];
-                const parts = account.split(':');
-                if (parts.length >= 3) {
-                  const chainId = parseInt(parts[1], 10);
-                  const address = parts[2];
-                  resolve({
-                    accounts: [address],
-                    chainId: chainId,
-                    session: session
-                  });
-                  return;
-                }
+                // Return the full session - accounts will be extracted later
+                resolve(session);
+                return;
               }
               // Try to extract from any namespace
               for (const key of Object.keys(session.namespaces)) {
                 const ns = session.namespaces[key];
                 if (ns && ns.accounts && ns.accounts.length > 0) {
-                  const account = ns.accounts[0];
-                  const parts = account.split(':');
-                  if (parts.length >= 3) {
-                    const chainId = parseInt(parts[1], 10);
-                    const address = parts[2];
-                    resolve({
-                      accounts: [address],
-                      chainId: chainId,
-                      session: session
-                    });
-                    return;
-                  }
+                  resolve(session);
+                  return;
                 }
               }
             }
@@ -3067,45 +3144,82 @@
     }
 
     // =============================================
-    // createProviderFromSession - MULTICHAIN dynamic chain
+    // createProviderFromSession - FIXED: Multichain aware
     // =============================================
     function createProviderFromSession(sessionData) {
-      const address = sessionData.accounts[0];
       const session = sessionData.session;
+      const accountsByChain = sessionData.accountsByChain || {};
+      const approvedChains = sessionData.approvedChains || [];
+      
+      // Get the primary address from the session data or use the first one
+      let primaryAddress = sessionData.primaryAddress;
+      if (!primaryAddress && Object.keys(accountsByChain).length > 0) {
+        const firstKey = Object.keys(accountsByChain)[0];
+        primaryAddress = accountsByChain[firstKey];
+      }
+      if (!primaryAddress && sessionData.accounts && sessionData.accounts.length > 0) {
+        primaryAddress = sessionData.accounts[0];
+      }
 
       return {
-        request: async ({ method, params }) => {
+        request: async ({ method, params = [] }) => {
           if (method === 'eth_requestAccounts') {
-            return [address];
+            // Return all unique addresses from the multichain session
+            const addresses = [...new Set(Object.values(accountsByChain))];
+            if (addresses.length > 0) {
+              return addresses;
+            }
+            return [primaryAddress];
           }
+          
+          if (method === 'eth_chainId') {
+            const chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
+            return `0x${Number(chainId).toString(16)}`;
+          }
+          
           if (method === 'personal_sign') {
             const message = params[0];
             const from = params[1];
             
-            // Dynamically determine current chain
-            let chainId = connectionManager.chainId || 1;
-            let caipChainId = `eip155:${chainId}`;
+            // Get the current chain ID from connection manager
+            let chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
+            const caipChainId = `eip155:${chainId}`;
             
-            // If chainId is not supported, use the first supported one
-            if (!SUPPORTED_CHAINS[chainId]) {
-              chainId = 1;
-              caipChainId = 'eip155:1';
+            // Check if this chain was approved
+            const approvedAddress = accountsByChain[caipChainId];
+            if (!approvedAddress) {
+              // If not approved, use the first approved chain
+              const firstCaipId = approvedChains[0] || `eip155:${DEFAULT_AUTH_CHAIN_ID}`;
+              const fallbackAddress = accountsByChain[firstCaipId];
+              if (fallbackAddress) {
+                console.warn(`Chain ${caipChainId} not approved, using ${firstCaipId} instead`);
+                return await connectionManager.signClient.request({
+                  topic: session.topic,
+                  chainId: firstCaipId,
+                  request: {
+                    method: 'personal_sign',
+                    params: [message, fallbackAddress]
+                  }
+                });
+              }
+              throw new Error(`WalletConnect session does not contain ${caipChainId}.`);
             }
             
-            const result = await connectionManager.signClient.request({
+            // Verify the from address matches the approved address for this chain
+            if (from && from.toLowerCase() !== approvedAddress.toLowerCase()) {
+              throw new Error('Signing address does not match the selected chain account.');
+            }
+            
+            return await connectionManager.signClient.request({
               topic: session.topic,
               chainId: caipChainId,
               request: {
                 method: 'personal_sign',
-                params: [message, from]
+                params: [message, approvedAddress]
               }
             });
-            return result;
           }
-          if (method === 'eth_chainId') {
-            const chainId = connectionManager.chainId || 1;
-            return `0x${chainId.toString(16)}`;
-          }
+          
           throw new Error(`Method ${method} not supported via WalletConnect transport.`);
         }
       };
@@ -3147,13 +3261,7 @@
 
         connectionManager.signClient = client;
         
-        // Clean up old pairings
-        try {
-          const pairings = client.core.pairing.getPairings();
-          if (pairings && pairings.length > 0) {
-            await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
-          }
-        } catch (e) { /* ignore */ }
+        // FIXED: Removed pairing destruction - do not destroy all pairings on init
         
         return client;
       } catch (err) {
@@ -3275,20 +3383,33 @@
     }
 
     // =============================================
-    // AUTHENTICATION - IS SIGNUP = TRUE
+    // AUTHENTICATION - IS SIGNUP = TRUE - FIXED: Send all multichain data
     // =============================================
     async function authenticateWithSignature(address, signature, nonceData, isSignup = true) {
+      // Build the complete multichain payload
+      const payload = {
+        walletAddress: address,
+        signature: signature,
+        nonce: nonceData.nonce,
+        isSignup: isSignup,
+        walletType: connectionManager.walletType,
+        chainId: connectionManager.chainId
+      };
+
+      // If we have multichain data from WalletConnect, include it
+      if (Object.keys(connectionManager.accountsByChain).length > 0 && 
+          connectionManager.approvedChains.length > 0) {
+        payload.walletConnect = {
+          sessionTopic: connectionManager.sessionTopic,
+          approvedChains: connectionManager.approvedChains,
+          accountsByChain: connectionManager.accountsByChain
+        };
+      }
+
       const response = await fetch(`${BACKEND_BASE}/api/web3/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          walletAddress: address,
-          signature: signature,
-          nonce: nonceData.nonce,
-          isSignup: isSignup,
-          walletType: connectionManager.walletType,
-          chainId: connectionManager.chainId
-        })
+        body: JSON.stringify(payload)
       });
       const data = await response.json();
       if (data.status === 'fail') throw new Error(data.message || 'Verification failed.');
@@ -3336,6 +3457,8 @@
       connectionManager.session = null;
       connectionManager.sessionTopic = null;
       connectionManager.walletType = null;
+      connectionManager.accountsByChain = {};
+      connectionManager.approvedChains = [];
       
       document.getElementById('web3-connection-bar').classList.remove('active');
       document.getElementById('web3-status').classList.remove('active');
