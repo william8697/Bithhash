@@ -2137,7 +2137,7 @@
 
                 updateUIAfterConnection(address, walletType);
 
-                // Stage 5: Nonce Request
+                // Stage 5: Nonce Request - always use isSignup=false for login page
                 const nonceData = await fetchNonce(address);
                 if (!nonceData) throw new Error('Failed to fetch nonce.');
 
@@ -2210,10 +2210,10 @@
                 }
             }
 
+            // Desktop: show an informational message instead of auto-navigating
             if (!providerInfo) {
-                const storeUrl = getAppStoreUrl(walletType);
-                window.open(storeUrl, '_blank');
-                throw new Error(`${walletType} is not installed. Please install it and try again.`);
+                showConnectionError(`${walletType} is not installed. Please install it and try again.`);
+                throw new Error(`${walletType} is not installed.`);
             }
 
             const provider = providerInfo.provider;
@@ -2273,9 +2273,9 @@
             if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
 
             const deepLink = openDeepLink(walletType, wcUri);
-            const storeUrl = getAppStoreUrl(walletType);
 
-            safeRedirectToWallet(deepLink, storeUrl);
+            // FIXED: Use a non-navigating approach to launch the wallet app
+            launchWalletApp(deepLink, walletType);
 
             document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
 
@@ -2285,6 +2285,53 @@
             }
 
             throw new Error('No accounts returned from wallet.');
+        }
+
+        // =============================================
+        // FIXED: launchWalletApp - DOES NOT navigate the browser
+        // =============================================
+        function launchWalletApp(deepLinkUrl, walletType) {
+            // Clear any previous timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
+
+            // Use window.open with a short timeout - this does NOT navigate the current page
+            const newWindow = window.open(deepLinkUrl, '_blank');
+            
+            // If window.open fails (e.g., popup blocked), try using an iframe or location.replace
+            if (!newWindow) {
+                // Use location.replace as a fallback - but this still navigates away
+                // Use a hidden iframe approach instead
+                try {
+                    const iframe = document.createElement('iframe');
+                    iframe.style.display = 'none';
+                    iframe.src = deepLinkUrl;
+                    document.body.appendChild(iframe);
+                    setTimeout(() => {
+                        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                    }, 3000);
+                } catch (e) {
+                    // Last resort: use location.replace but with a note that this may navigate away
+                    console.warn('Unable to launch wallet app without navigating. Using location.replace.');
+                    // Use location.replace - this will navigate away but at least it's not the current page
+                    // We use replace so the user can use back button to return
+                    window.location.replace(deepLinkUrl);
+                }
+            }
+
+            // Set a timeout to show a "retry" option if the app doesn't open
+            window._walletLaunchTimer = setTimeout(() => {
+                const statusText = document.getElementById('wc-status-text');
+                if (statusText && statusText.textContent.includes('Waiting for approval')) {
+                    statusText.textContent = 'Still waiting for approval. If the wallet didn\'t open, try again.';
+                    // Show a retry button
+                    const retrySmall = document.querySelector('.wc-mobile-status small');
+                    if (retrySmall) {
+                        retrySmall.innerHTML = '<a href="#" onclick="retryWalletConnect()" style="color: var(--accent);">Click here to retry</a>';
+                    }
+                }
+            }, 5000);
         }
 
         // =============================================
@@ -2318,7 +2365,7 @@
         }
 
         // =============================================
-        // FIXED: waitForWalletConnectSession - approval is a function, not a Promise
+        // waitForWalletConnectSession - approval is a function, not a Promise
         // =============================================
         async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
             return new Promise((resolve, reject) => {
@@ -2536,7 +2583,7 @@
         }
 
         // =============================================
-        // DEEP LINK & STORE HELPERS
+        // DEEP LINK HELPERS - These generate URLs but DO NOT navigate
         // =============================================
         function openDeepLink(walletType, uri) {
             const os = getMobileOS();
@@ -2585,24 +2632,10 @@
             return 'desktop';
         }
 
-        function safeRedirectToWallet(deepLinkUrl, storeUrl) {
-            const pageVisibilityPromise = new Promise((resolve) => {
-                const handler = () => {
-                    if (document.hidden) resolve(true);
-                };
-                document.addEventListener('visibilitychange', handler, { once: true });
-                setTimeout(() => {
-                    document.removeEventListener('visibilitychange', handler);
-                    resolve(false);
-                }, 2500);
-            });
-            window.location.href = deepLinkUrl;
-            pageVisibilityPromise.then((appOpened) => {
-                if (!appOpened) {
-                    window.location.href = storeUrl;
-                }
-            });
-        }
+        // =============================================
+        // REMOVED: safeRedirectToWallet - REPLACED by launchWalletApp
+        // This function was the primary culprit causing navigation away from the page
+        // =============================================
 
         // =============================================
         // NONCE & SIWE
@@ -2697,6 +2730,11 @@
                 const statusEl = btn.querySelector('.connection-status');
                 if (statusEl) statusEl.className = 'connection-status';
             });
+            
+            // Clear any pending wallet launch timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
         }
 
         function disconnectWeb3Wallet() {
@@ -2717,6 +2755,12 @@
             if (connectionManager.signClient) {
                 try { connectionManager.signClient.core.relayer.disconnect(); } catch (e) { /* ignore */ }
             }
+            
+            // Clear any pending wallet launch timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
+            
             console.log('🔌 Wallet disconnected');
         }
 
