@@ -2012,6 +2012,7 @@
         // ============================================================
         // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
         // MULTICHAIN WALLETCONNECT IMPLEMENTATION - FIXED
+        // BACKEND OWNS THE COMPLETE CHALLENGE
         // ============================================================
 
         // =============================================
@@ -2087,7 +2088,13 @@
             // Complete WalletConnect multichain state
             accountsByChain: {},
             approvedChains: [],
-            connected: false
+            connected: false,
+            // Active challenge context
+            activeChallenge: null,
+            challengeAddress: null,
+            challengeChainId: null,
+            challengeNonce: null,
+            challengeMessage: null
         };
 
         let wcInitPromise = null;
@@ -2122,7 +2129,7 @@
         }
 
         // =============================================
-        // 3. STAGE-BASED EXECUTION
+        // 3. STAGE-BASED EXECUTION - FIXED: Backend owns the message
         // =============================================
         async function executeWalletFlow(walletType) {
             const statusDiv = document.getElementById('web3-status');
@@ -2164,7 +2171,7 @@
                     connectionManager.sessionTopic = session.topic;
                 }
 
-                // Stage 4: Account and Chain Validation
+                // Stage 4: Account and Chain Validation - NORMALIZE ADDRESS IMMEDIATELY
                 let accounts = [];
                 let chainIdHex = null;
                 try {
@@ -2178,10 +2185,11 @@
                     throw new Error('No accounts returned from wallet.');
                 }
 
-                const address = accounts[0];
+                // CRITICAL FIX: Normalize address immediately and use it everywhere
+                const address = accounts[0].toLowerCase();
                 const chainId = parseInt(chainIdHex, 16);
 
-                // Validate chain is supported - DO NOT auto-switch to Ethereum
+                // Validate chain is supported
                 if (!SUPPORTED_CHAINS[chainId]) {
                     const supportedNames = Object.values(SUPPORTED_CHAINS).map(c => c.name).join(', ');
                     throw new Error(`Unsupported network (Chain ID: ${chainId}). Please switch to one of: ${supportedNames}`);
@@ -2191,34 +2199,68 @@
                 connectionManager.chainId = chainId;
                 connectionManager.chainName = SUPPORTED_CHAINS[chainId].name;
 
-                // Stage 4b: Show wallet connected state (not authenticated yet)
+                // Stage 5: Show wallet connected state (not authenticated yet)
                 showWalletConnectedState(address, chainId);
 
-                // Stage 5: Nonce Request
-                const nonceData = await fetchNonce(address);
-                if (!nonceData) throw new Error('Failed to fetch nonce.');
+                // Stage 6: Request Challenge from Backend - NO FRONTEND MESSAGE BUILDING
+                const challengeData = await fetchChallengeFromBackend(address, chainId, false);
+                if (!challengeData) throw new Error('Failed to fetch authentication challenge.');
 
-                // Stage 6: Build SIWE Message with current chain
-                const siweMessage = buildSIWEMessage(address, nonceData, chainId);
+                // Store challenge context for verification
+                connectionManager.activeChallenge = challengeData;
+                connectionManager.challengeAddress = address;
+                connectionManager.challengeChainId = chainId;
+                connectionManager.challengeNonce = challengeData.nonce;
+                connectionManager.challengeMessage = challengeData.message;
 
-                // Stage 7: Request Wallet Signature
+                // Stage 7: Verify wallet state still matches before signing
+                let currentAccounts;
+                try {
+                    currentAccounts = await provider.request({ method: 'eth_accounts' });
+                } catch (err) {
+                    throw new Error('Failed to verify wallet state: ' + err.message);
+                }
+
+                if (!currentAccounts || currentAccounts.length === 0) {
+                    throw new Error('Wallet disconnected. Please reconnect.');
+                }
+
+                const currentAddress = currentAccounts[0].toLowerCase();
+                if (currentAddress !== address) {
+                    throw new Error('Wallet account changed. Please try again.');
+                }
+
+                let currentChainIdHex;
+                try {
+                    currentChainIdHex = await provider.request({ method: 'eth_chainId' });
+                } catch (err) {
+                    throw new Error('Failed to verify network state: ' + err.message);
+                }
+
+                const currentChainId = parseInt(currentChainIdHex, 16);
+                if (currentChainId !== chainId) {
+                    throw new Error('Network changed. Please switch back and try again.');
+                }
+
+                // Stage 8: Sign EXACT backend message - NO MODIFICATION
                 let signature;
                 try {
-                    // Use the provider's request method
                     signature = await provider.request({
                         method: 'personal_sign',
-                        params: [siweMessage, address]
+                        params: [challengeData.message, address]
                     });
                 } catch (signErr) {
                     throw new Error('Signature rejected. Please sign the message to login.');
                 }
 
-                // Stage 8: Authentication - FIXED: Send all multichain data
+                // Stage 9: Submit signature with challenge context
                 const authResult = await authenticateWithSignature(
                     address,
                     signature,
-                    nonceData
+                    challengeData,
+                    false
                 );
+
                 if (authResult.token) {
                     localStorage.setItem('jwtToken', authResult.token);
                     window.location.href = 'dashboard';
@@ -2233,6 +2275,71 @@
                 console.error('Web3 flow error:', err);
                 showConnectionError(err.message);
             }
+        }
+
+        // =============================================
+        // FETCH CHALLENGE FROM BACKEND - NO FRONTEND MESSAGE GENERATION
+        // =============================================
+        async function fetchChallengeFromBackend(address, chainId, isSignup = false) {
+            try {
+                const params = new URLSearchParams({
+                    walletAddress: address,
+                    chainId: chainId.toString(),
+                    isSignup: isSignup ? 'true' : 'false',
+                    type: isSignup ? 'signup' : 'login'
+                });
+
+                const response = await fetch(
+                    `${BACKEND_BASE}/api/web3/nonce?${params.toString()}`
+                );
+
+                const data = await response.json();
+
+                if (data.status === 'fail') {
+                    throw new Error(data.message || 'Failed to fetch authentication challenge.');
+                }
+
+                // The backend returns the complete challenge including the exact message
+                return data.data;
+            } catch (err) {
+                console.error('Challenge fetch error:', err);
+                throw err;
+            }
+        }
+
+        // =============================================
+        // AUTHENTICATE WITH SIGNATURE - Uses backend challenge
+        // =============================================
+        async function authenticateWithSignature(address, signature, challengeData, isSignup = false) {
+            // Build the payload using the challenge data from backend
+            const payload = {
+                walletAddress: address.toLowerCase(),
+                signature: signature,
+                nonce: challengeData.nonce,
+                chainId: challengeData.chainId || connectionManager.chainId,
+                isSignup: isSignup,
+                walletType: connectionManager.walletType,
+                // Include multichain data if available
+                walletConnect: Object.keys(connectionManager.accountsByChain).length > 0 ? {
+                    sessionTopic: connectionManager.sessionTopic,
+                    approvedChains: connectionManager.approvedChains,
+                    accountsByChain: connectionManager.accountsByChain
+                } : undefined
+            };
+
+            const response = await fetch(`${BACKEND_BASE}/api/web3/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await response.json();
+
+            if (data.status === 'fail') {
+                throw new Error(data.message || 'Verification failed.');
+            }
+
+            return data.data;
         }
 
         // =============================================
@@ -2904,69 +3011,10 @@
         }
 
         // =============================================
-        // NONCE & SIWE
+        // NONCE & SIWE - REMOVED: Backend owns the challenge
         // =============================================
-        async function fetchNonce(address) {
-            const response = await fetch(
-                `${BACKEND_BASE}/api/web3/nonce?walletAddress=${address}&type=login&isSignup=false`
-            );
-            const data = await response.json();
-            if (data.status === 'fail') throw new Error(data.message || 'Failed to fetch nonce.');
-            return data.data;
-        }
-
-        function buildSIWEMessage(address, nonceData, chainId) {
-            const domain = nonceData.domain || window.location.host;
-            const uri = nonceData.uri || window.location.origin;
-            const statement = nonceData.statement || 'Sign in to BitHash Capital';
-            const issuedAt = nonceData.issuedAt || new Date().toISOString();
-            const expiration = nonceData.expiration || new Date(Date.now() + 3600000).toISOString();
-            const currentChainId = chainId || connectionManager.chainId || 1;
-
-            return `${domain} wants you to sign in with your Ethereum account:\n` +
-                `${address}\n\n` +
-                `${statement}\n\n` +
-                `URI: ${uri}\n` +
-                `Version: 1\n` +
-                `Chain ID: ${currentChainId}\n` +
-                `Nonce: ${nonceData.nonce}\n` +
-                `Issued At: ${issuedAt}\n` +
-                `Expiration Time: ${expiration}`;
-        }
-
-        // =============================================
-        // AUTHENTICATION - FIXED: Send all multichain data
-        // =============================================
-        async function authenticateWithSignature(address, signature, nonceData) {
-            // Build the complete multichain payload
-            const payload = {
-                walletAddress: address,
-                signature: signature,
-                nonce: nonceData.nonce,
-                isSignup: false,
-                walletType: connectionManager.walletType,
-                chainId: connectionManager.chainId
-            };
-
-            // If we have multichain data from WalletConnect, include it
-            if (Object.keys(connectionManager.accountsByChain).length > 0 && 
-                connectionManager.approvedChains.length > 0) {
-                payload.walletConnect = {
-                    sessionTopic: connectionManager.sessionTopic,
-                    approvedChains: connectionManager.approvedChains,
-                    accountsByChain: connectionManager.accountsByChain
-                };
-            }
-
-            const response = await fetch(`${BACKEND_BASE}/api/web3/verify`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            if (data.status === 'fail') throw new Error(data.message || 'Verification failed.');
-            return data.data;
-        }
+        // NOTE: fetchNonce and buildSIWEMessage have been REMOVED
+        // The frontend no longer constructs messages
 
         // =============================================
         // UI HELPERS - NULL-SAFE DOM HANDLING
@@ -3011,6 +3059,12 @@
             connectionManager.walletType = null;
             connectionManager.accountsByChain = {};
             connectionManager.approvedChains = [];
+            // Clear challenge context
+            connectionManager.activeChallenge = null;
+            connectionManager.challengeAddress = null;
+            connectionManager.challengeChainId = null;
+            connectionManager.challengeNonce = null;
+            connectionManager.challengeMessage = null;
             
             document.getElementById('web3-connection-bar').classList.remove('active');
             document.getElementById('web3-status').classList.remove('active');
