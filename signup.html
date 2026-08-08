@@ -2627,1288 +2627,1024 @@
   </script>
 
   <script>
-    // ============================================================
-    // EXACT WEB3 JAVASCRIPT FROM LOGIN.HTML - COPIED VERBATIM
-    // With isSignup=true added to all relevant API calls
-    // ============================================================
 
-    // =============================================
-    // GLOBAL CONFIGURATION
-    // =============================================
-    const WALLETCONNECT_PROJECT_ID = '3f054c15e97b05dda5a4dcfd652bc753';
-    const WALLETCONNECT_RELAY_URL = 'wss://relay.walletconnect.com';
-    const BACKEND_BASE = 'https://bithash-backend-ycuf.onrender.com';
 
-    // =============================================
-    // GLOBAL STATE (Connection Manager)
-    // =============================================
-    const connectionManager = {
-      walletType: null,
-      provider: null,
-      address: null,
-      chainId: null,
-      session: null,
-      connected: false,
-      signClient: null,
-    };
 
-    let wcInitPromise = null;
-    let wcInitializationStarted = false;
-    let isConnecting = false;
-    let currentAuthMethod = 'form';
 
-    // EIP-6963 state
-    const discoveredProviders = [];
-    let eip6963Initialized = false;
 
-    // OTP state
-    let otpTimer, resendTimer, currentUserEmail = '',
-      currentTempToken = '',
-      lastOtpRequestTime = 0;
-    const OTP_COOLDOWN_PERIOD = 60000;
 
-    // Signup cooldown
-    let lastSignupAttempt = 0;
-    const SIGNUP_COOLDOWN = 5000;
-    let lastGoogleSignIn = 0;
-    const GOOGLE_SIGNIN_COOLDOWN = 5000;
+     // ============================================================
+        // INSTITUTIONAL-GRADE WEB3 AUTHENTICATION FLOW
+        // STAGE-BASED ARCHITECTURE: WALLET ROUTER → PLATFORM DETECTION
+        // → CONNECTIVITY → VALIDATION → NONCE → SIWE → SIGN → AUTH
+        // ============================================================
 
-    // Web3 signup state
-    let web3WalletAddress = null;
-    let web3WalletType = null;
-    let web3Provider = null;
-    let web3Nonce = null;
-    let web3Message = null;
-    let web3Signature = null;
+        // =============================================
+        // GLOBAL CONFIGURATION - MATCHES DASHBOARD
+        // =============================================
+        const WALLETCONNECT_PROJECT_ID = '3f054c15e97b05dda5a4dcfd652bc753';
+        const WALLETCONNECT_RELAY_URL = 'wss://relay.walletconnect.com';
+        const BACKEND_BASE = 'https://bithash-backend-ycuf.onrender.com';
 
-    // =============================================
-    // 1. WALLET ROUTER - Single entry point
-    // =============================================
-    function connectWallet(walletType) {
-      if (isConnecting) return;
-      isConnecting = true;
-      resetWalletUI(walletType);
-      executeWalletFlow(walletType).finally(() => {
-        isConnecting = false;
-      });
-    }
-
-    // =============================================
-    // 2. PLATFORM DETECTION
-    // =============================================
-    function detectPlatform() {
-      const ua = navigator.userAgent;
-      if (/Android/i.test(ua)) return { type: 'android', isMobile: true };
-      if (/iPhone|iPad|iPod/i.test(ua)) return { type: 'ios', isMobile: true };
-      return { type: 'desktop', isMobile: false };
-    }
-
-    // =============================================
-    // 3. STAGE-BASED EXECUTION
-    // =============================================
-    async function executeWalletFlow(walletType) {
-      const statusDiv = document.getElementById('web3-status');
-      statusDiv.classList.remove('active');
-      document.getElementById('web3-connection-bar').classList.remove('active');
-      document.getElementById('wc-mobile-status').classList.remove('active');
-
-      try {
-        // Stage 1: Platform Detection
-        const platform = detectPlatform();
-        console.log(`[Stage 1] Platform: ${platform.type}`);
-
-        // Stage 2: Wallet Connectivity
-        let provider = null;
-        let session = null;
-
-        if (platform.isMobile) {
-          const result = await connectMobileWallet(walletType);
-          provider = result.provider;
-          session = result.session;
-        } else {
-          const result = await connectDesktopWallet(walletType);
-          provider = result.provider;
-          session = result.session;
-        }
-
-        if (!provider) {
-          throw new Error('No provider available for the selected wallet.');
-        }
-
-        // Stage 3: Connection Manager - store state
-        connectionManager.walletType = walletType;
-        connectionManager.provider = provider;
-        connectionManager.session = session;
-        connectionManager.connected = true;
-
-        // Stage 4: Account Validation
-        let accounts = [];
-        let chainId = null;
-        try {
-          accounts = await provider.request({ method: 'eth_requestAccounts' });
-          chainId = await provider.request({ method: 'eth_chainId' });
-        } catch (err) {
-          throw new Error('Failed to get account/chain: ' + err.message);
-        }
-
-        if (!accounts || accounts.length === 0) {
-          throw new Error('No accounts returned from wallet.');
-        }
-
-        const address = accounts[0];
-        connectionManager.address = address;
-        connectionManager.chainId = parseInt(chainId, 16);
-
-        // Validate network (only Ethereum Mainnet for now)
-        if (connectionManager.chainId !== 1) {
-          try {
-            await provider.request({
-              method: 'wallet_switchEthereumChain',
-              params: [{ chainId: '0x1' }],
-            });
-            connectionManager.chainId = 1;
-          } catch (switchErr) {
-            throw new Error('Unsupported network. Please switch to Ethereum Mainnet.');
-          }
-        }
-
-        updateUIAfterConnection(address, walletType);
-
-        // Store web3 wallet info for signup
-        web3WalletAddress = address;
-        web3WalletType = walletType;
-        web3Provider = provider;
-
-        // Stage 5: Check if user exists (with isSignup=true)
-        const checkResult = await checkUserExists(address);
-        if (checkResult.exists) {
-          const statusDiv = document.getElementById('web3-status');
-          const authProvider = checkResult.user?.authProvider || 'unknown';
-          let message = '';
-          if (authProvider === 'google') {
-            message = 'This wallet is linked to a Google account. Please log in using Google.';
-          } else if (authProvider === 'email') {
-            message = 'This wallet is linked to an email account. Please log in using email.';
-          } else {
-            const greeting = checkResult.greeting || 'Hello';
-            const userName = checkResult.user?.firstName || 'User';
-            message = `${greeting} ${userName}! Wallet already registered. Please log in.`;
-          }
-          statusDiv.innerHTML =
-            `<i class="fas fa-info-circle" style="color: var(--warning);"></i> ${message}`;
-          statusDiv.style.borderColor = 'var(--warning)';
-          statusDiv.style.color = 'var(--warning)';
-          statusDiv.classList.add('active');
-          setTimeout(() => {
-            window.location.href = 'login';
-          }, 3000);
-          return;
-        }
-
-        // Stage 6: Show Web3 signup popup with form
-        showWeb3SignupPopup(address);
-
-      } catch (err) {
-        console.error('Web3 flow error:', err);
-        showConnectionError(err.message);
-      }
-    }
-
-    // =============================================
-    // 4. CHECK USER EXISTS (with isSignup=true)
-    // =============================================
-    async function checkUserExists(address) {
-      try {
-        const timezoneOffset = new Date().getTimezoneOffset();
-        const response = await fetch(
-          `${BACKEND_BASE}/api/web3/check-user?walletAddress=${address}&timezoneOffset=${timezoneOffset}&isSignup=true`
-        );
-        const data = await response.json();
-        return {
-          exists: data.data?.exists || false,
-          user: data.data?.user || null,
-          greeting: data.data?.greeting || 'Hello'
+        // =============================================
+        // GLOBAL STATE (Connection Manager)
+        // =============================================
+        const connectionManager = {
+            walletType: null,
+            provider: null,
+            address: null,
+            chainId: null,
+            session: null,
+            connected: false,
+            signClient: null,
         };
-      } catch (err) {
-        console.error('Error checking user:', err);
-        return { exists: false, user: null, greeting: 'Hello' };
-      }
-    }
 
-    // =============================================
-    // CONNECT DESKTOP WALLET (EIP-6963)
-    // =============================================
-    async function connectDesktopWallet(walletType) {
-      if (!eip6963Initialized) {
-        initializeEIP6963();
-        await new Promise(r => setTimeout(r, 300));
-      }
+        let wcInitPromise = null;
+        let wcInitializationStarted = false;
+        let isConnecting = false;
+        let currentAuthMethod = 'form';
 
-      const rdnsMap = {
-        'metamask': 'io.metamask',
-        'trust': 'com.trustwallet.app',
-        'phantom': 'app.phantom',
-        'rainbow': 'me.rainbow'
-      };
-      const targetRdns = rdnsMap[walletType];
-      if (!targetRdns) throw new Error('Unknown wallet type.');
+        // EIP-6963 state
+        const discoveredProviders = [];
+        let eip6963Initialized = false;
 
-      let providerInfo = null;
-      for (const p of discoveredProviders) {
-        if (p.info.rdns === targetRdns) {
-          providerInfo = p;
-          break;
-        }
-      }
-
-      if (!providerInfo && window.ethereum) {
-        const isTarget =
-          (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
-          (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) ||
-          (targetRdns === 'app.phantom' && window.ethereum.isPhantom) ||
-          (targetRdns === 'me.rainbow' && window.ethereum.isRainbow);
-        if (isTarget) {
-          providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
-        }
-      }
-
-      if (!providerInfo) {
-        showConnectionError(`${walletType} is not installed. Please install it and try again.`);
-        throw new Error(`${walletType} is not installed.`);
-      }
-
-      const provider = providerInfo.provider;
-      return { provider, session: null };
-    }
-
-    // =============================================
-    // CONNECT MOBILE WALLET (Deep Link + WalletConnect)
-    // =============================================
-    async function connectMobileWallet(walletType) {
-      const wcStatus = document.getElementById('wc-mobile-status');
-      wcStatus.classList.add('active');
-      document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
-
-      const rdnsMap = {
-        'metamask': 'io.metamask',
-        'trust': 'com.trustwallet.app',
-        'phantom': 'app.phantom',
-        'rainbow': 'me.rainbow'
-      };
-      const targetRdns = rdnsMap[walletType];
-      let providerInfo = null;
-
-      if (eip6963Initialized) {
-        for (const p of discoveredProviders) {
-          if (p.info.rdns === targetRdns) {
-            providerInfo = p;
-            break;
-          }
-        }
-      }
-      if (!providerInfo && window.ethereum) {
-        const isTarget =
-          (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
-          (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) ||
-          (targetRdns === 'app.phantom' && window.ethereum.isPhantom) ||
-          (targetRdns === 'me.rainbow' && window.ethereum.isRainbow);
-        if (isTarget) {
-          providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
-        }
-      }
-
-      if (providerInfo) {
-        document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
-        const provider = providerInfo.provider;
-        try {
-          await provider.request({ method: 'eth_requestAccounts' });
-          return { provider, session: null };
-        } catch (err) {
-          console.log('Provider request failed, falling back to deep link:', err.message);
-        }
-      }
-
-      document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
-
-      const wcUri = await generateWalletConnectURI(walletType);
-      if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
-
-      const deepLink = openDeepLink(walletType, wcUri);
-
-      // FIXED: Use a non-navigating approach to launch the wallet app
-      launchWalletApp(deepLink, walletType);
-
-      document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
-
-      const session = await waitForWalletConnectSession(wcUri);
-      if (session && session.accounts && session.accounts.length > 0) {
-        return { provider: createProviderFromSession(session), session };
-      }
-
-      throw new Error('No accounts returned from wallet.');
-    }
-
-    // =============================================
-    // FIXED: launchWalletApp - DOES NOT navigate the browser
-    // This is the EXACT same function as login.html
-    // =============================================
-    function launchWalletApp(deepLinkUrl, walletType) {
-      // Clear any previous timer
-      if (window._walletLaunchTimer) {
-        clearTimeout(window._walletLaunchTimer);
-      }
-
-      // Use window.open with _blank - this does NOT navigate the current page
-      const newWindow = window.open(deepLinkUrl, '_blank');
-
-      // If window.open fails (e.g., popup blocked), try using an iframe
-      if (!newWindow) {
-        try {
-          const iframe = document.createElement('iframe');
-          iframe.style.display = 'none';
-          iframe.src = deepLinkUrl;
-          document.body.appendChild(iframe);
-          setTimeout(() => {
-            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-          }, 3000);
-        } catch (e) {
-          // Last resort: use location.replace but this navigates away
-          // We only use this as a final fallback
-          console.warn('Unable to launch wallet app without navigating. Using location.replace.');
-          window.location.replace(deepLinkUrl);
-        }
-      }
-
-      // Set a timeout to show a retry option if the app doesn't open
-      window._walletLaunchTimer = setTimeout(() => {
-        const statusText = document.getElementById('wc-status-text');
-        if (statusText && statusText.textContent.includes('Waiting for approval')) {
-          statusText.textContent = 'Still waiting for approval. If the wallet didn\'t open, try again.';
-          const retrySmall = document.querySelector('.wc-mobile-status small');
-          if (retrySmall) {
-            retrySmall.innerHTML = '<button class="retry-btn" onclick="retryWalletConnect()">Click here to retry</button>';
-          }
-        }
-      }, 5000);
-    }
-
-    // =============================================
-    // WALLETCONNECT HELPERS - MATCHES LOGIN
-    // =============================================
-    async function generateWalletConnectURI(walletType) {
-      if (!wcInitPromise) {
-        wcInitPromise = silentlyInitWalletConnect();
-      }
-      await wcInitPromise;
-
-      if (!connectionManager.signClient) {
-        throw new Error('WalletConnect client not available.');
-      }
-
-      const connectParams = {
-        requiredNamespaces: {
-          eip155: {
-            methods: ['personal_sign', 'eth_sign', 'eth_signTypedData_v4', 'eth_requestAccounts'],
-            chains: ['eip155:1'],
-            events: ['chainChanged', 'accountsChanged']
-          }
-        }
-      };
-
-      const { uri, approval } = await connectionManager.signClient.connect(connectParams);
-      if (!uri) throw new Error('Failed to generate pairing URI.');
-      window._wcApproval = approval;
-      return uri;
-    }
-
-    async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('WalletConnect session timeout. Please try again.'));
-        }, timeoutMs);
-
-        const approvalFn = window._wcApproval;
-        if (typeof approvalFn !== 'function') {
-          clearTimeout(timeout);
-          reject(new Error('No active approval session found'));
-          return;
-        }
-
-        try {
-          const approvalPromise = approvalFn();
-          approvalPromise.then(session => {
-            clearTimeout(timeout);
-            if (session && session.namespaces) {
-              const ns = session.namespaces.eip155;
-              if (ns && ns.accounts && ns.accounts.length > 0) {
-                const account = ns.accounts[0];
-                const address = account.split(':')[2];
-                resolve({ accounts: [address], chainId: parseInt(account.split(':')[1]), session });
-                return;
-              }
-            }
-            reject(new Error('No accounts found in session'));
-          }).catch(err => {
-            clearTimeout(timeout);
-            reject(err);
-          });
-        } catch (err) {
-          clearTimeout(timeout);
-          reject(err);
-        }
-      });
-    }
-
-    function createProviderFromSession(session) {
-      const address = session.accounts[0];
-      return {
-        request: async ({ method, params }) => {
-          if (method === 'eth_requestAccounts') {
-            return [address];
-          }
-          if (method === 'personal_sign') {
-            const message = params[0];
-            const from = params[1];
-            const result = await connectionManager.signClient.request({
-              topic: session.session.topic,
-              chainId: 'eip155:1',
-              request: {
-                method: 'personal_sign',
-                params: [message, from]
-              }
+        // =============================================
+        // 1. WALLET ROUTER - Single entry point
+        // =============================================
+        function connectWallet(walletType) {
+            if (isConnecting) return;
+            isConnecting = true;
+            resetWalletUI(walletType);
+            executeWalletFlow(walletType).finally(() => {
+                isConnecting = false;
             });
-            return result;
-          }
-          if (method === 'eth_chainId') {
-            return '0x1';
-          }
-          throw new Error(`Method ${method} not supported via WalletConnect transport.`);
-        }
-      };
-    }
-
-    async function silentlyInitWalletConnect() {
-      if (wcInitializationStarted && wcInitPromise) return wcInitPromise;
-      wcInitializationStarted = true;
-
-      try {
-        await waitForWalletConnectScript();
-
-        if (typeof window.WalletConnectSignClient === 'undefined') {
-          throw new Error('WalletConnect SDK not available.');
         }
 
-        let SignClient = window.WalletConnectSignClient;
-        if (SignClient.default) {
-          SignClient = SignClient.default;
+        // =============================================
+        // 2. PLATFORM DETECTION
+        // =============================================
+        function detectPlatform() {
+            const ua = navigator.userAgent;
+            if (/Android/i.test(ua)) return { type: 'android', isMobile: true };
+            if (/iPhone|iPad|iPod/i.test(ua)) return { type: 'ios', isMobile: true };
+            return { type: 'desktop', isMobile: false };
         }
 
-        if (typeof SignClient !== 'function' && typeof SignClient.init !== 'function') {
-          if (window.WalletConnectSignClient.init) {
-            const config = {
-              projectId: WALLETCONNECT_PROJECT_ID,
-              relayUrl: WALLETCONNECT_RELAY_URL,
-              metadata: {
-                name: 'BitHash Capital',
-                description: 'BitHash Cloud Mining Platform',
-                url: window.location.origin,
-                icons: [`${window.location.origin}/icon.png`]
-              }
-            };
-            const client = await window.WalletConnectSignClient.init(config);
-            connectionManager.signClient = client;
+        // =============================================
+        // 3. STAGE-BASED EXECUTION
+        // =============================================
+        async function executeWalletFlow(walletType) {
+            const statusDiv = document.getElementById('web3-status');
+            statusDiv.classList.remove('active');
+            document.getElementById('web3-connection-bar').classList.remove('active');
+            document.getElementById('wc-mobile-status').classList.remove('active');
+
             try {
-              const pairings = client.core.pairing.getPairings();
-              if (pairings && pairings.length > 0) {
-                await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
-              }
-            } catch (e) { /* ignore */ }
-            return client;
-          }
-          throw new Error('Cannot find WalletConnectSignClient init method.');
+                // Stage 1: Platform Detection
+                const platform = detectPlatform();
+                console.log(`[Stage 1] Platform: ${platform.type}`);
+
+                // Stage 2: Wallet Connectivity
+                let provider = null;
+                let session = null;
+
+                if (platform.isMobile) {
+                    const result = await connectMobileWallet(walletType);
+                    provider = result.provider;
+                    session = result.session;
+                } else {
+                    const result = await connectDesktopWallet(walletType);
+                    provider = result.provider;
+                    session = result.session;
+                }
+
+                if (!provider) {
+                    throw new Error('No provider available for the selected wallet.');
+                }
+
+                // Stage 3: Connection Manager - store state
+                connectionManager.walletType = walletType;
+                connectionManager.provider = provider;
+                connectionManager.session = session;
+                connectionManager.connected = true;
+
+                // Stage 4: Account Validation
+                let accounts = [];
+                let chainId = null;
+                try {
+                    accounts = await provider.request({ method: 'eth_requestAccounts' });
+                    chainId = await provider.request({ method: 'eth_chainId' });
+                } catch (err) {
+                    throw new Error('Failed to get account/chain: ' + err.message);
+                }
+
+                if (!accounts || accounts.length === 0) {
+                    throw new Error('No accounts returned from wallet.');
+                }
+
+                const address = accounts[0];
+                connectionManager.address = address;
+                connectionManager.chainId = parseInt(chainId, 16);
+
+                // Validate network (only Ethereum Mainnet for now)
+                if (connectionManager.chainId !== 1) {
+                    try {
+                        await provider.request({
+                            method: 'wallet_switchEthereumChain',
+                            params: [{ chainId: '0x1' }],
+                        });
+                        connectionManager.chainId = 1;
+                    } catch (switchErr) {
+                        throw new Error('Unsupported network. Please switch to Ethereum Mainnet.');
+                    }
+                }
+
+                updateUIAfterConnection(address, walletType);
+
+                // Stage 5: Nonce Request - always use isSignup=false for login page
+                const nonceData = await fetchNonce(address);
+                if (!nonceData) throw new Error('Failed to fetch nonce.');
+
+                // Stage 6: Build SIWE Message
+                const siweMessage = buildSIWEMessage(address, nonceData);
+
+                // Stage 7: Request Wallet Signature
+                let signature;
+                try {
+                    signature = await provider.request({
+                        method: 'personal_sign',
+                        params: [siweMessage, address]
+                    });
+                } catch (signErr) {
+                    throw new Error('Signature rejected. Please sign the message to login.');
+                }
+
+                // Stage 8: Authentication
+                const authResult = await authenticateWithSignature(address, signature, nonceData);
+                if (authResult.token) {
+                    localStorage.setItem('jwtToken', authResult.token);
+                    window.location.href = 'dashboard';
+                } else if (authResult.needsOtp) {
+                    currentAuthMethod = 'web3';
+                    showTwoStepModal(authResult.email, authResult.tempToken);
+                } else {
+                    throw new Error('Authentication failed: no token or OTP flow.');
+                }
+
+            } catch (err) {
+                console.error('Web3 flow error:', err);
+                showConnectionError(err.message);
+            }
         }
 
-        const config = {
-          projectId: WALLETCONNECT_PROJECT_ID,
-          relayUrl: WALLETCONNECT_RELAY_URL,
-          metadata: {
-            name: 'BitHash Capital',
-            description: 'BitHash Cloud Mining Platform',
-            url: window.location.origin,
-            icons: [`${window.location.origin}/icon.png`]
-          }
-        };
+        // =============================================
+        // CONNECT DESKTOP WALLET (EIP-6963)
+        // =============================================
+        async function connectDesktopWallet(walletType) {
+            if (!eip6963Initialized) {
+                initializeEIP6963();
+                await new Promise(r => setTimeout(r, 300));
+            }
 
-        let client;
-        if (typeof SignClient === 'function') {
-          client = await SignClient.init(config);
-        } else if (typeof SignClient.init === 'function') {
-          client = await SignClient.init(config);
-        } else {
-          throw new Error('WalletConnectSignClient is not in a recognizable format.');
+            const rdnsMap = {
+                'metamask': 'io.metamask',
+                'trust': 'com.trustwallet.app',
+                'phantom': 'app.phantom',
+                'rainbow': 'me.rainbow'
+            };
+            const targetRdns = rdnsMap[walletType];
+            if (!targetRdns) throw new Error('Unknown wallet type.');
+
+            let providerInfo = null;
+            for (const p of discoveredProviders) {
+                if (p.info.rdns === targetRdns) {
+                    providerInfo = p;
+                    break;
+                }
+            }
+
+            if (!providerInfo && window.ethereum) {
+                const isTarget =
+                    (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
+                    (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) ||
+                    (targetRdns === 'app.phantom' && window.ethereum.isPhantom) ||
+                    (targetRdns === 'me.rainbow' && window.ethereum.isRainbow);
+                if (isTarget) {
+                    providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
+                }
+            }
+
+            // Desktop: show an informational message instead of auto-navigating
+            if (!providerInfo) {
+                showConnectionError(`${walletType} is not installed. Please install it and try again.`);
+                throw new Error(`${walletType} is not installed.`);
+            }
+
+            const provider = providerInfo.provider;
+            return { provider, session: null };
         }
 
-        connectionManager.signClient = client;
+        // =============================================
+        // CONNECT MOBILE WALLET (Deep Link + WalletConnect)
+        // =============================================
+        async function connectMobileWallet(walletType) {
+            const wcStatus = document.getElementById('wc-mobile-status');
+            wcStatus.classList.add('active');
+            document.getElementById('wc-status-text').textContent = 'Generating secure connection...';
 
-        try {
-          const pairings = client.core.pairing.getPairings();
-          if (pairings && pairings.length > 0) {
-            await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
-          }
-        } catch (e) { /* ignore */ }
+            const rdnsMap = {
+                'metamask': 'io.metamask',
+                'trust': 'com.trustwallet.app',
+                'phantom': 'app.phantom',
+                'rainbow': 'me.rainbow'
+            };
+            const targetRdns = rdnsMap[walletType];
+            let providerInfo = null;
 
-        return client;
-      } catch (err) {
-        console.error('WalletConnect init error:', err);
-        wcInitializationStarted = false;
-        wcInitPromise = null;
-        throw err;
-      }
-    }
+            if (eip6963Initialized) {
+                for (const p of discoveredProviders) {
+                    if (p.info.rdns === targetRdns) {
+                        providerInfo = p;
+                        break;
+                    }
+                }
+            }
+            if (!providerInfo && window.ethereum) {
+                const isTarget =
+                    (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
+                    (targetRdns === 'com.trustwallet.app' && (window.ethereum.isTrust || window.ethereum.isTrustWallet)) ||
+                    (targetRdns === 'app.phantom' && window.ethereum.isPhantom) ||
+                    (targetRdns === 'me.rainbow' && window.ethereum.isRainbow);
+                if (isTarget) {
+                    providerInfo = { provider: window.ethereum, info: { rdns: targetRdns } };
+                }
+            }
 
-    function waitForWalletConnectScript() {
-      return new Promise((resolve, reject) => {
-        if (typeof window.WalletConnectSignClient !== 'undefined' &&
-          (window.WalletConnectSignClient.default ||
-            window.WalletConnectSignClient.init ||
-            typeof window.WalletConnectSignClient === 'function')) {
-          resolve();
-          return;
+            if (providerInfo) {
+                document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
+                const provider = providerInfo.provider;
+                try {
+                    await provider.request({ method: 'eth_requestAccounts' });
+                    return { provider, session: null };
+                } catch (err) {
+                    console.log('Provider request failed, falling back to deep link:', err.message);
+                }
+            }
+
+            document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
+
+            const wcUri = await generateWalletConnectURI(walletType);
+            if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
+
+            const deepLink = openDeepLink(walletType, wcUri);
+
+            // FIXED: Use a non-navigating approach to launch the wallet app
+            launchWalletApp(deepLink, walletType);
+
+            document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
+
+            const session = await waitForWalletConnectSession(wcUri);
+            if (session && session.accounts && session.accounts.length > 0) {
+                return { provider: createProviderFromSession(session), session };
+            }
+
+            throw new Error('No accounts returned from wallet.');
         }
 
-        console.log('⏳ Waiting for WalletConnect (local bundle) to load...');
+        // =============================================
+        // FIXED: launchWalletApp - DOES NOT navigate the browser
+        // =============================================
+        function launchWalletApp(deepLinkUrl, walletType) {
+            // Clear any previous timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
 
-        let attempts = 0;
-        const maxAttempts = 60;
-        const interval = setInterval(() => {
-          attempts++;
-          if (typeof window.WalletConnectSignClient !== 'undefined' &&
-            (window.WalletConnectSignClient.default ||
-              window.WalletConnectSignClient.init ||
-              typeof window.WalletConnectSignClient === 'function')) {
-            clearInterval(interval);
-            console.log('✅ WalletConnect (local bundle) detected');
-            resolve();
-            return;
-          }
-          if (attempts >= maxAttempts) {
-            clearInterval(interval);
-            reject(new Error('WalletConnect (local bundle) load timeout'));
-          }
-        }, 200);
+            // Use window.open with a short timeout - this does NOT navigate the current page
+            const newWindow = window.open(deepLinkUrl, '_blank');
+            
+            // If window.open fails (e.g., popup blocked), try using an iframe or location.replace
+            if (!newWindow) {
+                // Use location.replace as a fallback - but this still navigates away
+                // Use a hidden iframe approach instead
+                try {
+                    const iframe = document.createElement('iframe');
+                    iframe.style.display = 'none';
+                    iframe.src = deepLinkUrl;
+                    document.body.appendChild(iframe);
+                    setTimeout(() => {
+                        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                    }, 3000);
+                } catch (e) {
+                    // Last resort: use location.replace but with a note that this may navigate away
+                    console.warn('Unable to launch wallet app without navigating. Using location.replace.');
+                    // Use location.replace - this will navigate away but at least it's not the current page
+                    // We use replace so the user can use back button to return
+                    window.location.replace(deepLinkUrl);
+                }
+            }
 
-        setTimeout(() => {
-          clearInterval(interval);
-          reject(new Error('WalletConnect (local bundle) load timeout (15s)'));
-        }, 15000);
-      });
-    }
-
-    // =============================================
-    // EIP-6963 INITIALIZATION
-    // =============================================
-    function initializeEIP6963() {
-      if (eip6963Initialized) return;
-      window.addEventListener('eip6963:announceProvider', (event) => {
-        const detail = event.detail;
-        if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
-          discoveredProviders.push(detail);
-          console.log(`🔍 Discovered provider: ${detail.info.name} (${detail.info.rdns})`);
-        }
-      });
-      window.dispatchEvent(new Event('eip6963:requestProvider'));
-      eip6963Initialized = true;
-    }
-
-    // =============================================
-    // DEEP LINK HELPERS
-    // =============================================
-    function openDeepLink(walletType, uri) {
-      const os = getMobileOS();
-      const encodedUri = encodeURIComponent(uri);
-      const links = {
-        'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
-        'trust': os === 'android' ? `trust://wc?uri=${encodedUri}` :
-          `https://link.trustwallet.com/wc?uri=${encodedUri}`,
-        'phantom': os === 'android' ? `phantom://v1/connect?uri=${encodedUri}` :
-          `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
-        'rainbow': os === 'android' ? `rainbow://wc?uri=${encodedUri}` :
-          `https://rainbow.me/wc?uri=${encodedUri}`
-      };
-      return links[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
-    }
-
-    function getMobileOS() {
-      const ua = navigator.userAgent;
-      if (/Android/i.test(ua)) return 'android';
-      if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
-      return 'desktop';
-    }
-
-    // =============================================
-    // WEB3 SIGNUP POPUP
-    // =============================================
-    function showWeb3SignupPopup(address) {
-      const popup = document.getElementById('web3-popup');
-      document.getElementById('web3-popup-title').textContent = 'Complete Your Profile';
-      document.getElementById('web3-popup-subtitle').textContent =
-        'Please provide your information to create your account with wallet ' +
-        address.substring(0, 6) + '...' + address.substring(address.length - 4);
-      document.getElementById('web3-popup-form-container').style.display = 'block';
-      document.getElementById('web3-popup-loading').classList.remove('active');
-      document.getElementById('web3-popup-status').style.display = 'none';
-      document.getElementById('web3-popup-status').className = 'web3-popup-status';
-      document.getElementById('web3-signup-form').reset();
-      popup.classList.add('active');
-    }
-
-    function closeWeb3Popup() {
-      document.getElementById('web3-popup').classList.remove('active');
-      const submitBtn = document.getElementById('web3-submit-btn');
-      submitBtn.innerHTML =
-        '<span id="web3-submit-text">Create Account</span><span id="web3-submit-spinner" style="display: none;"><i class="fas fa-spinner fa-spin"></i></span>';
-      submitBtn.disabled = false;
-    }
-
-    function selectWeb3AccountType(type) {
-      document.querySelectorAll('.web3-account-type .type-option').forEach(el => el.classList.remove('selected'));
-      document.querySelector(`.web3-account-type .type-option[data-type="${type}"]`).classList.add('selected');
-
-      if (type === 'individual') {
-        document.getElementById('web3-individual-fields').style.display = 'block';
-        document.getElementById('web3-business-fields').style.display = 'none';
-      } else {
-        document.getElementById('web3-individual-fields').style.display = 'none';
-        document.getElementById('web3-business-fields').style.display = 'block';
-      }
-    }
-
-    // =============================================
-    // WEB3 SIGNUP FORM SUBMIT (with isSignup=true)
-    // =============================================
-    document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
-      e.preventDefault();
-
-      const submitBtn = document.getElementById('web3-submit-btn');
-      const submitText = document.getElementById('web3-submit-text');
-      const submitSpinner = document.getElementById('web3-submit-spinner');
-      const statusDiv = document.getElementById('web3-popup-status');
-
-      submitText.style.display = 'none';
-      submitSpinner.style.display = 'inline-block';
-      submitBtn.disabled = true;
-      statusDiv.style.display = 'none';
-      statusDiv.className = 'web3-popup-status';
-
-      try {
-        const accountType = document.querySelector('.web3-account-type .type-option.selected')?.dataset.type || 'individual';
-        let formData;
-
-        if (accountType === 'individual') {
-          const firstName = document.getElementById('web3-first-name').value.trim();
-          const lastName = document.getElementById('web3-last-name').value.trim();
-          const email = document.getElementById('web3-email').value.trim();
-          const city = document.getElementById('web3-city').value.trim();
-
-          if (!firstName || !lastName || !email || !city) {
-            statusDiv.className = 'web3-popup-status error';
-            statusDiv.textContent = 'Please fill in all required fields.';
-            statusDiv.style.display = 'block';
-            submitText.style.display = 'inline-block';
-            submitSpinner.style.display = 'none';
-            submitBtn.disabled = false;
-            return;
-          }
-
-          formData = {
-            firstName,
-            lastName,
-            email,
-            city,
-            accountType: 'individual',
-            walletAddress: web3WalletAddress,
-            walletType: web3WalletType
-          };
-        } else {
-          const orgName = document.getElementById('web3-org-name').value.trim();
-          const role = document.getElementById('web3-role').value.trim();
-          const country = document.getElementById('web3-country').value.trim();
-          const workEmail = document.getElementById('web3-work-email').value.trim();
-          const email = document.getElementById('web3-org-email').value.trim();
-          const city = document.getElementById('web3-org-city').value.trim();
-          const firstName = document.getElementById('web3-org-first-name').value.trim();
-          const lastName = document.getElementById('web3-org-last-name').value.trim();
-
-          if (!orgName || !role || !country || !workEmail || !email || !city || !firstName || !lastName) {
-            statusDiv.className = 'web3-popup-status error';
-            statusDiv.textContent = 'Please fill in all required fields.';
-            statusDiv.style.display = 'block';
-            submitText.style.display = 'inline-block';
-            submitSpinner.style.display = 'none';
-            submitBtn.disabled = false;
-            return;
-          }
-
-          formData = {
-            firstName,
-            lastName,
-            email,
-            city,
-            accountType: 'business',
-            organizationName: orgName,
-            role: role,
-            country: country,
-            workEmail: workEmail,
-            walletAddress: web3WalletAddress,
-            walletType: web3WalletType
-          };
+            // Set a timeout to show a "retry" option if the app doesn't open
+            window._walletLaunchTimer = setTimeout(() => {
+                const statusText = document.getElementById('wc-status-text');
+                if (statusText && statusText.textContent.includes('Waiting for approval')) {
+                    statusText.textContent = 'Still waiting for approval. If the wallet didn\'t open, try again.';
+                    // Show a retry button
+                    const retrySmall = document.querySelector('.wc-mobile-status small');
+                    if (retrySmall) {
+                        retrySmall.innerHTML = '<a href="#" onclick="retryWalletConnect()" style="color: var(--accent);">Click here to retry</a>';
+                    }
+                }
+            }, 5000);
         }
 
-        const urlParams = new URLSearchParams(window.location.search);
-        const referralCode = urlParams.get('ref') || localStorage.getItem('referralCode');
-        if (referralCode) {
-          formData.referralCode = referralCode;
+        // =============================================
+        // WALLETCONNECT HELPERS - MATCHES DASHBOARD
+        // =============================================
+        async function generateWalletConnectURI(walletType) {
+            // Ensure WalletConnect is initialized
+            if (!wcInitPromise) {
+                wcInitPromise = silentlyInitWalletConnect();
+            }
+            await wcInitPromise;
+            
+            if (!connectionManager.signClient) {
+                throw new Error('WalletConnect client not available.');
+            }
+
+            const connectParams = {
+                requiredNamespaces: {
+                    eip155: {
+                        methods: ['personal_sign', 'eth_sign', 'eth_signTypedData_v4', 'eth_requestAccounts'],
+                        chains: ['eip155:1'],
+                        events: ['chainChanged', 'accountsChanged']
+                    }
+                }
+            };
+
+            const { uri, approval } = await connectionManager.signClient.connect(connectParams);
+            if (!uri) throw new Error('Failed to generate pairing URI.');
+            window._wcApproval = approval;
+            return uri;
         }
 
-        const timezoneOffset = new Date().getTimezoneOffset();
+        // =============================================
+        // waitForWalletConnectSession - approval is a function, not a Promise
+        // =============================================
+        async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('WalletConnect session timeout. Please try again.'));
+                }, timeoutMs);
 
-        // 1. GET NONCE - with isSignup=true
-        const nonceResponse = await fetch(
-          `${BACKEND_BASE}/api/web3/nonce?walletAddress=${web3WalletAddress}&type=signup&isSignup=true&accountType=${accountType}&referralCode=${referralCode || ''}&timezoneOffset=${timezoneOffset}`
-        );
-        const nonceData = await nonceResponse.json();
+                const approvalFn = window._wcApproval;
+                if (typeof approvalFn !== 'function') {
+                    clearTimeout(timeout);
+                    reject(new Error('No active approval session found (approval is not a function)'));
+                    return;
+                }
 
-        if (nonceData.status === 'fail') {
-          statusDiv.className = 'web3-popup-status error';
-          if (nonceData.data?.action === 'login_suggested') {
-            const greeting = nonceData.data.greeting || 'Hello';
-            const userName = nonceData.data.userName || 'User';
-            statusDiv.innerHTML = `${greeting} ${userName}! ${nonceData.message} <a href="login" style="color: var(--accent);">Login here</a>`;
-          } else {
-            statusDiv.textContent = nonceData.message || 'Failed to get nonce';
-          }
-          statusDiv.style.display = 'block';
-          submitText.style.display = 'inline-block';
-          submitSpinner.style.display = 'none';
-          submitBtn.disabled = false;
-          return;
+                try {
+                    // Call the approval function - it returns a Promise
+                    const approvalPromise = approvalFn();
+                    
+                    approvalPromise.then(session => {
+                        clearTimeout(timeout);
+                        if (session && session.namespaces) {
+                            const ns = session.namespaces.eip155;
+                            if (ns && ns.accounts && ns.accounts.length > 0) {
+                                const account = ns.accounts[0];
+                                const address = account.split(':')[2];
+                                resolve({ accounts: [address], chainId: parseInt(account.split(':')[1]), session });
+                                return;
+                            }
+                        }
+                        reject(new Error('No accounts found in session'));
+                    }).catch(err => {
+                        clearTimeout(timeout);
+                        reject(err);
+                    });
+                } catch (err) {
+                    clearTimeout(timeout);
+                    reject(err);
+                }
+            });
         }
 
-        web3Nonce = nonceData.data.nonce;
-        web3Message = nonceData.data.message;
-
-        // 2. GET SIGNATURE
-        let provider = web3Provider;
-        if (!provider) {
-          const rdnsMap = {
-            'metamask': 'io.metamask',
-            'trust': 'com.trustwallet.app',
-            'phantom': 'app.phantom',
-            'rainbow': 'me.rainbow'
-          };
-          const targetRdns = rdnsMap[web3WalletType] || 'io.metamask';
-          const providerInfo = discoveredProviders.find(p => p.info.rdns === targetRdns);
-          if (providerInfo) {
-            provider = providerInfo.provider;
-          }
+        function createProviderFromSession(session) {
+            const address = session.accounts[0];
+            return {
+                request: async ({ method, params }) => {
+                    if (method === 'eth_requestAccounts') {
+                        return [address];
+                    }
+                    if (method === 'personal_sign') {
+                        const message = params[0];
+                        const from = params[1];
+                        const result = await connectionManager.signClient.request({
+                            topic: session.session.topic,
+                            chainId: 'eip155:1',
+                            request: {
+                                method: 'personal_sign',
+                                params: [message, from]
+                            }
+                        });
+                        return result;
+                    }
+                    if (method === 'eth_chainId') {
+                        return '0x1';
+                    }
+                    throw new Error(`Method ${method} not supported via WalletConnect transport.`);
+                }
+            };
         }
 
-        if (!provider) {
-          throw new Error('Wallet not connected');
+        async function silentlyInitWalletConnect() {
+            if (wcInitializationStarted && wcInitPromise) return wcInitPromise;
+            wcInitializationStarted = true;
+            
+            try {
+                // Wait for the WalletConnect script to load from local bundle
+                await waitForWalletConnectScript();
+                
+                // Check if the SDK is available
+                if (typeof window.WalletConnectSignClient === 'undefined') {
+                    throw new Error('WalletConnect SDK not available.');
+                }
+
+                // Get the client instance - the local bundle exports differently
+                let SignClient = window.WalletConnectSignClient;
+                
+                // Handle different export patterns
+                if (SignClient.default) {
+                    SignClient = SignClient.default;
+                }
+                
+                // Check if it's a class/constructor
+                if (typeof SignClient !== 'function' && typeof SignClient.init !== 'function') {
+                    // Try to find the init method on the object
+                    if (window.WalletConnectSignClient.init) {
+                        // Some bundles expose init directly on the object
+                        const config = {
+                            projectId: WALLETCONNECT_PROJECT_ID,
+                            relayUrl: WALLETCONNECT_RELAY_URL,
+                            metadata: {
+                                name: 'BitHash Capital',
+                                description: 'BitHash Cloud Mining Platform',
+                                url: window.location.origin,
+                                icons: [`${window.location.origin}/icon.png`]
+                            }
+                        };
+                        const client = await window.WalletConnectSignClient.init(config);
+                        connectionManager.signClient = client;
+                        // Clean up old pairings
+                        try {
+                            const pairings = client.core.pairing.getPairings();
+                            if (pairings && pairings.length > 0) {
+                                await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
+                            }
+                        } catch (e) { /* ignore */ }
+                        return client;
+                    }
+                    throw new Error('Cannot find WalletConnectSignClient init method.');
+                }
+
+                // Use the class constructor with init method
+                const config = {
+                    projectId: WALLETCONNECT_PROJECT_ID,
+                    relayUrl: WALLETCONNECT_RELAY_URL,
+                    metadata: {
+                        name: 'BitHash Capital',
+                        description: 'BitHash Cloud Mining Platform',
+                        url: window.location.origin,
+                        icons: [`${window.location.origin}/icon.png`]
+                    }
+                };
+                
+                let client;
+                if (typeof SignClient === 'function') {
+                    // It's a class with an init method
+                    client = await SignClient.init(config);
+                } else if (typeof SignClient.init === 'function') {
+                    // It's an object with an init method
+                    client = await SignClient.init(config);
+                } else {
+                    throw new Error('WalletConnectSignClient is not in a recognizable format.');
+                }
+
+                connectionManager.signClient = client;
+                
+                // Clean up old pairings
+                try {
+                    const pairings = client.core.pairing.getPairings();
+                    if (pairings && pairings.length > 0) {
+                        await Promise.all(pairings.map(p => client.core.pairing.disconnect({ topic: p.topic })));
+                    }
+                } catch (e) { /* ignore */ }
+                
+                return client;
+            } catch (err) {
+                console.error('WalletConnect init error:', err);
+                wcInitializationStarted = false;
+                wcInitPromise = null;
+                throw err;
+            }
         }
 
-        let signature;
-        try {
-          signature = await provider.request({
-            method: 'personal_sign',
-            params: [web3Message, web3WalletAddress]
-          });
-        } catch (signErr) {
-          statusDiv.className = 'web3-popup-status error';
-          statusDiv.textContent = 'Signature rejected. Please sign the message to continue.';
-          statusDiv.style.display = 'block';
-          submitText.style.display = 'inline-block';
-          submitSpinner.style.display = 'none';
-          submitBtn.disabled = false;
-          return;
+        function waitForWalletConnectScript() {
+            return new Promise((resolve, reject) => {
+                // Check if already available
+                if (typeof window.WalletConnectSignClient !== 'undefined' && 
+                    (window.WalletConnectSignClient.default || 
+                     window.WalletConnectSignClient.init || 
+                     typeof window.WalletConnectSignClient === 'function')) {
+                    resolve();
+                    return;
+                }
+                
+                console.log('⏳ Waiting for WalletConnect (local bundle) to load...');
+                
+                let attempts = 0;
+                const maxAttempts = 60;
+                const interval = setInterval(() => {
+                    attempts++;
+                    if (typeof window.WalletConnectSignClient !== 'undefined' && 
+                        (window.WalletConnectSignClient.default || 
+                         window.WalletConnectSignClient.init || 
+                         typeof window.WalletConnectSignClient === 'function')) {
+                        clearInterval(interval);
+                        console.log('✅ WalletConnect (local bundle) detected');
+                        resolve();
+                        return;
+                    }
+                    if (attempts >= maxAttempts) {
+                        clearInterval(interval);
+                        reject(new Error('WalletConnect (local bundle) load timeout'));
+                    }
+                }, 200);
+                
+                setTimeout(() => {
+                    clearInterval(interval);
+                    reject(new Error('WalletConnect (local bundle) load timeout (15s)'));
+                }, 15000);
+            });
         }
 
-        web3Signature = signature;
+        // =============================================
+        // EIP-6963 INITIALIZATION
+        // =============================================
+        function initializeEIP6963() {
+            if (eip6963Initialized) return;
+            window.addEventListener('eip6963:announceProvider', (event) => {
+                const detail = event.detail;
+                if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
+                    discoveredProviders.push(detail);
+                    console.log(`🔍 Discovered provider: ${detail.info.name} (${detail.info.rdns})`);
+                }
+            });
+            window.dispatchEvent(new Event('eip6963:requestProvider'));
+            eip6963Initialized = true;
+        }
 
-        // 3. VERIFY SIGNATURE - with isSignup=true
-        const verifyResponse = await fetch(`${BACKEND_BASE}/api/web3/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            walletAddress: web3WalletAddress,
-            signature: signature,
-            nonce: web3Nonce,
-            isSignup: true,
-            accountType: accountType,
-            walletType: web3WalletType,
-            referralCode: referralCode || null,
-            timezoneOffset: timezoneOffset
-          })
+        // =============================================
+        // DEEP LINK HELPERS - These generate URLs but DO NOT navigate
+        // =============================================
+        function openDeepLink(walletType, uri) {
+            const os = getMobileOS();
+            const encodedUri = encodeURIComponent(uri);
+            const links = {
+                'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
+                'trust': os === 'android' ? `trust://wc?uri=${encodedUri}` :
+                    `https://link.trustwallet.com/wc?uri=${encodedUri}`,
+                'phantom': os === 'android' ? `phantom://v1/connect?uri=${encodedUri}` :
+                    `https://phantom.app/ul/browse/connect?uri=${encodedUri}`,
+                'rainbow': os === 'android' ? `rainbow://wc?uri=${encodedUri}` :
+                    `https://rainbow.me/wc?uri=${encodedUri}`
+            };
+            return links[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
+        }
+
+        function getAppStoreUrl(walletType) {
+            const os = getMobileOS();
+            const stores = {
+                'metamask': { android: 'https://play.google.com/store/apps/details?id=io.metamask',
+                    ios: 'https://apps.apple.com/app/metamask/id1438144202' },
+                'trust': { android: 'https://play.google.com/store/apps/details?id=com.wallet.crypto.trustapp',
+                    ios: 'https://apps.apple.com/app/trust-wallet/id1288339409' },
+                'phantom': { android: 'https://play.google.com/store/apps/details?id=app.phantom',
+                    ios: 'https://apps.apple.com/app/phantom-wallet/id1598432977' },
+                'rainbow': { android: 'https://play.google.com/store/apps/details?id=me.rainbow',
+                    ios: 'https://apps.apple.com/app/rainbow-ethereum-wallet/id1457119021' }
+            };
+            if (stores[walletType]) {
+                if (os === 'android' && stores[walletType].android) return stores[walletType].android;
+                if (os === 'ios' && stores[walletType].ios) return stores[walletType].ios;
+            }
+            const desktop = {
+                'metamask': 'https://chrome.google.com/webstore/detail/metamask/nkbihfbeogaeaoehlefnkodbefgpgknn',
+                'trust': 'https://trustwallet.com/browser-extension',
+                'phantom': 'https://phantom.app/download',
+                'rainbow': 'https://rainbow.me/download'
+            };
+            return desktop[walletType] || 'https://walletconnect.org/';
+        }
+
+        function getMobileOS() {
+            const ua = navigator.userAgent;
+            if (/Android/i.test(ua)) return 'android';
+            if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
+            return 'desktop';
+        }
+
+        // =============================================
+        // REMOVED: safeRedirectToWallet - REPLACED by launchWalletApp
+        // This function was the primary culprit causing navigation away from the page
+        // =============================================
+
+        // =============================================
+        // NONCE & SIWE
+        // =============================================
+        async function fetchNonce(address) {
+            const response = await fetch(
+                `${BACKEND_BASE}/api/web3/nonce?walletAddress=${address}&type=login&isSignup=false`
+            );
+            const data = await response.json();
+            if (data.status === 'fail') throw new Error(data.message || 'Failed to fetch nonce.');
+            return data.data;
+        }
+
+        function buildSIWEMessage(address, nonceData) {
+            const domain = nonceData.domain || window.location.host;
+            const uri = nonceData.uri || window.location.origin;
+            const statement = nonceData.statement || 'Sign in to BitHash Capital';
+            const issuedAt = nonceData.issuedAt || new Date().toISOString();
+            const expiration = nonceData.expiration || new Date(Date.now() + 3600000).toISOString();
+            const chainId = connectionManager.chainId || 1;
+
+            return `${domain} wants you to sign in with your Ethereum account:\n` +
+                `${address}\n\n` +
+                `${statement}\n\n` +
+                `URI: ${uri}\n` +
+                `Version: 1\n` +
+                `Chain ID: ${chainId}\n` +
+                `Nonce: ${nonceData.nonce}\n` +
+                `Issued At: ${issuedAt}\n` +
+                `Expiration Time: ${expiration}`;
+        }
+
+        // =============================================
+        // AUTHENTICATION
+        // =============================================
+        async function authenticateWithSignature(address, signature, nonceData) {
+            const response = await fetch(`${BACKEND_BASE}/api/web3/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    walletAddress: address,
+                    signature: signature,
+                    nonce: nonceData.nonce,
+                    isSignup: false,
+                    walletType: connectionManager.walletType
+                })
+            });
+            const data = await response.json();
+            if (data.status === 'fail') throw new Error(data.message || 'Verification failed.');
+            return data.data;
+        }
+
+        // =============================================
+        // UI HELPERS
+        // =============================================
+        function resetWalletUI(walletType) {
+            const statusEl = document.getElementById(`status-${walletType}`);
+            if (statusEl) statusEl.className = 'connection-status connecting';
+            document.getElementById('web3-status').classList.remove('active');
+            document.getElementById('web3-connection-bar').classList.remove('active');
+            document.getElementById('wc-mobile-status').classList.remove('active');
+        }
+
+        function updateUIAfterConnection(address, walletType) {
+            const bar = document.getElementById('web3-connection-bar');
+            bar.classList.add('active');
+            document.getElementById('web3-connected-address').textContent =
+                address.substring(0, 6) + '...' + address.substring(address.length - 4);
+            document.getElementById('web3-connected-network').textContent = 'Ethereum Mainnet';
+
+            const statusDiv = document.getElementById('web3-status');
+            statusDiv.classList.add('active');
+            document.getElementById('web3-connected-address-status').textContent =
+                address.substring(0, 6) + '...' + address.substring(address.length - 4);
+            statusDiv.style.borderColor = 'var(--success)';
+            statusDiv.style.color = 'var(--success)';
+
+            const statusEl = document.getElementById(`status-${walletType}`);
+            if (statusEl) statusEl.className = 'connection-status connected';
+        }
+
+        function showConnectionError(message) {
+            const statusDiv = document.getElementById('web3-status');
+            statusDiv.innerHTML =
+                `<i class="fas fa-exclamation-circle" style="color: var(--error);"></i> ${message || 'Connection failed. Please try again.'}`;
+            statusDiv.style.borderColor = 'var(--error)';
+            statusDiv.style.color = 'var(--error)';
+            statusDiv.classList.add('active');
+            document.getElementById('wc-mobile-status').classList.remove('active');
+            document.querySelectorAll('.wallet-btn').forEach(btn => {
+                btn.disabled = false;
+                const statusEl = btn.querySelector('.connection-status');
+                if (statusEl) statusEl.className = 'connection-status';
+            });
+            
+            // Clear any pending wallet launch timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
+        }
+
+        function disconnectWeb3Wallet() {
+            connectionManager.connected = false;
+            connectionManager.provider = null;
+            connectionManager.address = null;
+            connectionManager.session = null;
+            connectionManager.walletType = null;
+            document.getElementById('web3-connection-bar').classList.remove('active');
+            document.getElementById('web3-status').classList.remove('active');
+            document.getElementById('wc-mobile-status').classList.remove('active');
+            document.querySelectorAll('.wallet-btn').forEach(btn => {
+                btn.style.borderColor = '';
+                btn.style.background = '';
+                const statusEl = btn.querySelector('.connection-status');
+                if (statusEl) statusEl.className = 'connection-status';
+            });
+            if (connectionManager.signClient) {
+                try { connectionManager.signClient.core.relayer.disconnect(); } catch (e) { /* ignore */ }
+            }
+            
+            // Clear any pending wallet launch timer
+            if (window._walletLaunchTimer) {
+                clearTimeout(window._walletLaunchTimer);
+            }
+            
+            console.log('🔌 Wallet disconnected');
+        }
+
+        function retryWalletConnect() {
+            const walletType = connectionManager.walletType || 'metamask';
+            connectWallet(walletType);
+        }
+
+        // =============================================
+        // OTP MODAL (copied from original, with minor adjustments)
+        // =============================================
+        let otpTimer, resendTimer, currentUserEmail = '',
+            currentTempToken = '',
+            lastOtpRequestTime = 0;
+        const OTP_COOLDOWN_PERIOD = 60000;
+
+        function showTwoStepModal(email, tempToken) {
+            currentUserEmail = email;
+            currentTempToken = tempToken;
+
+            const maskedEmail = email.substring(0, 3) + '*'.repeat(Math.max(0, email.split('@')[0].length - 3)) + '@' + email
+                .split('@')[1];
+            const emailSpan = document.getElementById('otp-email-display');
+            emailSpan.textContent = maskedEmail;
+
+            if (email.toLowerCase().endsWith('@gmail.com')) {
+                emailSpan.style.cursor = 'pointer';
+                emailSpan.style.textDecoration = 'underline';
+                emailSpan.onclick = () => { window.open('https://mail.google.com/mail/u/0/#inbox', '_blank'); };
+            } else {
+                emailSpan.style.cursor = 'default';
+                emailSpan.style.textDecoration = 'none';
+                emailSpan.onclick = null;
+            }
+
+            document.getElementById('two-step-modal').classList.add('active');
+            document.querySelectorAll('.otp-input').forEach(input => { input.value = '';
+                input.classList.remove('filled'); });
+            document.querySelector('.otp-input').focus();
+            startOtpTimer(300);
+            startResendTimer(60);
+            sendOtpToEmail(email);
+        }
+
+        async function sendOtpToEmail(email) {
+            const now = Date.now();
+            if (now - lastOtpRequestTime < OTP_COOLDOWN_PERIOD) {
+                const remaining = Math.ceil((OTP_COOLDOWN_PERIOD - (now - lastOtpRequestTime)) / 1000);
+                document.getElementById('otp-warning').textContent =
+                    `Please wait ${remaining} seconds before requesting a new code.`;
+                document.getElementById('otp-warning').style.display = 'block';
+                return;
+            }
+            lastOtpRequestTime = now;
+
+            const endpoint = currentAuthMethod === 'web3' ?
+                `${BACKEND_BASE}/api/web3/send-otp` :
+                `${BACKEND_BASE}/api/auth/send-otp`;
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentTempToken}`
+                    },
+                    body: JSON.stringify({ email })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    document.getElementById('otp-error').textContent = data.message || 'Failed to send OTP.';
+                    document.getElementById('otp-error').style.display = 'block';
+                } else {
+                    document.getElementById('otp-error').style.display = 'none';
+                    document.getElementById('otp-warning').style.display = 'none';
+                }
+            } catch (err) {
+                document.getElementById('otp-error').textContent = 'Network error.';
+                document.getElementById('otp-error').style.display = 'block';
+            }
+        }
+
+        function startOtpTimer(duration) {
+            clearInterval(otpTimer);
+            let timer = duration;
+            const el = document.getElementById('timer-countdown');
+            otpTimer = setInterval(() => {
+                const m = Math.floor(timer / 60);
+                const s = timer % 60;
+                el.textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                if (--timer < 0) clearInterval(otpTimer);
+            }, 1000);
+        }
+
+        function startResendTimer(duration) {
+            clearInterval(resendTimer);
+            let timer = duration;
+            const btn = document.getElementById('resend-otp-btn');
+            const countdown = document.getElementById('resend-countdown');
+            btn.disabled = true;
+            countdown.textContent = timer;
+            resendTimer = setInterval(() => {
+                countdown.textContent = --timer;
+                if (timer <= 0) {
+                    clearInterval(resendTimer);
+                    btn.disabled = false;
+                    countdown.textContent = '';
+                    btn.innerHTML = 'Resend Code';
+                }
+            }, 1000);
+        }
+
+        // OTP input handling (copied from original)
+        document.querySelectorAll('.otp-input').forEach((input, index) => {
+            input.addEventListener('input', function() {
+                if (!/^\d*$/.test(this.value)) { this.value = ''; return; }
+                if (this.value.length === 1 && index < 5) {
+                    document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
+                }
+                if (this.value.length === 1) this.classList.add('filled');
+                else this.classList.remove('filled');
+                document.getElementById('otp-error').style.display = 'none';
+                const allFilled = Array.from(document.querySelectorAll('.otp-input')).every(inp => inp.value.length ===
+                    1);
+                if (allFilled) setTimeout(() => autoVerifyOtp(), 100);
+            });
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Backspace' && this.value === '' && index > 0) {
+                    document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
+                }
+            });
+            input.addEventListener('paste', function(e) {
+                e.preventDefault();
+                const pasteData = e.clipboardData.getData('text').trim();
+                if (/^\d{6}$/.test(pasteData)) {
+                    pasteData.split('').forEach((digit, i) => {
+                        document.querySelector(`.otp-input[data-index="${i}"]`).value = digit;
+                        document.querySelector(`.otp-input[data-index="${i}"]`).classList.add('filled');
+                    });
+                    setTimeout(() => autoVerifyOtp(), 100);
+                }
+            });
         });
 
-        const verifyData = await verifyResponse.json();
-
-        if (verifyData.status === 'fail') {
-          statusDiv.className = 'web3-popup-status error';
-          if (verifyData.data?.action === 'login_suggested') {
-            const greeting = verifyData.data.greeting || 'Hello';
-            const userName = verifyData.data.userName || 'User';
-            statusDiv.innerHTML = `${greeting} ${userName}! ${verifyData.message} <a href="login" style="color: var(--accent);">Login here</a>`;
-          } else {
-            statusDiv.textContent = verifyData.message || 'Signature verification failed.';
-          }
-          statusDiv.style.display = 'block';
-          submitText.style.display = 'inline-block';
-          submitSpinner.style.display = 'none';
-          submitBtn.disabled = false;
-          return;
-        }
-
-        const tempToken = verifyData.data.tempToken;
-        const isNewUser = verifyData.data.isNewUser;
-
-        if (!isNewUser) {
-          statusDiv.className = 'web3-popup-status error';
-          const greeting = verifyData.data.greeting || 'Hello';
-          const userName = verifyData.data.userName || 'User';
-          statusDiv.innerHTML = `${greeting} ${userName}! This wallet is already registered. <a href="login" style="color: var(--accent);">Login here</a>`;
-          statusDiv.style.display = 'block';
-          submitText.style.display = 'inline-block';
-          submitSpinner.style.display = 'none';
-          submitBtn.disabled = false;
-          return;
-        }
-
-        // 4. SUBMIT SIGNUP - with isSignup=true
-        const signupResponse = await fetch(`${BACKEND_BASE}/api/web3/signup`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${tempToken}`
-          },
-          body: JSON.stringify({
-            ...formData,
-            isSignup: true
-          })
+        document.getElementById('otp-paste-btn').addEventListener('click', async function() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (/^\d{6}$/.test(text.trim())) {
+                    text.trim().split('').forEach((digit, i) => {
+                        document.querySelector(`.otp-input[data-index="${i}"]`).value = digit;
+                        document.querySelector(`.otp-input[data-index="${i}"]`).classList.add('filled');
+                    });
+                    this.classList.add('paste-success');
+                    this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
+                    setTimeout(() => autoVerifyOtp(), 100);
+                } else {
+                    document.getElementById('otp-error').textContent =
+                        'Clipboard does not contain a valid 6-digit code.';
+                    document.getElementById('otp-error').style.display = 'block';
+                }
+            } catch (err) {
+                document.getElementById('otp-error').textContent = 'Unable to read clipboard.';
+                document.getElementById('otp-error').style.display = 'block';
+            }
         });
 
-        const signupData = await signupResponse.json();
+        async function autoVerifyOtp() {
+            const otpCode = Array.from(document.querySelectorAll('.otp-input')).map(inp => inp.value).join('');
+            if (otpCode.length !== 6) return;
 
-        if (signupData.status === 'fail' || signupData.status === 'error') {
-          statusDiv.className = 'web3-popup-status error';
-          statusDiv.textContent = signupData.message || 'Signup failed. Please try again.';
-          statusDiv.style.display = 'block';
-          submitText.style.display = 'inline-block';
-          submitSpinner.style.display = 'none';
-          submitBtn.disabled = false;
-          return;
+            const pasteBtn = document.getElementById('otp-paste-btn');
+            pasteBtn.classList.add('paste-success');
+            pasteBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
+
+            try {
+                const endpoint = currentAuthMethod === 'web3' ?
+                    `${BACKEND_BASE}/api/web3/verify-otp` :
+                    `${BACKEND_BASE}/api/auth/verify-otp`;
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentTempToken}`
+                    },
+                    body: JSON.stringify({ email: currentUserEmail, otp: otpCode })
+                });
+                const data = await response.json();
+                if (response.ok && data.status === 'success') {
+                    pasteBtn.innerHTML = '<i class="fas fa-check"></i> Success!';
+                    document.getElementById('otp-success').style.display = 'block';
+                    if (data.token) localStorage.setItem('jwtToken', data.token);
+                    else if (currentTempToken) localStorage.setItem('jwtToken', currentTempToken);
+                    setTimeout(() => window.location.href = 'dashboard', 1500);
+                } else {
+                    pasteBtn.classList.remove('paste-success');
+                    pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
+                    document.getElementById('otp-error').textContent = data.message ||
+                        'Invalid verification code.';
+                    document.getElementById('otp-error').style.display = 'block';
+                    document.getElementById('otp-success').style.display = 'none';
+                    document.querySelectorAll('.otp-input').forEach(inp => { inp.value = '';
+                        inp.classList.remove('filled'); });
+                    document.querySelector('.otp-input').focus();
+                }
+            } catch (err) {
+                pasteBtn.classList.remove('paste-success');
+                pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
+                document.getElementById('otp-error').textContent = 'Network error.';
+                document.getElementById('otp-error').style.display = 'block';
+            }
         }
 
-        if (signupData.token) {
-          localStorage.setItem('jwtToken', signupData.token);
-        }
-
-        closeWeb3Popup();
-
-        const userEmail = formData.email;
-        const finalTempToken = signupData.tempToken || tempToken;
-
-        // 5. SEND OTP
-        await sendWeb3OtpToEmail(userEmail, finalTempToken);
-
-        currentAuthMethod = 'web3';
-        showTwoStepModal(userEmail, finalTempToken);
-
-      } catch (err) {
-        console.error('Web3 signup error:', err);
-        statusDiv.className = 'web3-popup-status error';
-        statusDiv.textContent = err.message || 'An error occurred. Please try again.';
-        statusDiv.style.display = 'block';
-        submitText.style.display = 'inline-block';
-        submitSpinner.style.display = 'none';
-        submitBtn.disabled = false;
-      }
-    });
-
-    // =============================================
-    // WEB3 OTP FUNCTIONS
-    // =============================================
-    async function sendWeb3OtpToEmail(email, tempToken) {
-      try {
-        const response = await fetch(`${BACKEND_BASE}/api/web3/send-otp`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${tempToken}`
-          },
-          body: JSON.stringify({ email })
+        document.getElementById('resend-otp-btn').addEventListener('click', function() {
+            if (this.disabled) return;
+            sendOtpToEmail(currentUserEmail);
+            startOtpTimer(300);
+            startResendTimer(60);
+            document.querySelectorAll('.otp-input').forEach(inp => { inp.value = '';
+                inp.classList.remove('filled'); });
+            document.querySelector('.otp-input').focus();
+            document.getElementById('otp-error').style.display = 'none';
+            document.getElementById('otp-success').style.display = 'none';
+            const pasteBtn = document.getElementById('otp-paste-btn');
+            pasteBtn.classList.remove('paste-success');
+            pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
         });
-        const data = await response.json();
-        if (response.ok) {
-          console.log('✅ Web3 OTP sent to', email);
-        } else {
-          console.error('Web3 OTP send failed:', data.message);
-        }
-      } catch (err) {
-        console.error('Error sending Web3 OTP:', err);
-      }
-    }
 
-    // =============================================
-    // OTP MODAL FUNCTIONS
-    // =============================================
-    function showTwoStepModal(email, tempToken) {
-      currentUserEmail = email;
-      currentTempToken = tempToken;
-
-      const maskedEmail = email.substring(0, 3) + '*'.repeat(Math.max(0, email.split('@')[0].length - 3)) + '@' + email
-        .split('@')[1];
-      const emailSpan = document.getElementById('otp-email-display');
-      emailSpan.textContent = maskedEmail;
-
-      if (email.toLowerCase().endsWith('@gmail.com')) {
-        emailSpan.style.cursor = 'pointer';
-        emailSpan.style.textDecoration = 'underline';
-        emailSpan.onclick = () => {
-          window.open('https://mail.google.com/mail/u/0/#inbox', '_blank');
-        };
-      } else {
-        emailSpan.style.cursor = 'default';
-        emailSpan.style.textDecoration = 'none';
-        emailSpan.onclick = null;
-      }
-
-      document.getElementById('two-step-modal').classList.add('active');
-      document.querySelectorAll('.otp-input').forEach(input => { input.value = '';
-        input.classList.remove('filled'); });
-      document.querySelector('.otp-input').focus();
-      startOtpTimer(300);
-      startResendTimer(60);
-      sendOtpToEmail(email);
-    }
-
-    async function sendOtpToEmail(email) {
-      const now = Date.now();
-      if (now - lastOtpRequestTime < OTP_COOLDOWN_PERIOD) {
-        const remaining = Math.ceil((OTP_COOLDOWN_PERIOD - (now - lastOtpRequestTime)) / 1000);
-        document.getElementById('otp-warning').textContent =
-          `Please wait ${remaining} seconds before requesting a new code.`;
-        document.getElementById('otp-warning').style.display = 'block';
-        return;
-      }
-      lastOtpRequestTime = now;
-
-      const endpoint = currentAuthMethod === 'web3' ?
-        `${BACKEND_BASE}/api/web3/send-otp` :
-        `${BACKEND_BASE}/api/auth/send-otp`;
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${currentTempToken}`
-          },
-          body: JSON.stringify({ email })
+        // Close modal
+        const modal = document.getElementById('two-step-modal');
+        document.getElementById('modal-close-x').addEventListener('click', () => {
+            modal.classList.remove('active');
+            clearInterval(otpTimer);
+            clearInterval(resendTimer);
+            currentUserEmail = '';
+            currentTempToken = '';
+            lastOtpRequestTime = 0;
+            currentAuthMethod = 'form';
+            const pasteBtn = document.getElementById('otp-paste-btn');
+            pasteBtn.classList.remove('paste-success');
+            pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
         });
-        const data = await response.json();
-        if (!response.ok) {
-          document.getElementById('otp-error').textContent = data.message || 'Failed to send OTP.';
-          document.getElementById('otp-error').style.display = 'block';
-        } else {
-          document.getElementById('otp-error').style.display = 'none';
-          document.getElementById('otp-warning').style.display = 'none';
-        }
-      } catch (err) {
-        document.getElementById('otp-error').textContent = 'Network error.';
-        document.getElementById('otp-error').style.display = 'block';
-      }
-    }
-
-    function startOtpTimer(duration) {
-      clearInterval(otpTimer);
-      let timer = duration;
-      const el = document.getElementById('timer-countdown');
-      otpTimer = setInterval(() => {
-        const m = Math.floor(timer / 60);
-        const s = timer % 60;
-        el.textContent = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-        if (--timer < 0) clearInterval(otpTimer);
-      }, 1000);
-    }
-
-    function startResendTimer(duration) {
-      clearInterval(resendTimer);
-      let timer = duration;
-      const btn = document.getElementById('resend-otp-btn');
-      const countdown = document.getElementById('resend-countdown');
-      btn.disabled = true;
-      countdown.textContent = timer;
-      resendTimer = setInterval(() => {
-        countdown.textContent = --timer;
-        if (timer <= 0) {
-          clearInterval(resendTimer);
-          btn.disabled = false;
-          countdown.textContent = '';
-          btn.innerHTML = 'Resend Code';
-        }
-      }, 1000);
-    }
-
-    // OTP input handling
-    document.querySelectorAll('.otp-input').forEach((input, index) => {
-      input.addEventListener('input', function() {
-        if (!/^\d*$/.test(this.value)) { this.value = ''; return; }
-        if (this.value.length === 1 && index < 5) {
-          document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
-        }
-        if (this.value.length === 1) this.classList.add('filled');
-        else this.classList.remove('filled');
-        document.getElementById('otp-error').style.display = 'none';
-        const allFilled = Array.from(document.querySelectorAll('.otp-input')).every(inp => inp.value.length ===
-          1);
-        if (allFilled) setTimeout(() => autoVerifyOtp(), 100);
-      });
-      input.addEventListener('keydown', function(e) {
-        if (e.key === 'Backspace' && this.value === '' && index > 0) {
-          document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
-        }
-      });
-      input.addEventListener('paste', function(e) {
-        e.preventDefault();
-        const pasteData = e.clipboardData.getData('text').trim();
-        if (/^\d{6}$/.test(pasteData)) {
-          pasteData.split('').forEach((digit, i) => {
-            document.querySelector(`.otp-input[data-index="${i}"]`).value = digit;
-            document.querySelector(`.otp-input[data-index="${i}"]`).classList.add('filled');
-          });
-          setTimeout(() => autoVerifyOtp(), 100);
-        }
-      });
-    });
-
-    document.getElementById('otp-paste-btn').addEventListener('click', async function() {
-      try {
-        const text = await navigator.clipboard.readText();
-        if (/^\d{6}$/.test(text.trim())) {
-          text.trim().split('').forEach((digit, i) => {
-            document.querySelector(`.otp-input[data-index="${i}"]`).value = digit;
-            document.querySelector(`.otp-input[data-index="${i}"]`).classList.add('filled');
-          });
-          this.classList.add('paste-success');
-          this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
-          setTimeout(() => autoVerifyOtp(), 100);
-        } else {
-          document.getElementById('otp-error').textContent =
-            'Clipboard does not contain a valid 6-digit code.';
-          document.getElementById('otp-error').style.display = 'block';
-        }
-      } catch (err) {
-        document.getElementById('otp-error').textContent = 'Unable to read clipboard.';
-        document.getElementById('otp-error').style.display = 'block';
-      }
-    });
-
-    async function autoVerifyOtp() {
-      const otpCode = Array.from(document.querySelectorAll('.otp-input')).map(inp => inp.value).join('');
-      if (otpCode.length !== 6) return;
-
-      const pasteBtn = document.getElementById('otp-paste-btn');
-      pasteBtn.classList.add('paste-success');
-      pasteBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
-
-      try {
-        const endpoint = currentAuthMethod === 'web3' ?
-          `${BACKEND_BASE}/api/web3/verify-otp` :
-          `${BACKEND_BASE}/api/auth/verify-otp`;
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${currentTempToken}`
-          },
-          body: JSON.stringify({ email: currentUserEmail, otp: otpCode })
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) {
+                modal.classList.remove('active');
+                clearInterval(otpTimer);
+                clearInterval(resendTimer);
+                currentUserEmail = '';
+                currentTempToken = '';
+                lastOtpRequestTime = 0;
+                currentAuthMethod = 'form';
+                const pasteBtn = document.getElementById('otp-paste-btn');
+                pasteBtn.classList.remove('paste-success');
+                pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
+            }
         });
-        const data = await response.json();
-        if (response.ok && data.status === 'success') {
-          pasteBtn.innerHTML = '<i class="fas fa-check"></i> Success!';
-          document.getElementById('otp-success').style.display = 'block';
-          if (data.token) localStorage.setItem('jwtToken', data.token);
-          else if (currentTempToken) localStorage.setItem('jwtToken', currentTempToken);
-          setTimeout(() => window.location.href = 'dashboard', 1500);
-        } else {
-          pasteBtn.classList.remove('paste-success');
-          pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
-          document.getElementById('otp-error').textContent = data.message ||
-            'Invalid verification code.';
-          document.getElementById('otp-error').style.display = 'block';
-          document.getElementById('otp-success').style.display = 'none';
-          document.querySelectorAll('.otp-input').forEach(inp => { inp.value = '';
-            inp.classList.remove('filled'); });
-          document.querySelector('.otp-input').focus();
-        }
-      } catch (err) {
-        pasteBtn.classList.remove('paste-success');
-        pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
-        document.getElementById('otp-error').textContent = 'Network error.';
-        document.getElementById('otp-error').style.display = 'block';
-      }
-    }
 
-    document.getElementById('resend-otp-btn').addEventListener('click', function() {
-      if (this.disabled) return;
-      sendOtpToEmail(currentUserEmail);
-      startOtpTimer(300);
-      startResendTimer(60);
-      document.querySelectorAll('.otp-input').forEach(inp => { inp.value = '';
-        inp.classList.remove('filled'); });
-      document.querySelector('.otp-input').focus();
-      document.getElementById('otp-error').style.display = 'none';
-      document.getElementById('otp-success').style.display = 'none';
-      const pasteBtn = document.getElementById('otp-paste-btn');
-      pasteBtn.classList.remove('paste-success');
-      pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
-    });
 
-    // Close modal
-    const modal = document.getElementById('two-step-modal');
-    document.getElementById('modal-close-x').addEventListener('click', () => {
-      modal.classList.remove('active');
-      clearInterval(otpTimer);
-      clearInterval(resendTimer);
-      currentUserEmail = '';
-      currentTempToken = '';
-      lastOtpRequestTime = 0;
-      currentAuthMethod = 'form';
-      const pasteBtn = document.getElementById('otp-paste-btn');
-      pasteBtn.classList.remove('paste-success');
-      pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
-    });
-    modal.addEventListener('click', (event) => {
-      if (event.target === modal) {
-        modal.classList.remove('active');
-        clearInterval(otpTimer);
-        clearInterval(resendTimer);
-        currentUserEmail = '';
-        currentTempToken = '';
-        lastOtpRequestTime = 0;
-        currentAuthMethod = 'form';
-        const pasteBtn = document.getElementById('otp-paste-btn');
-        pasteBtn.classList.remove('paste-success');
-        pasteBtn.innerHTML = '<i class="fas fa-paste"></i> Paste';
-      }
-    });
 
-    // Web3 popup close
-    document.getElementById('web3-popup').addEventListener('click', function(e) {
-      if (e.target === this) {
-        closeWeb3Popup();
-      }
-    });
 
-    document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
-    // =============================================
-    // UI HELPERS
-    // =============================================
-    function resetWalletUI(walletType) {
-      const statusEl = document.getElementById(`status-${walletType}`);
-      if (statusEl) statusEl.className = 'connection-status connecting';
-      document.getElementById('web3-status').classList.remove('active');
-      document.getElementById('web3-connection-bar').classList.remove('active');
-      document.getElementById('wc-mobile-status').classList.remove('active');
-
-      document.querySelectorAll('.wallet-btn').forEach(btn => {
-        btn.disabled = true;
-      });
-    }
-
-    function updateUIAfterConnection(address, walletType) {
-      const bar = document.getElementById('web3-connection-bar');
-      bar.classList.add('active');
-      document.getElementById('web3-connected-address').textContent =
-        address.substring(0, 6) + '...' + address.substring(address.length - 4);
-      document.getElementById('web3-connected-network').textContent = 'Ethereum Mainnet';
-
-      const statusDiv = document.getElementById('web3-status');
-      statusDiv.classList.add('active');
-      document.getElementById('web3-connected-address-status').textContent =
-        address.substring(0, 6) + '...' + address.substring(address.length - 4);
-      statusDiv.style.borderColor = 'var(--success)';
-      statusDiv.style.color = 'var(--success)';
-
-      const statusEl = document.getElementById(`status-${walletType}`);
-      if (statusEl) statusEl.className = 'connection-status connected';
-
-      document.querySelectorAll('.wallet-btn').forEach(btn => {
-        btn.disabled = false;
-      });
-    }
-
-    function showConnectionError(message) {
-      const statusDiv = document.getElementById('web3-status');
-      statusDiv.innerHTML =
-        `<i class="fas fa-exclamation-circle" style="color: var(--error);"></i> ${message || 'Connection failed. Please try again.'}`;
-      statusDiv.style.borderColor = 'var(--error)';
-      statusDiv.style.color = 'var(--error)';
-      statusDiv.classList.add('active');
-      document.getElementById('wc-mobile-status').classList.remove('active');
-
-      document.querySelectorAll('.wallet-btn').forEach(btn => {
-        btn.disabled = false;
-        const statusEl = btn.querySelector('.connection-status');
-        if (statusEl) statusEl.className = 'connection-status';
-      });
-
-      if (window._walletLaunchTimer) {
-        clearTimeout(window._walletLaunchTimer);
-      }
-    }
-
-    function disconnectWeb3Wallet() {
-      connectionManager.connected = false;
-      connectionManager.provider = null;
-      connectionManager.address = null;
-      connectionManager.session = null;
-      connectionManager.walletType = null;
-      web3WalletAddress = null;
-      web3WalletType = null;
-      web3Provider = null;
-      web3Nonce = null;
-      web3Message = null;
-      web3Signature = null;
-
-      document.getElementById('web3-connection-bar').classList.remove('active');
-      document.getElementById('web3-status').classList.remove('active');
-      document.getElementById('wc-mobile-status').classList.remove('active');
-
-      document.querySelectorAll('.wallet-btn').forEach(btn => {
-        btn.style.borderColor = '';
-        btn.style.background = '';
-        const statusEl = btn.querySelector('.connection-status');
-        if (statusEl) statusEl.className = 'connection-status';
-      });
-
-      if (connectionManager.signClient) {
-        try { connectionManager.signClient.core.relayer.disconnect(); } catch (e) { /* ignore */ }
-      }
-
-      if (window._walletLaunchTimer) {
-        clearTimeout(window._walletLaunchTimer);
-      }
-
-      console.log('🔌 Wallet disconnected');
-    }
-
-    function retryWalletConnect() {
-      const walletType = connectionManager.walletType || 'metamask';
-      connectWallet(walletType);
-    }
-
+    
     // =============================================
     // TRADITIONAL FORM LOGIC
     // =============================================
