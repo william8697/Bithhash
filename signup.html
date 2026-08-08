@@ -2940,10 +2940,10 @@
       }
 
       const connectParams = {
-        requiredNamespaces: {
+        optionalNamespaces: {
           eip155: {
-            methods: ['personal_sign', 'eth_sign', 'eth_signTypedData_v4', 'eth_requestAccounts'],
             chains: ['eip155:1'],
+            methods: ['personal_sign', 'eth_signTypedData_v4'],
             events: ['chainChanged', 'accountsChanged']
           }
         }
@@ -2961,7 +2961,7 @@
     // =============================================
     // 5. WAIT FOR WALLETCONNECT SESSION
     // =============================================
-    async function waitForWalletConnectSession(timeoutMs = 60000) {
+    async function waitForWalletConnectSession(timeoutMs = 120000) {
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('WalletConnect session timeout. Please try again.'));
@@ -3035,25 +3035,39 @@
     }
 
     // =============================================
-    // 7. LAUNCH WALLET APP - FIXED: NO NAVIGATION
+    // 7. OFFICIAL WALLET LINKING CONFIGURATION
     // =============================================
-    function getWalletLaunchUrl(walletType, uri) {
-      const deviceEngine = new DeviceDetectionEngine();
-      const deviceInfo = deviceEngine.detect();
-      const encodedUri = encodeURIComponent(uri);
+    const MOBILE_WALLET_LINKS = {
+      'metamask': {
+        native: (uri) => `metamask://wc?uri=${encodeURIComponent(uri)}`,
+        universal: (uri) => `https://metamask.app.link/wc?uri=${encodeURIComponent(uri)}`
+      },
+      'trust': {
+        native: (uri) => `trust://wc?uri=${encodeURIComponent(uri)}`,
+        universal: (uri) => `https://link.trustwallet.com/wc?uri=${encodeURIComponent(uri)}`
+      },
+      'phantom': {
+        native: (uri) => `phantom://v1/connect?uri=${encodeURIComponent(uri)}`,
+        universal: (uri) => `https://phantom.app/connect?uri=${encodeURIComponent(uri)}`
+      },
+      'rainbow': {
+        native: (uri) => `rainbow://wc?uri=${encodeURIComponent(uri)}`,
+        universal: (uri) => `https://rainbow.me/wc?uri=${encodeURIComponent(uri)}`
+      }
+    };
 
-      const links = {
-        'metamask': `https://metamask.app.link/wc?uri=${encodedUri}`,
-        'trust': deviceInfo.isAndroid ? `trust://wc?uri=${encodedUri}` : `https://link.trustwallet.com/wc?uri=${encodedUri}`,
-        'phantom': `phantom://v1/connect?uri=${encodedUri}`,
-        'rainbow': `rainbow://wc?uri=${encodedUri}`
-      };
-
-      return links[walletType] || `https://walletconnect.org/wc?uri=${encodedUri}`;
-    }
-
+    // =============================================
+    // 8. LAUNCH WALLET APP - NO PAGE NAVIGATION
+    // =============================================
     function launchWalletApp(walletType, uri) {
-      const launchUrl = getWalletLaunchUrl(walletType, uri);
+      const links = MOBILE_WALLET_LINKS[walletType];
+      if (!links) {
+        console.error(`No wallet links configured for ${walletType}`);
+        return false;
+      }
+
+      // Use native link as primary, universal as fallback
+      const launchUrl = links.native(uri);
       console.log(`🚀 Launching ${walletType} with: ${launchUrl.substring(0, 80)}...`);
 
       // Clear any previous timer
@@ -3078,8 +3092,7 @@
             }, 3000);
             return true;
           } catch (e) {
-            // Method 3: Last resort - use location.replace (navigates away but is the only option)
-            // We use replace so user can use back button to return
+            // Method 3: Last resort - use location.replace
             console.warn('Unable to launch wallet app without navigating. Using location.replace.');
             window.location.replace(launchUrl);
             return true;
@@ -3106,13 +3119,12 @@
     }
 
     // =============================================
-    // 8. DESKTOP WALLET CONNECTION
+    // 9. DESKTOP WALLET CONNECTION
     // =============================================
     async function connectDesktopWallet(walletType) {
       const providerInfo = getProviderForWalletType(walletType);
 
       if (!providerInfo) {
-        // Desktop: show an informational message instead of auto-navigating
         showConnectionError(
           `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} is not installed. Please install it and try again.`
         );
@@ -3144,7 +3156,7 @@
     }
 
     // =============================================
-    // 9. MOBILE WALLET CONNECTION - FIXED: NO NAVIGATION
+    // 10. MOBILE WALLET CONNECTION - FIXED
     // =============================================
     async function connectMobileWallet(walletType) {
       try {
@@ -3169,7 +3181,7 @@
         // Wait for approval
         document.getElementById('wc-status-text').textContent = 'Waiting for wallet approval...';
 
-        const sessionResult = await waitForWalletConnectSession(60000);
+        const sessionResult = await waitForWalletConnectSession(120000);
 
         if (!sessionResult || !sessionResult.accounts || sessionResult.accounts.length === 0) {
           throw new Error('No accounts found. Please approve the connection in your wallet.');
@@ -3190,7 +3202,6 @@
       } catch (err) {
         console.error('Mobile wallet connection error:', err);
         document.getElementById('wc-mobile-status').classList.remove('active');
-        // Clear any pending launch timer
         if (walletLaunchTimer) {
           clearTimeout(walletLaunchTimer);
           walletLaunchTimer = null;
@@ -3200,7 +3211,7 @@
     }
 
     // =============================================
-    // 10. MAIN CONNECT WALLET
+    // 11. MAIN CONNECT WALLET
     // =============================================
     async function connectWallet(walletType) {
       if (isConnecting) {
@@ -3244,7 +3255,6 @@
         updateUIAfterConnection(address, walletType);
         document.getElementById('wc-mobile-status').classList.remove('active');
 
-        // Handle the connection (check if user exists, etc.) - with isSignup=true
         await handleWeb3Connection(address);
 
       } catch (err) {
@@ -3258,7 +3268,6 @@
           const statusEl = btn.querySelector('.connection-status');
           if (statusEl) statusEl.className = 'connection-status';
         });
-        // Clear any pending launch timer
         if (walletLaunchTimer) {
           clearTimeout(walletLaunchTimer);
           walletLaunchTimer = null;
@@ -3269,10 +3278,9 @@
     }
 
     // =============================================
-    // 11. RETRY WALLET CONNECT
+    // 12. RETRY WALLET CONNECT
     // =============================================
     function retryWalletConnect() {
-      // Clear any pending launch timer
       if (walletLaunchTimer) {
         clearTimeout(walletLaunchTimer);
         walletLaunchTimer = null;
@@ -3285,7 +3293,7 @@
     }
 
     // =============================================
-    // 12. DISCONNECT WALLET
+    // 13. DISCONNECT WALLET
     // =============================================
     function disconnectWeb3Wallet() {
       connectedAddress = null;
@@ -3302,7 +3310,6 @@
         } catch (e) { /* ignore */ }
       }
 
-      // Clear any pending launch timer
       if (walletLaunchTimer) {
         clearTimeout(walletLaunchTimer);
         walletLaunchTimer = null;
@@ -3323,7 +3330,7 @@
     }
 
     // =============================================
-    // 13. UI HELPERS
+    // 14. UI HELPERS
     // =============================================
     function resetWalletUI(walletType) {
       const statusEl = document.getElementById(`status-${walletType}`);
@@ -3376,12 +3383,11 @@
     }
 
     // =============================================
-    // 14. HANDLE WEB3 CONNECTION - Signup (with isSignup=true)
+    // 15. HANDLE WEB3 CONNECTION - Signup (with isSignup=true)
     // =============================================
     async function handleWeb3Connection(address) {
       try {
         const timezoneOffset = new Date().getTimezoneOffset();
-        // Added isSignup=true to the endpoint
         const checkResponse = await fetch(
           `${BACKEND_BASE}/api/web3/check-user?walletAddress=${address}&timezoneOffset=${timezoneOffset}&isSignup=true`
         );
@@ -3422,7 +3428,7 @@
     }
 
     // =============================================
-    // 15. WEB3 SIGNUP POPUP
+    // 16. WEB3 SIGNUP POPUP
     // =============================================
     function showWeb3SignupPopup(address) {
       const popup = document.getElementById('web3-popup');
@@ -3461,7 +3467,7 @@
     }
 
     // =============================================
-    // 16. WEB3 SIGNUP FORM SUBMIT (with isSignup=true on endpoints)
+    // 17. WEB3 SIGNUP FORM SUBMIT (with isSignup=true on endpoints)
     // =============================================
     document.getElementById('web3-signup-form').addEventListener('submit', async function(e) {
       e.preventDefault();
@@ -3715,7 +3721,7 @@
     });
 
     // =============================================
-    // 17. WEB3 OTP FUNCTIONS
+    // 18. WEB3 OTP FUNCTIONS
     // =============================================
     async function sendWeb3OtpToEmail(email, tempToken) {
       try {
@@ -3760,7 +3766,7 @@
     }
 
     // =============================================
-    // 18. OTP MODAL FUNCTIONS
+    // 19. OTP MODAL FUNCTIONS
     // =============================================
     function showTwoStepModal(email, tempToken) {
       currentUserEmail = email;
@@ -4013,7 +4019,7 @@
     document.getElementById('web3-popup-close').addEventListener('click', closeWeb3Popup);
 
     // =============================================
-    // 19. TRADITIONAL FORM LOGIC
+    // 20. TRADITIONAL FORM LOGIC
     // =============================================
 
     AOS.init({ duration: 800, once: true, easing: 'ease-in-out' });
