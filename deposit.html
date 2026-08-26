@@ -3556,6 +3556,18 @@
         let web3Network = null;
         let isConnecting = false;
 
+        // ===== FIX: normalizeWalletAddress helper (Section 4 of instruction) =====
+        function normalizeWalletAddress(address) {
+            if (!address) return null;
+            try {
+                // Use ethers.getAddress for checksum normalization (EIP-55)
+                return ethers.getAddress(address);
+            } catch {
+                // Fallback to lowercase if ethers fails
+                return address.toLowerCase();
+            }
+        }
+
         // Price cache
         let cachedPriceData = {};
 
@@ -4021,7 +4033,7 @@
         }
 
         // =============================================
-        // UNLINK WALLET - Copied from Dashboard
+        // UNLINK WALLET - Copied from Dashboard with FIX
         // =============================================
         function openUnlinkConfirm(address) {
             if (!address) {
@@ -4047,12 +4059,23 @@
             pendingUnlinkAddress = null;
         }
 
+        // ===== FIX: confirmUnlinkWallet - normalize address before sending (Section 5 of instruction) =====
         async function confirmUnlinkWallet() {
             if (!pendingUnlinkAddress) {
                 closeUnlinkConfirm();
                 return;
             }
-            const address = pendingUnlinkAddress;
+            
+            // Normalize the address before sending
+            const rawAddress = pendingUnlinkAddress;
+            const normalizedAddress = normalizeWalletAddress(rawAddress);
+            
+            if (!normalizedAddress) {
+                showNotification('error', 'Invalid Address', 'The wallet address is invalid.');
+                closeUnlinkConfirm();
+                return;
+            }
+            
             try {
                 const token = getAuthToken();
                 if (!token) {
@@ -4060,17 +4083,24 @@
                     closeUnlinkConfirm();
                     return;
                 }
+                
+                // Send the normalized address
                 const response = await fetch(`${API_BASE_URL}/api/users/wallets/remove`, {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${token}`
                     },
-                    body: JSON.stringify({ walletAddress: address })
+                    body: JSON.stringify({ walletAddress: normalizedAddress })
                 });
+                
                 if (response.ok) {
-                    linkedWallets = linkedWallets.filter(w => (w.address || w.walletAddress) !== address);
-                    if (web3WalletAddress && web3WalletAddress.toLowerCase() === address.toLowerCase()) {
+                    linkedWallets = linkedWallets.filter(w => {
+                        const wAddr = w.address || w.walletAddress || '';
+                        return normalizeWalletAddress(wAddr) !== normalizedAddress;
+                    });
+                    
+                    if (web3WalletAddress && normalizeWalletAddress(web3WalletAddress) === normalizedAddress) {
                         if (linkedWallets.length > 0) {
                             const primaryWallet = linkedWallets.find(w => w.isPrimary) || linkedWallets[0];
                             web3WalletAddress = primaryWallet.address;
@@ -4082,6 +4112,7 @@
                             web3Network = null;
                         }
                     }
+                    
                     if (linkedWallets.length === 0) {
                         isWalletLinked = false;
                         linkedWalletAddress = '';
@@ -4101,10 +4132,10 @@
                         updateWalletStatus(true, linkedWalletAddress);
                         populateWalletSelector(linkedWallets);
                     }
+                    
                     updateDepositFlow();
                     showNotification('success', 'Wallet Removed', 'Wallet has been disconnected successfully.');
                 } else if (response.status === 401 || response.status === 403) {
-                    // FIX #4: Only invalidate on confirmed 401/403
                     localStorage.removeItem('jwtToken');
                     showNotification('error', 'Session Expired', 'Please log in again.');
                 } else {
@@ -4294,6 +4325,7 @@
             closeModal('link-wallet-modal');
         }
 
+        // ===== FIX: linkWalletFromModal - normalize address before linking (Section 4 of instruction) =====
         async function linkWalletFromModal() {
             // Single wallet rule: check if wallet is already linked
             if (isWalletLinked && linkedWallets.length > 0) {
@@ -4407,8 +4439,18 @@
                     throw new Error('No wallet address found. Please make sure your wallet is unlocked and try again.');
                 }
 
-                // Check for duplicate wallet address - SINGLE WALLET RULE
-                const existingWallet = linkedWallets.some(w => (w.address || w.walletAddress) === address);
+                // ===== FIX: Normalize the address before checking and sending =====
+                const normalizedAddress = normalizeWalletAddress(address);
+                if (!normalizedAddress) {
+                    throw new Error('Invalid wallet address format.');
+                }
+
+                // Check for duplicate wallet address using normalized comparison
+                const existingWallet = linkedWallets.some(w => {
+                    const wAddr = w.address || w.walletAddress || '';
+                    return normalizeWalletAddress(wAddr) === normalizedAddress;
+                });
+                
                 if (existingWallet) {
                     statusEl.textContent = '❌ This wallet address is already linked.';
                     statusEl.style.color = 'var(--error)';
@@ -4426,7 +4468,7 @@
                     } catch (e) {}
                 }
 
-                // Link via backend - using same endpoint as Dashboard
+                // Link via backend - using normalized address
                 const token = getAuthToken();
                 if (!token) {
                     throw new Error('Please log in again.');
@@ -4439,7 +4481,7 @@
                         'Authorization': `Bearer ${token}`
                     },
                     body: JSON.stringify({
-                        walletAddress: address,
+                        walletAddress: normalizedAddress,
                         walletType: selectedWalletType,
                         network: chainId
                     })
@@ -4456,9 +4498,9 @@
 
                 const data = await response.json();
                 isWalletLinked = true;
-                linkedWalletAddress = address;
+                linkedWalletAddress = normalizedAddress;
                 walletType = selectedWalletType;
-                web3WalletAddress = address;
+                web3WalletAddress = normalizedAddress;
                 web3WalletType = selectedWalletType;
                 web3Network = chainId;
                 
@@ -4466,7 +4508,7 @@
                     web3Provider = provider;
                 }
                 
-                linkedWallets = [{ address: address, type: selectedWalletType, isPrimary: true, network: chainId }];
+                linkedWallets = [{ address: normalizedAddress, type: selectedWalletType, isPrimary: true, network: chainId }];
                 await loadLinkedWallets();
                 
                 statusEl.textContent = '✅ Wallet linked successfully!';
@@ -5088,6 +5130,132 @@
             'bch': { network: 'Bitcoin Cash', type: 'non-evm' }
         };
 
+        // ===== FIX: ensureWalletConnectedForDeposit - ensures WalletConnect session is active before transaction (Section 11 of instruction) =====
+        async function ensureWalletConnectedForDeposit(walletTypeToUse) {
+            console.log('ensureWalletConnectedForDeposit called with walletType:', walletTypeToUse);
+            
+            // Desktop: use injected provider
+            if (!isMobileDevice()) {
+                const targetRdns = {
+                    'metamask': 'io.metamask',
+                    'trust': 'com.trustwallet.app',
+                    'phantom': 'app.phantom',
+                    'rainbow': 'me.rainbow'
+                }[walletTypeToUse] || 'io.metamask';
+                
+                const injectedTarget = getProviderByRDNS(targetRdns);
+                if (injectedTarget) {
+                    try {
+                        // Try to request accounts to ensure connection
+                        const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                        if (accounts && accounts.length > 0) {
+                            console.log('Desktop provider connected:', accounts[0]);
+                            web3Provider = injectedTarget.provider;
+                            return { provider: web3Provider, address: accounts[0] };
+                        }
+                    } catch (err) {
+                        console.warn('Desktop provider connection failed:', err);
+                    }
+                }
+                // Fall through to WalletConnect if injected provider fails
+            }
+
+            // Mobile: use WalletConnect
+            let provider = universalWalletProvider;
+            
+            // If no provider, initialize one
+            if (!provider) {
+                console.log('No WalletConnect provider found, initializing...');
+                provider = await silentlyInitWalletConnect();
+                if (!provider) {
+                    throw new Error('Unable to initialize WalletConnect. Please install a wallet app.');
+                }
+            }
+
+            // Check if we have an active session
+            let hasActiveSession = false;
+            try {
+                // Try to get accounts to check if session is active
+                const accounts = await provider.request({ method: 'eth_accounts' });
+                if (accounts && accounts.length > 0) {
+                    hasActiveSession = true;
+                    console.log('Active WalletConnect session found with accounts:', accounts);
+                    return { provider: provider, address: accounts[0] };
+                }
+            } catch (e) {
+                console.log('No active session or accounts not available:', e.message);
+                hasActiveSession = false;
+            }
+
+            // No active session - need to connect
+            if (!hasActiveSession) {
+                console.log('No active WalletConnect session, starting connection flow...');
+                
+                let wcUri = null;
+                const uriPromise = new Promise((resolve) => {
+                    const uriHandler = (uri) => {
+                        wcUri = uri;
+                        resolve(uri);
+                    };
+                    provider.once("display_uri", uriHandler);
+                    setTimeout(() => {
+                        if (provider._uri) {
+                            wcUri = provider._uri;
+                            resolve(wcUri);
+                        }
+                    }, 500);
+                });
+
+                // Start the connection
+                const connectPromise = provider.connect();
+                
+                // Wait for URI
+                const uri = await uriPromise;
+                console.log('WalletConnect URI received:', uri);
+                
+                // Open the wallet app
+                const deepLink = openDeepLink(walletTypeToUse, uri);
+                console.log('Opening wallet with deep link:', deepLink);
+                window.location.href = deepLink;
+                
+                // Wait for connection to complete
+                await connectPromise;
+                console.log('WalletConnect connection established');
+                
+                // Wait for accounts to be available
+                let accounts = provider.accounts;
+                let attempts = 0;
+                const maxAttempts = 30;
+                while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    try {
+                        accounts = await provider.request({ method: "eth_accounts" });
+                    } catch (e) {}
+                    attempts++;
+                    console.log(`Waiting for accounts... attempt ${attempts}/${maxAttempts}`);
+                }
+                
+                if (!accounts || accounts.length === 0) {
+                    try {
+                        accounts = await provider.request({ method: "eth_requestAccounts" });
+                    } catch (e) {
+                        console.warn('eth_requestAccounts failed:', e);
+                    }
+                }
+                
+                if (!accounts || accounts.length === 0) {
+                    throw new Error('No accounts found. Please approve in your wallet.');
+                }
+                
+                console.log('WalletConnect accounts obtained:', accounts);
+                web3Provider = provider;
+                return { provider: provider, address: accounts[0] };
+            }
+
+            throw new Error('Unable to establish wallet connection. Please try again.');
+        }
+
+        // ===== FIX: executeEVMDeposit - updated to use ensureWalletConnectedForDeposit and address normalization =====
         async function executeEVMDeposit() {
             const btn = document.getElementById('evm-deposit-btn');
             const usdAmount = parseFloat(document.getElementById('evm-amount-usd').value);
@@ -5116,45 +5284,49 @@
                 return;
             }
 
-            // Get provider
-            let providerToUse = web3Provider;
-            if (!providerToUse && universalWalletProvider) {
-                providerToUse = universalWalletProvider;
+            // Normalize the selected wallet address for comparison
+            const normalizedSelectedAddress = normalizeWalletAddress(selectedWalletAddress);
+            if (!normalizedSelectedAddress) {
+                showNotification('error', 'Invalid Address', 'Selected wallet address is invalid.');
+                return;
             }
 
-            // Try to get injected provider if available
-            if (!providerToUse && !isMobileDevice()) {
-                const targetRdns = {
-                    'metamask': 'io.metamask',
-                    'trust': 'com.trustwallet.app',
-                    'phantom': 'app.phantom',
-                    'rainbow': 'me.rainbow'
-                }[walletType] || 'io.metamask';
-                const injectedTarget = getProviderByRDNS(targetRdns);
-                if (injectedTarget) {
-                    providerToUse = injectedTarget.provider;
-                }
-            }
-
-            if (!providerToUse) {
-                // Try WalletConnect
-                const wcProvider = await silentlyInitWalletConnect();
-                if (wcProvider) {
-                    providerToUse = wcProvider;
-                } else {
-                    showNotification('error', 'No Provider', 'No wallet provider found. Please install a wallet.');
-                    return;
-                }
-            }
+            // Determine wallet type to use
+            const selectedWalletObj = linkedWallets.find(w => {
+                const wAddr = w.address || w.walletAddress || '';
+                return normalizeWalletAddress(wAddr) === normalizedSelectedAddress;
+            });
+            const walletTypeToUse = selectedWalletObj?.type || web3WalletType || walletType || 'metamask';
 
             setButtonLoading(btn, 'processing', 'Processing...');
             statusMsg.textContent = 'Initializing deposit...';
 
             try {
+                // Step 1: Ensure wallet connection
+                statusMsg.textContent = 'Connecting to wallet...';
+                setButtonLoading(btn, 'processing', 'Connecting to wallet...');
+                
+                const connectionResult = await ensureWalletConnectedForDeposit(walletTypeToUse);
+                const providerToUse = connectionResult.provider;
+                const connectedAddress = connectionResult.address;
+                
+                if (!providerToUse) {
+                    throw new Error('No wallet provider available.');
+                }
+
+                // Step 2: Verify connected address matches linked wallet
+                const normalizedConnectedAddress = normalizeWalletAddress(connectedAddress);
+                if (!normalizedConnectedAddress || normalizedConnectedAddress !== normalizedSelectedAddress) {
+                    throw new Error(
+                        'The connected wallet does not match your linked BitHash wallet. ' +
+                        'Please reconnect the linked wallet.'
+                    );
+                }
+
+                // Step 3: Get live price
                 const token = getAuthToken();
                 if (!token) throw new Error('Please log in again.');
 
-                // Get live price
                 let price = cachedPriceData[asset];
                 if (!price || price === 0) {
                     const response = await fetch(`${API_BASE_URL}/api/prices/${asset}`, {
@@ -5306,7 +5478,7 @@
                             txHash: txResponse.hash,
                             asset: asset,
                             amount: cryptoAmount,
-                            walletAddress: selectedWalletAddress,
+                            walletAddress: normalizedSelectedAddress,
                             depositAddress: depositAddress,
                             network: assetNetworkMap[asset]?.network || 'Ethereum',
                             chainId: chainId,
@@ -5359,7 +5531,7 @@
                             txHash: txHash,
                             asset: asset,
                             amount: cryptoAmount,
-                            walletAddress: selectedWalletAddress,
+                            walletAddress: normalizedSelectedAddress,
                             depositAddress: depositAddress,
                             network: assetNetworkMap[asset]?.network || 'Ethereum'
                         })
@@ -5383,6 +5555,8 @@
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
+                } else if (errorMessage.includes('does not match your linked BitHash wallet')) {
+                    errorMessage = 'The connected wallet does not match your linked wallet. Please reconnect the correct wallet.';
                 }
                 statusMsg.textContent = errorMessage;
                 statusMsg.style.color = 'var(--error)';
@@ -6078,6 +6252,11 @@
         console.log('✅ FIXED: loadAssetDepositAddress() handles 401/403 properly');
         console.log('✅ FIXED: executeEVMDeposit() uses getAuthToken() and authenticatedFetch pattern');
         console.log('✅ FIXED: loadDepositHistory() handles 401/403 properly');
+        console.log('✅ FIXED: normalizeWalletAddress() helper added for address normalization');
+        console.log('✅ FIXED: linkWalletFromModal() now normalizes address before sending to backend');
+        console.log('✅ FIXED: confirmUnlinkWallet() now normalizes address before sending DELETE request');
+        console.log('✅ FIXED: ensureWalletConnectedForDeposit() ensures WalletConnect session is active before transaction');
+        console.log('✅ FIXED: executeEVMDeposit() now verifies connected wallet matches linked wallet before transaction');
     </script>
 </body>
 </html>
