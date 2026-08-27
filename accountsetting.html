@@ -1319,7 +1319,7 @@
         }
 
         /* ============================================= */
-        /* TWO-FACTOR AUTHENTICATION */
+        /* TWO-FACTOR AUTHENTICATION - FIXED STATE MANAGEMENT */
         /* ============================================= */
         .two-factor-card {
             background: var(--bg-base);
@@ -1385,6 +1385,17 @@
         .two-factor-status-badge.disabled {
             background: rgba(108, 116, 128, 0.15);
             color: var(--text-muted);
+        }
+
+        .two-factor-status-badge.loading {
+            background: rgba(247, 166, 0, 0.15);
+            color: var(--accent);
+            animation: pulse 1.5s infinite;
+        }
+
+        .two-factor-status-badge.error {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--error);
         }
 
         .two-factor-description {
@@ -3316,7 +3327,7 @@
             </div>
 
             <!-- ============================================= -->
-            <!-- TWO-FACTOR AUTHENTICATION SECTION -->
+            <!-- TWO-FACTOR AUTHENTICATION SECTION - FIXED STATE -->
             <!-- ============================================= -->
             <div class="settings-section" id="two-factor-section">
                 <h2 class="settings-section-title">
@@ -3332,16 +3343,18 @@
                         <div class="two-factor-header-info">
                             <div class="two-factor-title">
                                 Authenticator App
-                                <span class="two-factor-status-badge disabled" id="auth-status-badge">Disabled</span>
+                                <span class="two-factor-status-badge loading" id="auth-status-badge">
+                                    <i class="fas fa-spinner fa-spin"></i> Loading
+                                </span>
                             </div>
                             <p class="two-factor-description" id="auth-status-description">
-                                Use Google Authenticator or another compatible TOTP application to generate secure verification codes.
+                                Loading authenticator status...
                             </p>
                             <p class="two-factor-meta" id="auth-status-meta"></p>
                         </div>
                     </div>
                     <div class="two-factor-actions" id="auth-actions">
-                        <button class="btn btn-primary btn-sm" id="auth-setup-btn">Set up authenticator</button>
+                        <button class="btn btn-primary btn-sm" id="auth-setup-btn" disabled>Set up authenticator</button>
                     </div>
                 </div>
             </div>
@@ -3813,7 +3826,7 @@
                 let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
                 try {
                     const errorData = await response.json();
-                    errorMessage = errorData.message || errorMessage;
+                    errorMessage = errorData.message || errorData.error?.message || errorMessage;
                 } catch {
                     // Ignore JSON parsing error
                 }
@@ -4332,21 +4345,37 @@
         }
 
         // =============================================
-        // TWO-FACTOR AUTHENTICATION - FIXED: Proper GET endpoint
+        // TWO-FACTOR AUTHENTICATION - FIXED: Proper state management
         // =============================================
         let authenticatorState = {
-            enabled: false,
-            enrollmentId: null,
+            loading: true,
+            error: null,
+            enabled: null,
             enabledAt: null,
+            enrollmentId: null,
             recoveryCodes: [],
             setupStep: 1
         };
 
         async function loadTwoFactorStatus() {
+            const badge = document.getElementById('auth-status-badge');
+            const description = document.getElementById('auth-status-description');
+            const meta = document.getElementById('auth-status-meta');
+            const actions = document.getElementById('auth-actions');
+            const setupBtn = document.getElementById('auth-setup-btn');
+
+            // Set loading state
+            badge.className = 'two-factor-status-badge loading';
+            badge.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading';
+            description.textContent = 'Loading authenticator status...';
+            meta.textContent = '';
+            if (setupBtn) setupBtn.disabled = true;
+
             try {
-                // FIX: Use the correct GET endpoint for 2FA status
                 const data = await apiCall(`${API_BASE_URL}/api/users/two-factor`);
 
+                authenticatorState.loading = false;
+                authenticatorState.error = null;
                 authenticatorState.enabled = data.authenticator?.enabled || false;
                 authenticatorState.enabledAt = data.authenticator?.enabledAt || null;
 
@@ -4354,9 +4383,20 @@
 
             } catch (error) {
                 console.error('Error loading 2FA status:', error);
-                // Don't show error notification on page load, just use defaults
-                authenticatorState.enabled = false;
-                updateAuthenticatorUI();
+                authenticatorState.loading = false;
+                authenticatorState.error = error.message || 'Failed to load status';
+
+                // Show error state - never fallback to disabled
+                badge.className = 'two-factor-status-badge error';
+                badge.innerHTML = '<i class="fas fa-exclamation-circle"></i> Error';
+                description.textContent = 'Unable to verify authenticator status. Please try again.';
+                meta.textContent = '';
+
+                actions.innerHTML = `
+                    <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
+                        <i class="fas fa-sync"></i> Retry
+                    </button>
+                `;
             }
         }
 
@@ -4366,7 +4406,7 @@
             const meta = document.getElementById('auth-status-meta');
             const actions = document.getElementById('auth-actions');
 
-            if (authenticatorState.enabled) {
+            if (authenticatorState.enabled === true) {
                 badge.textContent = 'Enabled';
                 badge.className = 'two-factor-status-badge enabled';
                 description.textContent = 'Your account is protected with authenticator-based two-factor authentication.';
@@ -4388,7 +4428,7 @@
                 document.getElementById('auth-recovery-codes-btn')?.addEventListener('click', regenerateRecoveryCodes);
                 document.getElementById('auth-disable-btn')?.addEventListener('click', disableAuthenticator);
 
-            } else {
+            } else if (authenticatorState.enabled === false) {
                 badge.textContent = 'Disabled';
                 badge.className = 'two-factor-status-badge disabled';
                 description.textContent = 'Use Google Authenticator or another compatible TOTP application to generate secure verification codes.';
@@ -4399,6 +4439,18 @@
                 `;
 
                 document.getElementById('auth-setup-btn')?.addEventListener('click', openAuthenticatorSetup);
+
+            } else {
+                // Should not happen after loadTwoFactorStatus() handles errors
+                badge.textContent = 'Unknown';
+                badge.className = 'two-factor-status-badge error';
+                description.textContent = 'Unable to determine authenticator status. Please refresh.';
+                meta.textContent = '';
+                actions.innerHTML = `
+                    <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
+                        <i class="fas fa-sync"></i> Retry
+                    </button>
+                `;
             }
         }
 
@@ -4410,6 +4462,14 @@
         let authOtpTimer = null;
 
         function openAuthenticatorSetup() {
+            // Double-check that authenticator is not already enabled
+            if (authenticatorState.enabled === true) {
+                showNotification('warning', 'Already Enabled', 'Authenticator is already enabled for your account.');
+                // Refresh status to ensure UI consistency
+                loadTwoFactorStatus();
+                return;
+            }
+
             const modal = document.getElementById('authenticator-modal');
             modal.classList.add('active');
             document.body.style.overflow = 'hidden';
@@ -4481,8 +4541,15 @@
 
             } catch (error) {
                 console.error('Error setting up authenticator:', error);
-                showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
-                closeAuthenticatorSetup();
+                // Check for 409 ALREADY_ENABLED
+                if (error.message && error.message.includes('ALREADY_ENABLED')) {
+                    showNotification('warning', 'Already Enabled', 'Authenticator is already enabled. Refreshing status...');
+                    await loadTwoFactorStatus();
+                    closeAuthenticatorSetup();
+                } else {
+                    showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
+                    closeAuthenticatorSetup();
+                }
             }
         }
 
@@ -4664,10 +4731,10 @@
             // Step 3: Verify
             document.getElementById('auth-step3-verify')?.addEventListener('click', verifyAuthenticatorOTP);
 
-            // Step 4: Finish - FIXED: Reload 2FA status after finishing
+            // Step 4: Finish
             document.getElementById('auth-step4-finish')?.addEventListener('click', function() {
                 closeAuthenticatorSetup();
-                // CRITICAL FIX: Reload 2FA status to update the UI badge
+                // Reload 2FA status to update the UI badge
                 loadTwoFactorStatus();
                 loadSecurityOverview();
                 showNotification('success', 'Setup Complete', 'Authenticator is now enabled for your account.');
@@ -4761,7 +4828,7 @@
         }
 
         // =============================================
-        // ACTIVE DEVICES - FIXED: Proper response handling
+        // ACTIVE DEVICES
         // =============================================
         async function loadDevices() {
             const container = document.getElementById('devices-container');
@@ -4770,7 +4837,6 @@
 
             try {
                 const response = await apiCall(`${API_BASE_URL}/api/users/devices`);
-                // FIX: Handle response.data.devices structure
                 const devices = response.data?.devices || [];
 
                 const activeCount = devices.filter(d => d.sessionStatus !== 'revoked').length;
@@ -4928,7 +4994,7 @@
         }
 
         // =============================================
-        // RECENT ACTIVITY - FIXED: Proper response handling
+        // RECENT ACTIVITY
         // =============================================
         let activityState = {
             page: 1,
@@ -4961,7 +5027,6 @@
 
                 const data = await apiCall(`${API_BASE_URL}/api/users/activity?${params}`);
 
-                // FIX: Handle response.data.activities structure
                 const activities = data.data?.activities || [];
                 const pagination = data.data?.pagination || {};
 
@@ -5641,36 +5706,23 @@
         }
 
         // =============================================
-        // KYC FUNCTIONS (kept from original)
+        // KYC FUNCTIONS (placeholders)
         // =============================================
-        // Note: KYC functions are preserved from the original implementation
-        // They are referenced in the HTML but not fully re-implemented here
-        // to keep this response focused on the core changes.
-        // The functions below are placeholders that will be called by the UI.
-
-        // Placeholder KYC functions to prevent errors
         function initKYCDocumentUpload() {
             // KYC document upload logic would go here
-            // Kept as placeholder for compatibility
         }
 
         function initFacialVerification() {
             // Facial verification logic would go here
-            // Kept as placeholder for compatibility
         }
 
         function handleDocumentUpload(e, side) {
-            // Document upload handler
             showNotification('info', 'KYC Upload', 'KYC document upload is not fully implemented in this version.');
         }
 
-        function removeDocument(side) {
-            // Remove document handler
-        }
+        function removeDocument(side) {}
 
-        function removeAddressDocument() {
-            // Remove address document handler
-        }
+        function removeAddressDocument() {}
 
         // =============================================
         // DATE/TIME UTILITIES
@@ -5736,7 +5788,7 @@
                 try {
                     await loadProfile();
                     await loadSecurityOverview();
-                    await loadTwoFactorStatus();
+                    await loadTwoFactorStatus(); // FIXED: Uses proper state management
                     await loadDevices();
                     await loadActivities(true);
 
