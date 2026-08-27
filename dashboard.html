@@ -8882,10 +8882,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let currentAsset = null;
         let assetSelectionVersion = 0;
 
-        // ===== FIXED: Active deposit operation lock =====
-        let activeDepositOperation = null;
-        let activeDepositOperationId = null;
-
         // =============================================
         // TOP ASSETS - Single source of truth
         // =============================================
@@ -9585,9 +9581,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             
             // Update the modal picker too
             updateAssetPickerUIModal(asset);
-            
-            // Update modal network
-            updateDepositModalNetwork();
         }
 
         function selectPickerAssetModal(symbol) {
@@ -9612,9 +9605,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             updateDepositRateInfo(asset.symbol);
             hideDepositAddress();
             hideDepositModalAddress();
-            
-            // Update modal network
-            updateDepositModalNetwork();
         }
 
         function updateAssetPickerUI(asset) {
@@ -9979,158 +9969,27 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         // WEB3 PROVIDER INITIALIZATION - EIP-6963
         // =============================================
-        // ===== FIXED: No window.ethereum fallback - EIP-6963 only =====
         function initializeEIP6963() {
             if (eip6963Initialized) return;
-            
-            const providers = new Map();
-            
             window.addEventListener("eip6963:announceProvider", (event) => {
                 const detail = event.detail;
-                // Store by RDNS for lookup
-                if (detail.info && detail.info.rdns) {
-                    providers.set(detail.info.rdns, detail);
-                }
                 if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
                     discoveredProviders.push(detail);
                 }
             });
-            
             window.dispatchEvent(new Event("eip6963:requestProvider"));
             eip6963Initialized = true;
             setTimeout(() => {
                 detectInstalledWallets();
             }, 2000);
-            
-            // Store providers map for later use
-            window._eip6963Providers = providers;
         }
 
-        // ===== FIXED: Get provider by RDNS only - no window.ethereum fallback =====
         function getProviderByRDNS(targetRdns) {
-            const providersMap = window._eip6963Providers || new Map();
-            
-            // First check EIP-6963 discovered providers
             for (const provider of discoveredProviders) {
-                if (provider.info && provider.info.rdns === targetRdns) {
-                    return provider;
-                }
+                if (provider.info.rdns === targetRdns) return provider;
             }
-            
-            // Also check the map directly
-            if (providersMap.has(targetRdns)) {
-                return providersMap.get(targetRdns);
-            }
-            
-            // REMOVED: window.ethereum fallback - EIP-6963 only
+            // ===== FIXED: Removed window.ethereum fallback - Desktop must use EIP-6963 only =====
             return null;
-        }
-
-        // ===== FIXED: detectInstalledWallets - EIP-6963 only =====
-        function detectInstalledWallets() {
-            let installed = false;
-            
-            // Only use EIP-6963 discovered providers
-            if (discoveredProviders.length > 0) {
-                installed = true;
-            }
-            
-            // REMOVED: window.ethereum detection - EIP-6963 only
-            // REMOVED: window.solana detection - not relevant for EVM
-            
-            isWalletInstalled = installed;
-            walletCheckComplete = true;
-            updateMobileDepositButtonVisibility();
-            return installed;
-        }
-
-        async function silentlyInitWalletConnect(attempt = 1) {
-            if (universalWalletProvider) {
-                return universalWalletProvider;
-            }
-            if (attempt > MAX_WALLETCONNECT_RETRIES) {
-                console.error('WalletConnect SDK failed to load after maximum retries');
-                return null;
-            }
-            try {
-                const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
-                if (!ProviderClass || typeof ProviderClass.init !== 'function') {
-                    await new Promise(r => setTimeout(r, 1000));
-                    return await silentlyInitWalletConnect(attempt + 1);
-                }
-                universalWalletProvider = await ProviderClass.init({
-                    projectId: '3f054c15e97b05dda5a4dcfd652bc753',
-                    showQrModal: false,
-                    chains: [1],
-                    methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction", "wallet_switchEthereumChain", "wallet_addEthereumChain"],
-                    events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update"],
-                    metadata: {
-                        name: 'BitHash Capital',
-                        description: 'Digital Asset Platform',
-                        url: 'https://www.bithashcapital.live/',
-                        icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
-                    },
-                    qrModalOptions: {
-                        desktopLinks: [],
-                        mobileLinks: []
-                    }
-                });
-                signClient = universalWalletProvider;
-                walletConnectInitialized = true;
-                universalWalletProvider.on("session_request", (data) => {
-                    console.log("WalletConnect session_request received:", data);
-                    wcSessionState.status = 'session_established';
-                    wcSessionState.session = data;
-                });
-                universalWalletProvider.on("connect", (data) => {
-                    console.log("WalletConnect CONNECT event fired");
-                    wcSessionState.status = 'connected';
-                    if (data && data.accounts && data.accounts.length > 0) {
-                        web3WalletAddress = data.accounts[0];
-                        wcSessionState.accounts = data.accounts;
-                    }
-                    if (data && data.chainId) {
-                        wcSessionState.chainId = data.chainId;
-                    }
-                });
-                universalWalletProvider.on("disconnect", (data) => {
-                    console.log("WalletConnect DISCONNECT event fired");
-                    web3WalletAddress = null;
-                    universalWalletProvider = null;
-                    walletConnectInitialized = false;
-                    wcSessionState.status = 'idle';
-                    wcSessionState.session = null;
-                    wcSessionState.accounts = [];
-                });
-                universalWalletProvider.on("chainChanged", (data) => {
-                    console.log("WalletConnect chainChanged:", data);
-                    web3Network = data;
-                    wcSessionState.chainId = data;
-                });
-                universalWalletProvider.on("accountsChanged", (data) => {
-                    console.log("WalletConnect accountsChanged:", data);
-                    if (data && data.length > 0) {
-                        web3WalletAddress = data[0];
-                        wcSessionState.accounts = data;
-                    }
-                });
-                universalWalletProvider.on("session_update", (data) => {
-                    console.log("WalletConnect session_update:", data);
-                    wcSessionState.status = 'session_established';
-                    if (data && data.accounts && data.accounts.length > 0) {
-                        web3WalletAddress = data[0];
-                        wcSessionState.accounts = data;
-                    }
-                });
-                return universalWalletProvider;
-            } catch (err) {
-                console.error('Provider init error:', err);
-                if (attempt < MAX_WALLETCONNECT_RETRIES) {
-                    await new Promise(r => setTimeout(r, 1000));
-                    return await silentlyInitWalletConnect(attempt + 1);
-                }
-                return null;
-            }
         }
 
         function isMobileDevice() { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent); }
@@ -10192,47 +10051,37 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         // CONNECT SELECTED WALLET - Uses premium selector
         // =============================================
-        // ===== FIXED: Mobile WalletConnect lifecycle - proper flow =====
-        // ===== FIXED: No window.ethereum fallback - EIP-6963 only =====
         async function connectSelectedWallet() {
+            // Use the selected wallet from the premium picker
             const walletType = selectedWallet.id;
             const connectBtn = document.getElementById('web3-connect-btn');
             const statusDiv = document.getElementById('web3-status-indicator');
             const errorDiv = document.getElementById('web3-error-msg');
-            
-            // Prevent concurrent connections
             if (isConnecting) return;
-            
-            // Prevent duplicate wallet connections
-            const existingWallet = connectedWallets.find(w => w.type === walletType);
-            if (existingWallet) {
-                errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-                errorDiv.style.display = 'block';
-                showNotification('warning', 'Wallet Already Connected',
-                    `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
-                return;
-            }
-            
             isConnecting = true;
             wcSessionState.status = 'connecting';
             setButtonLoading(connectBtn, 'processing', 'Linking...');
             errorDiv.style.display = 'none';
-            
             try {
-                // Check if this is desktop or mobile
-                const isMobile = isMobileDevice();
-                
-                if (!isMobile) {
-                    // ===== DESKTOP: EIP-6963 only =====
+                const existingWallet = connectedWallets.find(w => w.type === walletType);
+                if (existingWallet) {
+                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+                    errorDiv.style.display = 'block';
+                    showNotification('warning', 'Wallet Already Connected',
+                        `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                    return;
+                }
+                if (!isMobileDevice()) {
                     const targetRdns = {
                         'metamask': 'io.metamask',
                         'trust': 'com.trustwallet.app',
                         'phantom': 'app.phantom',
                         'rainbow': 'me.rainbow'
                     }[walletType] || 'io.metamask';
-                    
                     const injectedTarget = getProviderByRDNS(targetRdns);
-                    
                     if (injectedTarget) {
                         try {
                             setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
@@ -10274,7 +10123,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             throw err;
                         }
                     } else {
-                        // No EIP-6963 provider found - redirect to install
                         const appStoreUrl = getAppStoreUrl(walletType);
                         showNotification('info', 'Wallet Required',
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
@@ -10284,137 +10132,107 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
                     }
-                } else {
-                    // ===== MOBILE: WalletConnect v2 only =====
-                    console.log('Mobile flow: initializing WalletConnect for', walletType);
-                    
-                    // Get or create WC session
-                    const provider = await silentlyInitWalletConnect();
-                    if (!provider) {
-                        const appStoreUrl = getAppStoreUrl(walletType);
-                        showNotification('info', 'Wallet Required',
-                            `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
-                        window.open(appStoreUrl, '_blank');
-                        isConnecting = false;
-                        connectBtn.disabled = false;
-                        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                        return;
-                    }
-                    
-                    setButtonLoading(connectBtn, 'approving', 'Connecting...');
-                    
-                    // Generate WC URI
-                    let wcUri = null;
-                    const uriPromise = new Promise((resolve) => {
-                        const uriHandler = (uri) => {
-                            console.log('WalletConnect URI emitted:', uri);
-                            wcUri = uri;
-                            activeWcUri = uri;
-                            wcSessionState.uri = uri;
-                            wcSessionState.status = 'uri_generated';
-                            resolve(uri);
-                        };
-                        provider.once("display_uri", uriHandler);
-                        setTimeout(() => {
-                            if (provider._uri) {
-                                wcUri = provider._uri;
-                                activeWcUri = wcUri;
-                                wcSessionState.uri = wcUri;
-                                wcSessionState.status = 'uri_generated';
-                                resolve(wcUri);
-                            }
-                        }, 500);
-                    });
-                    
-                    const connectPromise = provider.connect();
-                    const uri = await uriPromise;
-                    console.log('WalletConnect URI ready:', uri);
-                    
-                    // Create deep link and open wallet
-                    const deepLink = openDeepLink(walletType, uri);
-                    console.log('Opening wallet with deep link:', deepLink);
-                    wcSessionState.status = 'wallet_launched';
-                    
-                    // ===== FIXED: Open wallet without navigating away =====
-                    // Use window.open for mobile - this opens the wallet app
-                    // without destroying the current page context
-                    window.open(deepLink, '_blank');
-                    
-                    setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
-                    
-                    // Wait for connection with timeout
-                    const connectResult = await Promise.race([
-                        connectPromise,
-                        new Promise((_, reject) => {
-                            setTimeout(() => reject(new Error('Connection timeout - please approve in your wallet')), 60000);
-                        })
-                    ]);
-                    
-                    // Get accounts after connection
-                    let accounts = provider.accounts;
-                    let attempts = 0;
-                    const maxAttempts = 30;
-                    while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                        try {
-                            accounts = await provider.request({ method: "eth_accounts" });
-                        } catch (e) {}
-                        attempts++;
-                    }
-                    
-                    if (!accounts || accounts.length === 0) {
-                        try {
-                            accounts = await provider.request({ method: "eth_requestAccounts" });
-                        } catch (e) {
-                            console.warn('eth_requestAccounts failed:', e);
-                        }
-                    }
-                    
-                    if (!accounts || accounts.length === 0) {
-                        throw new Error("No accounts found. Please approve in wallet.");
-                    }
-                    
-                    const address = accounts[0];
-                    const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                    if (walletExists) {
-                        errorDiv.textContent = 'This wallet address is already connected.';
-                        errorDiv.style.display = 'block';
-                        showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
-                        isConnecting = false;
-                        connectBtn.disabled = false;
-                        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                        return;
-                    }
-                    
-                    let chainId = '0x1';
-                    try {
-                        chainId = await provider.request({ method: 'eth_chainId' });
-                    } catch (e) {
-                        console.warn('Could not get chainId, using default');
-                    }
-                    
-                    await linkWalletToBackend(address, walletType, chainId);
-                    web3Provider = provider;
-                    wcSessionState.status = 'connected';
-                    wcSessionState.accounts = accounts;
-                    wcSessionState.chainId = chainId;
-                    
-                    setButtonLoading(connectBtn, 'submitted', 'Linked');
-                    setTimeout(() => {
-                        connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
-                        connectBtn.style.background = 'rgba(34,197,94,0.15)';
-                        connectBtn.style.color = '#22C55E';
-                        connectBtn.disabled = true;
-                    }, 500);
-                    
-                    showNotification('success', 'Wallet Connected',
-                        `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
                 }
+                console.log('Mobile flow: initializing WalletConnect for', walletType);
+                const provider = await silentlyInitWalletConnect();
+                if (!provider) {
+                    const appStoreUrl = getAppStoreUrl(walletType);
+                    showNotification('info', 'Wallet Required',
+                        `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
+                    window.open(appStoreUrl, '_blank');
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                    return;
+                }
+                setButtonLoading(connectBtn, 'approving', 'Connecting...');
+                let wcUri = null;
+                const uriPromise = new Promise((resolve) => {
+                    const uriHandler = (uri) => {
+                        console.log('WalletConnect URI emitted:', uri);
+                        wcUri = uri;
+                        activeWcUri = uri;
+                        wcSessionState.uri = uri;
+                        wcSessionState.status = 'uri_generated';
+                        resolve(uri);
+                    };
+                    provider.once("display_uri", uriHandler);
+                    setTimeout(() => {
+                        if (provider._uri) {
+                            wcUri = provider._uri;
+                            activeWcUri = wcUri;
+                            wcSessionState.uri = wcUri;
+                            wcSessionState.status = 'uri_generated';
+                            resolve(wcUri);
+                        }
+                    }, 500);
+                });
+                const connectPromise = provider.connect();
+                const uri = await uriPromise;
+                console.log('WalletConnect URI ready:', uri);
+                const deepLink = openDeepLink(walletType, uri);
+                console.log('Opening wallet with deep link:', deepLink);
+                wcSessionState.status = 'wallet_launched';
+                // ===== FIXED: Use window.location.href but with a more controlled approach =====
+                // The page will navigate away, but the WC session persists
+                window.location.href = deepLink;
+                setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
+                await connectPromise;
+                let accounts = provider.accounts;
+                let attempts = 0;
+                const maxAttempts = 30;
+                while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    try {
+                        accounts = await provider.request({ method: "eth_accounts" });
+                    } catch (e) {}
+                    attempts++;
+                }
+                if (!accounts || accounts.length === 0) {
+                    try {
+                        accounts = await provider.request({ method: "eth_requestAccounts" });
+                    } catch (e) {
+                        console.warn('eth_requestAccounts failed:', e);
+                    }
+                }
+                if (!accounts || accounts.length === 0) {
+                    throw new Error("No accounts found. Please approve in wallet.");
+                }
+                const address = accounts[0];
+                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+                if (walletExists) {
+                    errorDiv.textContent = 'This wallet address is already connected.';
+                    errorDiv.style.display = 'block';
+                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
+                    isConnecting = false;
+                    connectBtn.disabled = false;
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                    return;
+                }
+                let chainId = '0x1';
+                try {
+                    chainId = await provider.request({ method: 'eth_chainId' });
+                } catch (e) {
+                    console.warn('Could not get chainId, using default');
+                }
+                await linkWalletToBackend(address, walletType, chainId);
+                web3Provider = provider;
+                wcSessionState.status = 'connected';
+                wcSessionState.accounts = accounts;
+                wcSessionState.chainId = chainId;
+                setButtonLoading(connectBtn, 'submitted', 'Linked');
+                setTimeout(() => {
+                    connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
+                    connectBtn.style.background = 'rgba(34,197,94,0.15)';
+                    connectBtn.style.color = '#22C55E';
+                    connectBtn.disabled = true;
+                }, 500);
+                showNotification('success', 'Wallet Connected',
+                    `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
             } catch (error) {
                 console.error('Wallet connection error:', error);
                 wcSessionState.status = 'idle';
                 wcSessionState.error = error.message;
-                
                 let errorMessage = error.message || 'Failed to connect wallet.';
                 if (errorMessage.includes('user rejected')) {
                     errorMessage = 'Connection was rejected in your wallet. Please approve and try again.';
@@ -10423,12 +10241,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 } else if (errorMessage.includes('timeout')) {
                     errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
                 }
-                
                 errorDiv.textContent = errorMessage;
                 errorDiv.style.display = 'block';
                 showNotification('error', 'Connection Failed', errorMessage);
             }
-            
             isConnecting = false;
             connectBtn.disabled = false;
             if (!web3WalletAddress) {
@@ -10438,6 +10254,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
         function updateWalletLogo() {
             // This is now handled by the premium wallet picker
+            // The selectedWallet object is updated via selectWalletOption
         }
 
         // =============================================
@@ -10466,6 +10283,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         let priceFetchInterval = null;
+        // ===== FIXED: Remove cachedPriceData - use AppState.currentPrices instead =====
+        // cachedPriceData is removed to avoid duplicate price stores
+        // All prices now live in AppState.currentPrices
 
         // ===== FIXED: updateDepositRateInfo uses canonical price store =====
         async function updateDepositRateInfo(assetSymbol) {
@@ -10596,7 +10416,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
             } else if (amountUSD > 0 && (!price || price <= 0)) {
-                fiatDisplay.textContent = '≈ Loading...';
+                fiatDisplay.textContent = '≈ Updating...';
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
             }
@@ -10640,7 +10460,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
             } else if (amountUSD > 0 && (!price || price <= 0)) {
-                fiatDisplay.textContent = '≈ Loading...';
+                fiatDisplay.textContent = '≈ Updating...';
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
             }
@@ -10776,9 +10596,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             // Update modal picker to match main
             if (currentAsset) {
                 updateAssetPickerUIModal(currentAsset);
-                // ===== FIXED: Update modal network when opening =====
+                // ===== FIXED: Update modal network and price when opening =====
                 updateDepositModalNetwork();
                 updateDepositModalRateInfo(currentAsset.symbol);
+                // Update modal amount display
+                updateDepositModalFiatEstimate();
             }
             const mainAmount = document.getElementById('deposit-amount-input');
             const modalAmount = document.getElementById('deposit-modal-amount-input');
@@ -10808,39 +10630,37 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
-        // ===== FIXED: executeDeposit with operation locking and proper mobile flow =====
-        async function executeDeposit() {
-            // ===== FIXED: Operation lock - prevent concurrent deposits =====
-            if (activeDepositOperation) {
-                showNotification(
-                    'warning',
-                    'Deposit already in progress',
-                    'Please complete or cancel the current deposit request before starting another.'
-                );
-                return;
-            }
+        // ===== FIXED: Add transaction-level lock to prevent concurrent deposits =====
+        let activeDepositOperation = null;
 
+        async function executeDeposit() {
             const amountInput = document.getElementById('deposit-amount-input');
             const depositBtn = document.getElementById('deposit-btn');
             const statusMsg = document.getElementById('deposit-status-msg');
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const amountUSD = parseFloat(amountInput.value);
             
+            // ===== FIXED: Check for active deposit operation =====
+            if (activeDepositOperation) {
+                showNotification('warning', 'Deposit in Progress', 
+                    'Approve or cancel the current wallet request before starting another.');
+                return;
+            }
+            
             // ===== FIXED: Create operation ID =====
-            const operationId = crypto.randomUUID ? crypto.randomUUID() : 'dep_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            const operationId = 'dep_' + crypto.randomUUID().substring(0, 8);
             activeDepositOperation = {
                 id: operationId,
+                type: 'deposit',
                 asset: asset,
                 amount: amountUSD,
                 status: 'created',
                 createdAt: Date.now()
             };
-            activeDepositOperationId = operationId;
             
             setButtonLoading(depositBtn, 'processing', 'Processing...');
             statusMsg.style.color = 'var(--text-secondary)';
             statusMsg.textContent = 'Initializing deposit...';
-            
             const hasWalletAddress = web3WalletAddress || (connectedWallets && connectedWallets.length > 0);
             if (!hasWalletAddress) {
                 statusMsg.style.color = 'var(--error)';
@@ -10848,39 +10668,31 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                activeDepositOperationId = null;
                 return;
             }
-            
             const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
             const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
-            
             if (!walletToUse) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = 'No wallet found. Please link a wallet.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                activeDepositOperationId = null;
                 return;
             }
-            
             if (!amountUSD || amountUSD <= 0) {
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = 'Please enter a valid amount.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                activeDepositOperationId = null;
                 return;
             }
-            
             try {
                 const token = getAuthToken();
                 if (!token) {
                     handleSessionExpired();
                     throw new Error('Please log in again.');
                 }
-                
-                // Get price from canonical store
+                // ===== FIXED: Use canonical price store =====
                 let price = 0;
                 const priceData = AppState.currentPrices[asset];
                 if (priceData && priceData.usd > 0) {
@@ -10898,13 +10710,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     }
                 }
                 if (!price || price === 0) throw new Error('Price not available for this asset.');
-                
                 const cryptoAmount = amountUSD / price;
                 statusMsg.textContent = `Amount: ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()}`;
-                
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
-                
                 statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -10927,7 +10736,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 const isERC20 = addressData.data?.isERC20 || false;
                 const tokenSymbol = addressData.data?.tokenSymbol || asset.toUpperCase();
                 const chainId = addressData.data?.chainId || 1;
-                
                 console.log("=== ERC20 Deposit ===");
                 console.log("Token:", tokenSymbol);
                 console.log("Chain ID:", chainId);
@@ -10936,8 +10744,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.log("Recipient:", depositAddress);
                 console.log("Amount (USD):", amountUSD);
                 console.log("Amount (Crypto):", cryptoAmount);
-                console.log("Operation ID:", operationId);
-                
                 if (isEVM) {
                     let providerToUse = web3Provider;
                     if (!providerToUse) {
@@ -10945,9 +10751,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             providerToUse = universalWalletProvider;
                             console.log('Reusing existing WalletConnect session');
                         } else {
-                            const isMobile = isMobileDevice();
-                            if (isMobile) {
-                                // Mobile: Use WalletConnect
+                            const targetRdns = {
+                                'metamask': 'io.metamask',
+                                'trust': 'com.trustwallet.app',
+                                'phantom': 'app.phantom',
+                                'rainbow': 'me.rainbow'
+                            }[walletTypeToUse] || 'io.metamask';
+                            const injectedTarget = getProviderByRDNS(targetRdns);
+                            if (injectedTarget) {
+                                providerToUse = injectedTarget.provider;
+                            } else {
                                 if (!universalWalletProvider) {
                                     const wcProvider = await silentlyInitWalletConnect();
                                     if (!wcProvider) {
@@ -10957,24 +10770,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 } else {
                                     providerToUse = universalWalletProvider;
                                 }
-                            } else {
-                                // Desktop: EIP-6963 only
-                                const targetRdns = {
-                                    'metamask': 'io.metamask',
-                                    'trust': 'com.trustwallet.app',
-                                    'phantom': 'app.phantom',
-                                    'rainbow': 'me.rainbow'
-                                }[walletTypeToUse] || 'io.metamask';
-                                const injectedTarget = getProviderByRDNS(targetRdns);
-                                if (injectedTarget) {
-                                    providerToUse = injectedTarget.provider;
-                                } else {
-                                    throw new Error('No wallet provider available. Please install a wallet.');
-                                }
                             }
                         }
                     }
-                    
                     let accounts;
                     try {
                         accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
@@ -10984,7 +10782,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     if (!accounts || accounts.length === 0) {
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
-                    
                     let currentChainId;
                     try {
                         currentChainId = await providerToUse.request({ method: 'eth_chainId' });
@@ -10994,7 +10791,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         console.warn('Could not get chainId, assuming default:', e);
                         currentChainId = '0x1';
                     }
-                    
                     const requiredChainId = chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`;
                     if (!compareChainIds(currentChainId, requiredChainId)) {
                         statusMsg.textContent = `Switching to ${networkInfo.network}...`;
@@ -11068,7 +10864,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     } else {
                         statusMsg.textContent = `Already on ${networkInfo.network}`;
                     }
-                    
                     try {
                         accounts = await providerToUse.request({ method: 'eth_requestAccounts' });
                     } catch (e) {
@@ -11077,28 +10872,20 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     if (!accounts || accounts.length === 0) {
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
-                    
                     const isMobile = isMobileDevice();
                     if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
                         statusMsg.textContent = 'Opening wallet app...';
-                        console.log('Mobile device detected - opening wallet app');
-                        const walletDeepLink = {
-                            'metamask': 'https://metamask.app.link/',
-                            'trust': 'https://link.trustwallet.com/',
-                            'rainbow': 'rainbow://',
-                            'phantom': 'phantom://'
-                        }[walletTypeToUse] || 'https://metamask.app.link/';
-                        // Use window.open without navigating away
-                        const wakeWindow = window.open(walletDeepLink, '_blank');
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        if (wakeWindow && !wakeWindow.closed) {
-                            try { wakeWindow.close(); } catch (e) {}
+                        console.log('Mobile device detected - waking up wallet app');
+                        // ===== FIXED: Use proper deep link with WC URI =====
+                        const wcUri = activeWcUri || wcSessionState.uri;
+                        if (wcUri) {
+                            const deepLink = openDeepLink(walletTypeToUse, wcUri);
+                            window.location.href = deepLink;
                         }
                         statusMsg.textContent = 'Ready to approve transaction in wallet...';
                         setButtonLoading(depositBtn, 'approving', 'Open wallet to approve...');
                         await new Promise(resolve => setTimeout(resolve, 1000));
                     }
-                    
                     if (isERC20 && contractAddress) {
                         statusMsg.textContent = 'Verifying token balance...';
                         try {
@@ -11183,6 +10970,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             console.log(`📤 Transaction sent: ${txResponse.hash}`);
                             statusMsg.textContent = 'Transaction submitted!';
                             setButtonLoading(depositBtn, 'submitted', 'Submitted');
+                            // ===== FIXED: Show transaction hash immediately =====
+                            statusMsg.textContent = `✅ Submitted! Tx: ${txResponse.hash.substring(0, 10)}...${txResponse.hash.substring(txResponse.hash.length - 8)}`;
                             showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${networkInfo.network}.`);
                             statusMsg.textContent = 'Confirming with backend...';
                             const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
@@ -11200,8 +10989,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     network: networkInfo.network,
                                     chainId: chainId,
                                     contractAddress: contractAddress,
-                                    tokenDecimals: tokenDecimals,
-                                    operationId: operationId
+                                    tokenDecimals: tokenDecimals
                                 })
                             });
                             if (confirmResponse.ok) {
@@ -11244,6 +11032,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         if (isMobileDevice()) {
                             statusMsg.textContent = 'Opening wallet for approval...';
                             setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
+                            const wcUri = activeWcUri || wcSessionState.uri;
+                            if (wcUri) {
+                                const deepLink = openDeepLink(walletTypeToUse, wcUri);
+                                window.location.href = deepLink;
+                            }
                             try {
                                 await providerToUse.request({ method: 'eth_chainId' });
                             } catch (e) {
@@ -11260,6 +11053,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         console.log("✅ Native transfer sent without calldata (pure ETH transfer)");
                         statusMsg.textContent = 'Transaction submitted!';
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
+                        // ===== FIXED: Show transaction hash immediately =====
+                        statusMsg.textContent = `✅ Submitted! Tx: ${txHash.substring(0, 10)}...${txHash.substring(txHash.length - 8)}`;
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
                         statusMsg.textContent = 'Confirming with backend...';
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
@@ -11274,8 +11069,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 amount: cryptoAmount,
                                 walletAddress: walletToUse,
                                 depositAddress: depositAddress,
-                                network: networkInfo.network,
-                                operationId: operationId
+                                network: networkInfo.network
                             })
                         });
                         if (confirmResponse.ok) {
@@ -11312,8 +11106,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             amount: cryptoAmount,
                             depositAddress: depositAddress,
                             walletAddress: walletToUse,
-                            network: networkInfo.network,
-                            operationId: operationId
+                            network: networkInfo.network
                         })
                     });
                     if (monitorResponse.ok) {
@@ -11324,11 +11117,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         setButtonLoading(depositBtn, 'idle', 'Deposit');
                     }, 3000);
                 }
-                
-                // ===== FIXED: Clear active operation on success =====
-                activeDepositOperation = null;
-                activeDepositOperationId = null;
-                
             } catch (error) {
                 console.error('Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
@@ -11359,11 +11147,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 statusMsg.textContent = errorMessage;
                 showNotification('error', 'Deposit Failed', errorMessage);
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
-                
-                // ===== FIXED: Clear active operation on error =====
-                activeDepositOperation = null;
-                activeDepositOperationId = null;
             }
+            // ===== FIXED: Clear active deposit operation =====
+            activeDepositOperation = null;
         }
 
         function updateDepositInputPlaceholder() {
@@ -12534,37 +12320,35 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }
                 if (response.ok) {
                     const data = await response.json();
-                    // Ensure currentPrice is attached from canonical store if missing
-                    const assetsWithPrices = (data.assets || topAssets.slice(0, 20).map(a => ({ symbol: a.symbol, name: a.name, logo: a.logo }))).map(c => {
-                        const priceData = AppState.currentPrices[c.symbol];
-                        return {
-                            ...c,
-                            currentPrice: priceData && priceData.usd > 0 ? priceData.usd : c.currentPrice || 0
-                        };
+                    // ===== FIXED: Ensure currentPrice is attached to target assets =====
+                    allTargetCryptos = data.assets || topAssets.slice(0, 20).map(a => ({ 
+                        symbol: a.symbol, 
+                        name: a.name, 
+                        logo: a.logo,
+                        currentPrice: AppState.currentPrices[a.symbol]?.usd || 0
+                    }));
+                    // Attach current prices from canonical store
+                    allTargetCryptos.forEach(crypto => {
+                        const priceData = AppState.currentPrices[crypto.symbol];
+                        if (priceData && priceData.usd > 0) {
+                            crypto.currentPrice = priceData.usd;
+                        }
                     });
-                    allTargetCryptos = assetsWithPrices;
                 } else {
-                    // Fallback with prices from canonical store
-                    allTargetCryptos = topAssets.slice(0, 20).map(a => {
-                        const priceData = AppState.currentPrices[a.symbol];
-                        return {
-                            symbol: a.symbol,
-                            name: a.name,
-                            logo: a.logo,
-                            currentPrice: priceData && priceData.usd > 0 ? priceData.usd : 0
-                        };
-                    });
+                    allTargetCryptos = topAssets.slice(0, 20).map(a => ({ 
+                        symbol: a.symbol, 
+                        name: a.name, 
+                        logo: a.logo,
+                        currentPrice: AppState.currentPrices[a.symbol]?.usd || 0
+                    }));
                 }
             } catch (error) {
-                allTargetCryptos = topAssets.slice(0, 20).map(a => {
-                    const priceData = AppState.currentPrices[a.symbol];
-                    return {
-                        symbol: a.symbol,
-                        name: a.name,
-                        logo: a.logo,
-                        currentPrice: priceData && priceData.usd > 0 ? priceData.usd : 0
-                    };
-                });
+                allTargetCryptos = topAssets.slice(0, 20).map(a => ({ 
+                    symbol: a.symbol, 
+                    name: a.name, 
+                    logo: a.logo,
+                    currentPrice: AppState.currentPrices[a.symbol]?.usd || 0
+                }));
             }
         }
 
@@ -12586,7 +12370,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         <div class="asset-selector-item-info">
                             <div class="asset-selector-item-name">${crypto.name}</div>
                             <div class="asset-selector-item-symbol">${crypto.symbol.toUpperCase()}</div>
-                            ${crypto.currentPrice > 0 ? `<div style="font-size: 0.65rem; color: var(--text-muted);">${formatFiat(crypto.currentPrice)}</div>` : ''}
                         </div>
                     `;
                 toListContainer.appendChild(item);
@@ -12609,7 +12392,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             <div class="asset-selector-item-info">
                                 <div class="asset-selector-item-name">${crypto.name}</div>
                                 <div class="asset-selector-item-symbol">${crypto.symbol.toUpperCase()}</div>
-                                ${crypto.currentPrice > 0 ? `<div style="font-size: 0.65rem; color: var(--text-muted);">${formatFiat(crypto.currentPrice)}</div>` : ''}
                             </div>
                         `;
                     toListContainer.appendChild(item);
@@ -12628,52 +12410,27 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             document.getElementById('convert-step3-to-symbol').textContent = selectedToAssetObj.symbol.toUpperCase();
             const amountInput = document.getElementById('convert-amount-step3');
             amountInput.value = '';
-            // Show loading state instead of 0.000000
             document.getElementById('convert-step3-estimate').textContent = '—';
             amountInput.oninput = () => {
-                const amount = amountInput.value;
-                if (amount && parseFloat(amount) > 0) {
-                    estimateConversionStep3(amount);
+                const val = parseFloat(amountInput.value);
+                if (val && val > 0) {
+                    estimateConversionStep3(val);
                 } else {
                     document.getElementById('convert-step3-estimate').textContent = '—';
                 }
             };
         }
 
-        // ===== FIXED: estimateConversionStep3 with proper price fetching =====
         function estimateConversionStep3(amount) {
             if (!selectedFromAssetObj || !selectedToAssetObj) return;
-            
-            // Get from price from canonical store or from the asset object
-            let fromPrice = selectedFromAssetObj.currentPrice || 0;
-            if (!fromPrice || fromPrice <= 0) {
-                const priceData = AppState.currentPrices[selectedFromAssetObj.symbol];
-                if (priceData && priceData.usd > 0) {
-                    fromPrice = priceData.usd;
-                }
-            }
-            
-            // Get to price from canonical store or from the target asset
-            let toPrice = selectedToAssetObj.currentPrice || 0;
-            if (!toPrice || toPrice <= 0) {
-                const priceData = AppState.currentPrices[selectedToAssetObj.symbol];
-                if (priceData && priceData.usd > 0) {
-                    toPrice = priceData.usd;
-                }
-            }
-            
-            const amountNum = parseFloat(amount);
-            if (fromPrice && toPrice && amountNum > 0 && fromPrice > 0 && toPrice > 0) {
-                const estimated = (amountNum * fromPrice) / toPrice;
+            const fromPrice = selectedFromAssetObj.currentPrice || 0;
+            const toPrice = allTargetCryptos.find(c => c.symbol === selectedToAssetObj.symbol)?.currentPrice || 0;
+            if (fromPrice && toPrice && amount) {
+                const estimated = (parseFloat(amount) * fromPrice) / toPrice;
                 const estimatedAfterFee = estimated * (1 - 0.005);
                 document.getElementById('convert-step3-estimate').textContent = formatNumberWithCommas(estimatedAfterFee, 8);
             } else {
-                // Show loading/placeholder instead of 0.000000
-                if (amountNum > 0) {
-                    document.getElementById('convert-step3-estimate').textContent = '—';
-                } else {
-                    document.getElementById('convert-step3-estimate').textContent = '—';
-                }
+                document.getElementById('convert-step3-estimate').textContent = '—';
             }
         }
 
@@ -13508,7 +13265,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         function detectInstalledWallets() {
             let installed = false;
             if (discoveredProviders.length > 0) installed = true;
-            // REMOVED: window.ethereum detection - EIP-6963 only
+            // ===== FIXED: Removed window.ethereum from wallet detection =====
             if (window.solana) installed = true;
             if (window.WalletConnectProvider) installed = true;
             isWalletInstalled = installed;
@@ -14035,6 +13792,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     if (data.data && data.data.asset) AppState.defaultAsset = data.data.asset;
                 }
             } catch (error) { console.warn('Could not fetch deposit asset, using default BTC'); }
+            // ===== FIXED: Do not overwrite user's saved displayAsset with default =====
+            // Only set displayAsset if it hasn't been loaded from preferences yet
             if (!userPreferences.displayAsset || userPreferences.displayAsset === 'btc') {
                 userPreferences.displayAsset = AppState.defaultAsset;
             }
@@ -14622,8 +14381,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     AppState.selectedAsset = topAssets[0];
                     updateAssetPickerUI(currentAsset);
                     updateAssetPickerUIModal(currentAsset);
-                    // ===== FIXED: Initialize modal network =====
-                    updateDepositModalNetwork();
                 }
                 
                 // ===== FIXED: Fetch all 20 crypto rates on initialization =====
@@ -14672,6 +14429,137 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }, 1000);
         });
 
+        // =============================================
+        // WalletConnect silent init - kept for compatibility
+        // =============================================
+        async function silentlyInitWalletConnect(attempt = 1) {
+            if (universalWalletProvider) {
+                return universalWalletProvider;
+            }
+            if (attempt > MAX_WALLETCONNECT_RETRIES) {
+                console.error('WalletConnect SDK failed to load after maximum retries');
+                return null;
+            }
+            try {
+                const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
+                if (!ProviderClass || typeof ProviderClass.init !== 'function') {
+                    await new Promise(r => setTimeout(r, 1000));
+                    return await silentlyInitWalletConnect(attempt + 1);
+                }
+                universalWalletProvider = await ProviderClass.init({
+                    projectId: '3f054c15e97b05dda5a4dcfd652bc753',
+                    showQrModal: false,
+                    chains: [1],
+                    methods: ["eth_requestAccounts", "personal_sign", "eth_signTypedData_v4", "eth_sendTransaction", "wallet_switchEthereumChain", "wallet_addEthereumChain"],
+                    events: ["accountsChanged", "chainChanged", "disconnect", "session_event", "session_update"],
+                    metadata: {
+                        name: 'BitHash Capital',
+                        description: 'Digital Asset Platform',
+                        url: 'https://www.bithashcapital.live/',
+                        icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
+                    },
+                    qrModalOptions: {
+                        desktopLinks: [],
+                        mobileLinks: []
+                    }
+                });
+                signClient = universalWalletProvider;
+                walletConnectInitialized = true;
+                universalWalletProvider.on("session_request", (data) => {
+                    console.log("WalletConnect session_request received:", data);
+                    wcSessionState.status = 'session_established';
+                    wcSessionState.session = data;
+                });
+                universalWalletProvider.on("connect", (data) => {
+                    console.log("WalletConnect CONNECT event fired");
+                    wcSessionState.status = 'connected';
+                    if (data && data.accounts && data.accounts.length > 0) {
+                        web3WalletAddress = data.accounts[0];
+                        wcSessionState.accounts = data.accounts;
+                    }
+                    if (data && data.chainId) {
+                        wcSessionState.chainId = data.chainId;
+                    }
+                });
+                universalWalletProvider.on("disconnect", (data) => {
+                    console.log("WalletConnect DISCONNECT event fired");
+                    web3WalletAddress = null;
+                    universalWalletProvider = null;
+                    walletConnectInitialized = false;
+                    wcSessionState.status = 'idle';
+                    wcSessionState.session = null;
+                    wcSessionState.accounts = [];
+                });
+                universalWalletProvider.on("chainChanged", (data) => {
+                    console.log("WalletConnect chainChanged:", data);
+                    web3Network = data;
+                    wcSessionState.chainId = data;
+                });
+                universalWalletProvider.on("accountsChanged", (data) => {
+                    console.log("WalletConnect accountsChanged:", data);
+                    if (data && data.length > 0) {
+                        web3WalletAddress = data[0];
+                        wcSessionState.accounts = data;
+                    }
+                });
+                universalWalletProvider.on("session_update", (data) => {
+                    console.log("WalletConnect session_update:", data);
+                    wcSessionState.status = 'session_established';
+                    if (data && data.accounts && data.accounts.length > 0) {
+                        web3WalletAddress = data[0];
+                        wcSessionState.accounts = data;
+                    }
+                });
+                return universalWalletProvider;
+            } catch (err) {
+                console.error('Provider init error:', err);
+                if (attempt < MAX_WALLETCONNECT_RETRIES) {
+                    await new Promise(r => setTimeout(r, 1000));
+                    return await silentlyInitWalletConnect(attempt + 1);
+                }
+                return null;
+            }
+        }
+
+        // =============================================
+        // PAGE VISIBILITY HANDLER - For mobile WC session restoration
+        // =============================================
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+                // Page became visible - check if we have a pending WC operation
+                if (wcSessionState.status === 'wallet_launched' || wcSessionState.status === 'uri_generated') {
+                    console.log('Page became visible after wallet launch - checking session status');
+                    // If we have a pending operation, try to resume it
+                    if (activeDepositOperation) {
+                        console.log('Resuming active deposit operation:', activeDepositOperation.id);
+                        // The operation will be resumed by the next user action
+                        showNotification('info', 'Returned from Wallet', 'Please check your wallet approval status.');
+                    }
+                }
+            }
+        });
+
+        // =============================================
+        // PAGE SHOW/HIDE HANDLERS - For mobile WC
+        // =============================================
+        window.addEventListener('pageshow', function(event) {
+            if (event.persisted) {
+                console.log('Page restored from bfcache - checking WC session');
+                // Session may have been restored, check status
+                if (wcSessionState.status === 'connected') {
+                    showNotification('success', 'Wallet Connected', 'Your wallet session is active.');
+                }
+            }
+        });
+
+        window.addEventListener('pagehide', function() {
+            // Page is being hidden - don't do anything destructive
+            console.log('Page hiding - preserving WC session');
+        });
+
+        // =============================================
+        // CLOSE PICKERS ON ESCAPE - Already implemented above
+        // =============================================
     </script>
 </body>
 </html>
