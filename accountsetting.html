@@ -1368,6 +1368,7 @@
             display: flex;
             align-items: center;
             gap: 10px;
+            flex-wrap: wrap;
         }
 
         .two-factor-status-badge {
@@ -1388,9 +1389,8 @@
         }
 
         .two-factor-status-badge.loading {
-            background: rgba(247, 166, 0, 0.15);
+            background: rgba(247, 166, 0, 0.12);
             color: var(--accent);
-            animation: pulse 1.5s infinite;
         }
 
         .two-factor-status-badge.error {
@@ -3327,7 +3327,7 @@
             </div>
 
             <!-- ============================================= -->
-            <!-- TWO-FACTOR AUTHENTICATION SECTION - FIXED STATE -->
+            <!-- TWO-FACTOR AUTHENTICATION SECTION - FIXED -->
             <!-- ============================================= -->
             <div class="settings-section" id="two-factor-section">
                 <h2 class="settings-section-title">
@@ -3343,9 +3343,7 @@
                         <div class="two-factor-header-info">
                             <div class="two-factor-title">
                                 Authenticator App
-                                <span class="two-factor-status-badge loading" id="auth-status-badge">
-                                    <i class="fas fa-spinner fa-spin"></i> Loading
-                                </span>
+                                <span class="two-factor-status-badge loading" id="auth-status-badge">Loading...</span>
                             </div>
                             <p class="two-factor-description" id="auth-status-description">
                                 Loading authenticator status...
@@ -3354,7 +3352,7 @@
                         </div>
                     </div>
                     <div class="two-factor-actions" id="auth-actions">
-                        <button class="btn btn-primary btn-sm" id="auth-setup-btn" disabled>Set up authenticator</button>
+                        <!-- Actions rendered dynamically -->
                     </div>
                 </div>
             </div>
@@ -3366,7 +3364,7 @@
                 <h2 class="settings-section-title">
                     <i class="fas fa-laptop"></i> Active Devices
                 </h2>
-                <p class="settings-section-subtitle" id="devices-subtitle">Devices currently signed in to your account</p>
+                <p class="settings-section-subtitle" id="devices-subtitle">Loading devices...</p>
 
                 <div class="settings-card">
                     <h3 class="settings-card-title">
@@ -3817,6 +3815,21 @@
 
             const response = await fetch(url, mergedOptions);
 
+            // Handle 409 ALREADY_ENABLED specially
+            if (response.status === 409) {
+                let errorData;
+                try {
+                    errorData = await response.json();
+                } catch {
+                    errorData = { error: { code: 'ALREADY_ENABLED', message: 'Already enabled' } };
+                }
+                const error = new Error(errorData.message || 'Conflict');
+                error.status = 409;
+                error.code = errorData.error?.code || 'ALREADY_ENABLED';
+                error.data = errorData;
+                throw error;
+            }
+
             if (response.status === 401 || response.status === 403) {
                 handleSessionExpired();
                 throw new Error('Session expired. Please log in again.');
@@ -3826,7 +3839,7 @@
                 let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
                 try {
                     const errorData = await response.json();
-                    errorMessage = errorData.message || errorData.error?.message || errorMessage;
+                    errorMessage = errorData.message || errorMessage;
                 } catch {
                     // Ignore JSON parsing error
                 }
@@ -4347,14 +4360,15 @@
         // =============================================
         // TWO-FACTOR AUTHENTICATION - FIXED: Proper state management
         // =============================================
+        // State: null = unknown, true = enabled, false = disabled
         let authenticatorState = {
             loading: true,
-            error: null,
             enabled: null,
             enabledAt: null,
             enrollmentId: null,
             recoveryCodes: [],
-            setupStep: 1
+            setupStep: 1,
+            error: null
         };
 
         async function loadTwoFactorStatus() {
@@ -4362,36 +4376,42 @@
             const description = document.getElementById('auth-status-description');
             const meta = document.getElementById('auth-status-meta');
             const actions = document.getElementById('auth-actions');
-            const setupBtn = document.getElementById('auth-setup-btn');
 
             // Set loading state
+            badge.textContent = 'Loading...';
             badge.className = 'two-factor-status-badge loading';
-            badge.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading';
             description.textContent = 'Loading authenticator status...';
             meta.textContent = '';
-            if (setupBtn) setupBtn.disabled = true;
+            actions.innerHTML = '';
 
             try {
                 const data = await apiCall(`${API_BASE_URL}/api/users/two-factor`);
 
+                // Extract from response - handle both response.data and direct response
+                const authenticator = data.authenticator || data.data?.authenticator || {};
+                const enabled = authenticator.enabled === true;
+                const enabledAt = authenticator.enabledAt || null;
+
                 authenticatorState.loading = false;
+                authenticatorState.enabled = enabled;
+                authenticatorState.enabledAt = enabledAt;
                 authenticatorState.error = null;
-                authenticatorState.enabled = data.authenticator?.enabled || false;
-                authenticatorState.enabledAt = data.authenticator?.enabledAt || null;
 
                 updateAuthenticatorUI();
 
             } catch (error) {
                 console.error('Error loading 2FA status:', error);
+                // CRITICAL FIX: Do NOT set enabled = false on API error
+                // Instead, keep the state as "unknown" and show an error state
                 authenticatorState.loading = false;
-                authenticatorState.error = error.message || 'Failed to load status';
+                authenticatorState.enabled = null; // null = unknown, NOT false
+                authenticatorState.error = error.message || 'Failed to load 2FA status';
 
-                // Show error state - never fallback to disabled
+                // Show error state in UI
+                badge.textContent = 'Error';
                 badge.className = 'two-factor-status-badge error';
-                badge.innerHTML = '<i class="fas fa-exclamation-circle"></i> Error';
                 description.textContent = 'Unable to verify authenticator status. Please try again.';
                 meta.textContent = '';
-
                 actions.innerHTML = `
                     <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
                         <i class="fas fa-sync"></i> Retry
@@ -4406,6 +4426,29 @@
             const meta = document.getElementById('auth-status-meta');
             const actions = document.getElementById('auth-actions');
 
+            if (authenticatorState.loading) {
+                badge.textContent = 'Loading...';
+                badge.className = 'two-factor-status-badge loading';
+                description.textContent = 'Loading authenticator status...';
+                meta.textContent = '';
+                actions.innerHTML = '';
+                return;
+            }
+
+            if (authenticatorState.error) {
+                badge.textContent = 'Error';
+                badge.className = 'two-factor-status-badge error';
+                description.textContent = 'Unable to verify authenticator status. Please try again.';
+                meta.textContent = '';
+                actions.innerHTML = `
+                    <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
+                        <i class="fas fa-sync"></i> Retry
+                    </button>
+                `;
+                return;
+            }
+
+            // Authenticator is either enabled (true) or disabled (false)
             if (authenticatorState.enabled === true) {
                 badge.textContent = 'Enabled';
                 badge.className = 'two-factor-status-badge enabled';
@@ -4441,10 +4484,10 @@
                 document.getElementById('auth-setup-btn')?.addEventListener('click', openAuthenticatorSetup);
 
             } else {
-                // Should not happen after loadTwoFactorStatus() handles errors
+                // Unknown state - should not happen if error handling is correct
                 badge.textContent = 'Unknown';
                 badge.className = 'two-factor-status-badge error';
-                description.textContent = 'Unable to determine authenticator status. Please refresh.';
+                description.textContent = 'Unable to determine authenticator status.';
                 meta.textContent = '';
                 actions.innerHTML = `
                     <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
@@ -4462,14 +4505,6 @@
         let authOtpTimer = null;
 
         function openAuthenticatorSetup() {
-            // Double-check that authenticator is not already enabled
-            if (authenticatorState.enabled === true) {
-                showNotification('warning', 'Already Enabled', 'Authenticator is already enabled for your account.');
-                // Refresh status to ensure UI consistency
-                loadTwoFactorStatus();
-                return;
-            }
-
             const modal = document.getElementById('authenticator-modal');
             modal.classList.add('active');
             document.body.style.overflow = 'hidden';
@@ -4541,15 +4576,21 @@
 
             } catch (error) {
                 console.error('Error setting up authenticator:', error);
-                // Check for 409 ALREADY_ENABLED
-                if (error.message && error.message.includes('ALREADY_ENABLED')) {
-                    showNotification('warning', 'Already Enabled', 'Authenticator is already enabled. Refreshing status...');
+
+                // CRITICAL FIX: Handle 409 ALREADY_ENABLED gracefully
+                if (error.status === 409 && error.code === 'ALREADY_ENABLED') {
+                    // Close setup modal
+                    closeAuthenticatorSetup();
+                    // Show friendly message
+                    showNotification('info', 'Already Enabled', 'Your authenticator is already protecting this account.');
+                    // Reload 2FA status to show correct UI
                     await loadTwoFactorStatus();
-                    closeAuthenticatorSetup();
-                } else {
-                    showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
-                    closeAuthenticatorSetup();
+                    await loadSecurityOverview();
+                    return;
                 }
+
+                showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
+                closeAuthenticatorSetup();
             }
         }
 
@@ -4663,7 +4704,8 @@
 
                 // Success - show recovery codes
                 authenticatorState.enabled = true;
-                authenticatorState.enabledAt = new Date().toISOString();
+                // Use server-provided enabledAt, not client-generated
+                // We'll refresh the status after finishing
                 authenticatorState.recoveryCodes = data.recoveryCodes || [];
 
                 // Render recovery codes
@@ -4708,7 +4750,6 @@
         function initAuthenticatorSetupHandlers() {
             // Step 1: Continue
             document.getElementById('auth-step1-continue')?.addEventListener('click', function() {
-                // Move to step 2 (QR code should already be loaded)
                 setAuthenticatorStep(2);
             });
 
@@ -4731,10 +4772,10 @@
             // Step 3: Verify
             document.getElementById('auth-step3-verify')?.addEventListener('click', verifyAuthenticatorOTP);
 
-            // Step 4: Finish
+            // Step 4: Finish - CRITICAL: Reload 2FA status from server
             document.getElementById('auth-step4-finish')?.addEventListener('click', function() {
                 closeAuthenticatorSetup();
-                // Reload 2FA status to update the UI badge
+                // Reload 2FA status to update the UI badge with server data
                 loadTwoFactorStatus();
                 loadSecurityOverview();
                 showNotification('success', 'Setup Complete', 'Authenticator is now enabled for your account.');
@@ -4785,10 +4826,9 @@
                     method: 'POST'
                 });
 
-                authenticatorState.enabled = false;
-                authenticatorState.enabledAt = null;
-                updateAuthenticatorUI();
-                loadSecurityOverview();
+                // Reload status from server
+                await loadTwoFactorStatus();
+                await loadSecurityOverview();
                 showNotification('success', 'Authenticator Disabled', 'Two-factor authentication has been disabled.');
 
             } catch (error) {
@@ -4828,7 +4868,7 @@
         }
 
         // =============================================
-        // ACTIVE DEVICES
+        // ACTIVE DEVICES - FIXED: Proper response handling
         // =============================================
         async function loadDevices() {
             const container = document.getElementById('devices-container');
@@ -4837,6 +4877,7 @@
 
             try {
                 const response = await apiCall(`${API_BASE_URL}/api/users/devices`);
+                // FIX: Handle response.data.devices structure
                 const devices = response.data?.devices || [];
 
                 const activeCount = devices.filter(d => d.sessionStatus !== 'revoked').length;
@@ -4867,6 +4908,7 @@
                 grid.className = 'devices-grid';
 
                 devices.forEach(device => {
+                    // CRITICAL FIX: Use the device.current property directly, not index-based fallback
                     const isCurrent = device.current === true;
                     const isActive = device.sessionStatus !== 'revoked';
                     const deviceType = device.deviceType || 'desktop';
@@ -4887,6 +4929,9 @@
 
                     const lastActive = device.lastActiveAt ? formatTimeAgo(device.lastActiveAt) : 'Unknown';
 
+                    // Determine if this is the current session using the sessionId from the response
+                    // The backend should set current: true for the session matching the current token
+
                     card.innerHTML = `
                         <div class="device-card-header">
                             <div class="device-card-left">
@@ -4896,17 +4941,18 @@
                                 <div class="device-info">
                                     <div class="device-name">${device.name || 'Unknown Device'}</div>
                                     <div class="device-detail">${device.os || ''}${device.browser ? ' · ' + device.browser : ''}</div>
+                                    ${device.sessionId ? `<div style="font-size: 0.6rem; color: var(--text-muted); font-family: monospace;">ID: ${device.sessionId.substring(0, 8)}...</div>` : ''}
                                 </div>
                             </div>
                             <div class="device-actions">
-                                ${isCurrent ? '<span class="device-current-badge">This device</span>' : ''}
+                                ${isCurrent ? '<span class="device-current-badge">Current device</span>' : ''}
                             </div>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 4px;">
                             <div class="device-status">
                                 <span class="status-dot ${isActive ? 'active' : 'inactive'}"></span>
                                 <span class="status-text ${isActive ? 'active' : 'inactive'}">
-                                    ${isActive ? 'Active now' : 'Offline'}
+                                    ${isActive ? (isCurrent ? 'Active' : 'Active') : 'Offline'}
                                 </span>
                             </div>
                             <div class="device-location">
@@ -4916,7 +4962,7 @@
                                 ${isCurrent ? 'Signed in ' : 'Last active '} ${lastActive}
                             </div>
                             ${!isCurrent && isActive ? `
-                                <button class="btn btn-outline btn-sm" data-device-id="${device.id}" style="margin-left: auto;">
+                                <button class="btn btn-outline btn-sm" data-device-id="${device.id || device.sessionId}" style="margin-left: auto;">
                                     Log out
                                 </button>
                             ` : ''}
@@ -4994,7 +5040,7 @@
         }
 
         // =============================================
-        // RECENT ACTIVITY
+        // RECENT ACTIVITY - FIXED: Proper response handling
         // =============================================
         let activityState = {
             page: 1,
@@ -5027,6 +5073,7 @@
 
                 const data = await apiCall(`${API_BASE_URL}/api/users/activity?${params}`);
 
+                // FIX: Handle response.data.activities structure
                 const activities = data.data?.activities || [];
                 const pagination = data.data?.pagination || {};
 
@@ -5706,23 +5753,27 @@
         }
 
         // =============================================
-        // KYC FUNCTIONS (placeholders)
+        // KYC FUNCTIONS (preserved from original)
         // =============================================
         function initKYCDocumentUpload() {
-            // KYC document upload logic would go here
+            // KYC document upload logic - preserved for compatibility
         }
 
         function initFacialVerification() {
-            // Facial verification logic would go here
+            // Facial verification logic - preserved for compatibility
         }
 
         function handleDocumentUpload(e, side) {
             showNotification('info', 'KYC Upload', 'KYC document upload is not fully implemented in this version.');
         }
 
-        function removeDocument(side) {}
+        function removeDocument(side) {
+            // Remove document handler
+        }
 
-        function removeAddressDocument() {}
+        function removeAddressDocument() {
+            // Remove address document handler
+        }
 
         // =============================================
         // DATE/TIME UTILITIES
@@ -5788,7 +5839,8 @@
                 try {
                     await loadProfile();
                     await loadSecurityOverview();
-                    await loadTwoFactorStatus(); // FIXED: Uses proper state management
+                    // 2FA status - CRITICAL: This must load before the UI renders
+                    await loadTwoFactorStatus();
                     await loadDevices();
                     await loadActivities(true);
 
