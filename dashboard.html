@@ -8807,24 +8807,20 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         let currentLoanEligibility = null;
         // ===== FIXED: Canonical price store - single source of truth =====
-        // All prices use asset symbol as the canonical key
-        let AppState = {
-            currentPrices: {}, // { 'btc': { usd: 65000, change24h: 1.25, updatedAt: timestamp }, ... }
-            announcements: [],
-            activeAnnouncements: new Map(),
-            lastDepositCheck: null,
-            defaultAsset: 'btc',
-            availableAssets: [],
-            assetTransactions: {},
-            selectedAsset: null
-        };
-        let currentPrices = {}; // Legacy - kept for compatibility, but should use AppState.currentPrices
+        // AppState.currentPrices stores prices keyed by symbol with full data
+        // This is the ONE place where prices are stored
+        AppState.currentPrices = {};
+        // cachedPriceData is DEPRECATED - kept for backward compatibility but should not be used
+        // All price reads should go through getCanonicalPrice(symbol) or AppState.currentPrices
+        let cachedPriceData = {}; // DEPRECATED - use AppState.currentPrices instead
         let currentBTCPrice = 43000;
         let allAssets = [];
         let userBalances = { main: 0, active: 0, matured: 0 };
         let userAssetBalances = {};
         let userPreferences = { displayAsset: 'btc', fiatCurrency: 'USD', language: 'en', theme: 'system' };
         let userPortfolio = [];
+        let AppState = { announcements: [], activeAnnouncements: new Map(), lastDepositCheck: null, defaultAsset: 'btc',
+            availableAssets: [], assetTransactions: {}, currentPrices: {} };
         let assetPage = 1;
         let assetSearchTerm = '';
         let filteredAssets = [];
@@ -8881,6 +8877,42 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let walletPickerOpen = false;
         let currentAsset = null;
         let assetSelectionVersion = 0;
+
+        // ===== PRICE FETCH DEDUPLICATION =====
+        let priceRequests = {};
+
+        // =============================================
+        // CANONICAL PRICE FUNCTIONS
+        // =============================================
+        function getCanonicalPrice(symbol) {
+            const normalizedSymbol = symbol.toLowerCase();
+            const priceData = AppState.currentPrices[normalizedSymbol];
+            if (priceData && priceData.usd !== undefined && priceData.usd !== null && priceData.usd > 0) {
+                return priceData.usd;
+            }
+            // Fallback to cachedPriceData for backward compatibility
+            if (cachedPriceData[normalizedSymbol] && cachedPriceData[normalizedSymbol] > 0) {
+                return cachedPriceData[normalizedSymbol];
+            }
+            return null;
+        }
+
+        function setCanonicalPrice(symbol, price, change24h, updatedAt) {
+            const normalizedSymbol = symbol.toLowerCase();
+            AppState.currentPrices[normalizedSymbol] = {
+                usd: price,
+                change24h: change24h || 0,
+                updatedAt: updatedAt || Date.now(),
+                source: 'backend'
+            };
+            // Keep cachedPriceData in sync for backward compatibility
+            cachedPriceData[normalizedSymbol] = price;
+        }
+
+        function getCanonicalPriceData(symbol) {
+            const normalizedSymbol = symbol.toLowerCase();
+            return AppState.currentPrices[normalizedSymbol] || null;
+        }
 
         // =============================================
         // TOP ASSETS - Single source of truth
@@ -9177,164 +9209,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // PRICE MANAGER - Canonical price store
-        // =============================================
-        // ===== FIXED: Single canonical price store using asset symbol as key =====
-        // AppState.currentPrices is the single source of truth for all prices
-        // All price updates (REST, WebSocket) go through this store
-        
-        function getCanonicalPrice(symbol) {
-            const priceData = AppState.currentPrices[symbol];
-            return priceData && priceData.usd ? priceData.usd : null;
-        }
-
-        function getCanonicalPriceData(symbol) {
-            return AppState.currentPrices[symbol] || null;
-        }
-
-        function updateCanonicalPrice(symbol, price, change24h, updatedAt) {
-            if (!symbol) return;
-            const normalizedSymbol = symbol.toLowerCase();
-            AppState.currentPrices[normalizedSymbol] = {
-                usd: price || 0,
-                change24h: change24h || 0,
-                updatedAt: updatedAt || Date.now()
-            };
-            // Also update the picker rate if this is the selected asset
-            if (currentAsset && currentAsset.symbol === normalizedSymbol) {
-                const rateValueEl = document.getElementById('picker-rate-value');
-                if (rateValueEl) {
-                    rateValueEl.textContent = formatFiat(price || 0);
-                }
-                const rateValueModalEl = document.getElementById('picker-modal-rate-value');
-                if (rateValueModalEl) {
-                    rateValueModalEl.textContent = formatFiat(price || 0);
-                }
-                // Update deposit rate info
-                updateDepositRateInfo(normalizedSymbol);
-                updateDepositModalRateInfo(normalizedSymbol);
-                // Update fiat estimate if amount is entered
-                const amountInput = document.getElementById('deposit-amount-input');
-                if (amountInput && parseFloat(amountInput.value) > 0) {
-                    updateFiatEstimate();
-                }
-                const modalAmountInput = document.getElementById('deposit-modal-amount-input');
-                if (modalAmountInput && parseFloat(modalAmountInput.value) > 0) {
-                    updateDepositModalFiatEstimate();
-                }
-            }
-        }
-
-        // ===== FIXED: Fetch all 20 crypto rates on initialization =====
-        async function fetchAllPrices() {
-            const token = getAuthToken();
-            if (!token) return;
-
-            // Use Promise.allSettled to fetch all prices concurrently
-            const fetchPromises = topAssets.map(asset => 
-                fetchPriceFromBackend(asset.symbol, token)
-            );
-
-            const results = await Promise.allSettled(fetchPromises);
-            
-            results.forEach((result, index) => {
-                const asset = topAssets[index];
-                if (result.status === 'fulfilled' && result.value && result.value.price > 0) {
-                    updateCanonicalPrice(
-                        asset.symbol,
-                        result.value.price,
-                        result.value.change24h || 0,
-                        Date.now()
-                    );
-                }
-            });
-
-            // Update UI with new prices
-            updatePickerPriceDisplay();
-            renderAssetsWithBalanceEnhanced();
-        }
-
-        async function fetchPriceFromBackend(assetSymbol, token) {
-            try {
-                const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${assetSymbol}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                if (response.ok) {
-                    const data = await response.json();
-                    return {
-                        price: data.data?.price || data.price || 0,
-                        change24h: data.data?.change24h || data.change24h || 0
-                    };
-                }
-                return { price: 0, change24h: 0 };
-            } catch (e) {
-                return { price: 0, change24h: 0 };
-            }
-        }
-
-        function updatePickerPriceDisplay() {
-            if (currentAsset) {
-                const priceData = AppState.currentPrices[currentAsset.symbol];
-                if (priceData && priceData.usd > 0) {
-                    const rateValueEl = document.getElementById('picker-rate-value');
-                    if (rateValueEl) {
-                        rateValueEl.textContent = formatFiat(priceData.usd);
-                    }
-                    const rateValueModalEl = document.getElementById('picker-modal-rate-value');
-                    if (rateValueModalEl) {
-                        rateValueModalEl.textContent = formatFiat(priceData.usd);
-                    }
-                    updateDepositRateInfo(currentAsset.symbol);
-                    updateDepositModalRateInfo(currentAsset.symbol);
-                }
-            }
-        }
-
-        // ===== FIXED: WebSocket price updates update the canonical store =====
-        function handleWebSocketPriceUpdate(prices) {
-            for (const [assetSymbol, priceData] of Object.entries(prices)) {
-                if (priceData.price > 0) {
-                    // Update canonical price store
-                    updateCanonicalPrice(
-                        assetSymbol,
-                        priceData.price,
-                        priceData.change24h || 0,
-                        Date.now()
-                    );
-                    
-                    // Update fullAssetsList
-                    const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
-                    if (assetIndex !== -1) {
-                        fullAssetsList[assetIndex].currentPrice = priceData.price;
-                        fullAssetsList[assetIndex].change24h = priceData.change24h || 0;
-                        fullAssetsList[assetIndex].currentValue = fullAssetsList[assetIndex].totalAmount * priceData.price;
-                        if (fullAssetsList[assetIndex].unrealizedProfitLoss !== undefined) {
-                            fullAssetsList[assetIndex].unrealizedProfitLoss = fullAssetsList[assetIndex]
-                                .currentValue - (fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[
-                                    assetIndex].totalAmount);
-                            fullAssetsList[assetIndex].unrealizedPercentage = (fullAssetsList[assetIndex]
-                                .averageBuyingPrice > 0) ? (fullAssetsList[assetIndex].unrealizedProfitLoss / (
-                                    fullAssetsList[assetIndex].averageBuyingPrice * fullAssetsList[assetIndex]
-                                    .totalAmount)) * 100 : 0;
-                        }
-                    }
-                }
-            }
-            
-            // Update UI with throttling
-            if (!pendingPriceRender) {
-                pendingPriceRender = true;
-                requestAnimationFrame(() => {
-                    userPortfolio = [...fullAssetsList];
-                    renderAssetsWithBalanceEnhanced();
-                    renderTransactionsTable();
-                    loadInvestments();
-                    pendingPriceRender = false;
-                });
-            }
-        }
-
-        // =============================================
         // PREMIUM ASSET PICKER - From Deposit page
         // =============================================
         function toggleAssetPicker() {
@@ -9529,7 +9403,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
-        // ===== FIXED: selectPickerAsset uses canonical price store =====
+        // ===== FIXED: selectPickerAsset now uses canonical price store =====
         function selectPickerAsset(symbol) {
             const asset = topAssets.find(a => a.symbol === symbol);
             if (!asset) return;
@@ -9546,25 +9420,25 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             if (popover) popover.classList.remove('open');
             if (chevron) chevron.classList.remove('open');
 
-            // Check canonical price store first
-            const priceData = AppState.currentPrices[asset.symbol];
             const rateValueEl = document.getElementById('picker-rate-value');
-            if (rateValueEl) {
-                if (priceData && priceData.usd > 0) {
-                    rateValueEl.textContent = formatFiat(priceData.usd);
-                } else {
-                    rateValueEl.textContent = '—';
-                }
-            }
+            if (rateValueEl) rateValueEl.textContent = '—';
 
-            // If no price in canonical store, fetch it
-            if (!priceData || priceData.usd <= 0) {
+            // ===== FIXED: Use canonical price store =====
+            const cachedPrice = getCanonicalPrice(asset.symbol);
+            if (cachedPrice !== null && cachedPrice > 0) {
+                if (rateValueEl) rateValueEl.textContent = formatFiat(cachedPrice);
+                const amountInput = document.getElementById('deposit-amount-input');
+                if (amountInput && parseFloat(amountInput.value) > 0) {
+                    updateFiatEstimate();
+                }
+            } else {
                 fetchPriceForAsset(asset, version).then(price => {
                     if (version !== assetSelectionVersion || !AppState.selectedAsset || AppState.selectedAsset.symbol !== asset.symbol) {
                         return;
                     }
                     if (price !== null && price > 0) {
-                        updateCanonicalPrice(asset.symbol, price);
+                        // ===== FIXED: Store in canonical store =====
+                        setCanonicalPrice(asset.symbol, price);
                         const rateValueEl = document.getElementById('picker-rate-value');
                         if (rateValueEl) rateValueEl.textContent = formatFiat(price);
                         const amountInput = document.getElementById('deposit-amount-input');
@@ -9630,10 +9504,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 rateLabelEl.textContent = `1 ${asset.symbol.toUpperCase()} ≈`;
             }
 
-            const priceData = AppState.currentPrices[asset.symbol];
-            if (priceData && priceData.usd) {
+            // ===== FIXED: Use canonical price store =====
+            const priceData = getCanonicalPriceData(asset.symbol);
+            if (priceData && priceData.usd && priceData.usd > 0) {
                 const rateValueEl = document.getElementById('picker-rate-value');
                 if (rateValueEl) rateValueEl.textContent = formatFiat(priceData.usd);
+            } else {
+                const rateValueEl = document.getElementById('picker-rate-value');
+                if (rateValueEl) rateValueEl.textContent = '—';
             }
 
             document.querySelectorAll('#picker-asset-list .picker-asset-option').forEach(el => {
@@ -9664,10 +9542,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 rateLabelEl.textContent = `1 ${asset.symbol.toUpperCase()} ≈`;
             }
 
-            const priceData = AppState.currentPrices[asset.symbol];
-            if (priceData && priceData.usd) {
+            // ===== FIXED: Use canonical price store =====
+            const priceData = getCanonicalPriceData(asset.symbol);
+            if (priceData && priceData.usd && priceData.usd > 0) {
                 const rateValueEl = document.getElementById('picker-modal-rate-value');
                 if (rateValueEl) rateValueEl.textContent = formatFiat(priceData.usd);
+            } else {
+                const rateValueEl = document.getElementById('picker-modal-rate-value');
+                if (rateValueEl) rateValueEl.textContent = '—';
             }
 
             document.querySelectorAll('#picker-modal-asset-list .picker-asset-option').forEach(el => {
@@ -9675,52 +9557,76 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             });
         }
 
-        // ===== FIXED: fetchPriceForAsset uses canonical store with fallback =====
+        // ===== FIXED: fetchPriceForAsset now uses canonical store and deduplication =====
         async function fetchPriceForAsset(asset, version) {
-            try {
-                // First check canonical store
-                const priceData = AppState.currentPrices[asset.symbol];
-                if (priceData && priceData.usd > 0) {
-                    return priceData.usd;
-                }
-                
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset.symbol}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            const price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(asset.symbol, price);
-                                return price;
-                            }
-                        }
-                    } catch (e) {}
-                }
-                
-                // Fallback to CoinGecko only if backend fails
+            const symbol = asset.symbol.toLowerCase();
+            
+            // Check if there's already an in-flight request for this symbol
+            if (priceRequests[symbol]) {
                 try {
-                    const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${asset.id}&vs_currencies=usd`);
-                    if (response.ok) {
-                        const data = await response.json();
-                        const priceData = data[asset.id];
-                        if (priceData && priceData.usd) {
-                            updateCanonicalPrice(asset.symbol, priceData.usd);
-                            return priceData.usd;
+                    return await priceRequests[symbol];
+                } catch (e) {
+                    // If the request failed, allow a new one
+                    delete priceRequests[symbol];
+                }
+            }
+
+            // Check canonical store first
+            const cachedPrice = getCanonicalPrice(symbol);
+            if (cachedPrice !== null && cachedPrice > 0) {
+                return cachedPrice;
+            }
+
+            // Create the request promise
+            const requestPromise = (async () => {
+                try {
+                    const token = getAuthToken();
+                    let price = null;
+                    
+                    // Try backend REST first
+                    if (token) {
+                        try {
+                            const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${symbol}`, {
+                                headers: { 'Authorization': `Bearer ${token}` }
+                            });
+                            if (response.ok) {
+                                const data = await response.json();
+                                price = data.data?.price || data.price || 0;
+                            }
+                        } catch (e) {
+                            console.warn('Backend price fetch failed:', e);
                         }
                     }
-                } catch (e) {
-                    console.warn('CoinGecko fallback failed:', e);
+
+                    // Fallback to CoinGecko ONLY if backend fails
+                    if (!price || price <= 0) {
+                        try {
+                            const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${asset.id}&vs_currencies=usd`);
+                            if (response.ok) {
+                                const data = await response.json();
+                                const priceData = data[asset.id];
+                                if (priceData && priceData.usd) {
+                                    price = priceData.usd;
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('CoinGecko fallback failed:', e);
+                        }
+                    }
+
+                    if (price && price > 0) {
+                        // ===== FIXED: Store in canonical store =====
+                        setCanonicalPrice(symbol, price);
+                        return price;
+                    }
+                    return null;
+                } finally {
+                    delete priceRequests[symbol];
                 }
-                
-                return null;
-            } catch (error) {
-                console.warn('Error fetching price for asset:', asset.symbol, error);
-                return null;
-            }
+            })();
+
+            priceRequests[symbol] = requestPromise;
+            return requestPromise;
         }
 
         // =============================================
@@ -10383,99 +10289,49 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         let priceFetchInterval = null;
-        // ===== FIXED: Remove cachedPriceData - use AppState.currentPrices instead =====
-        // cachedPriceData is removed to avoid duplicate price stores
-        // All prices now live in AppState.currentPrices
 
         // ===== FIXED: updateDepositRateInfo uses canonical price store =====
         async function updateDepositRateInfo(assetSymbol) {
             const rateInfo = document.getElementById('deposit-rate-info');
             if (!rateInfo) return;
-            
-            // Check canonical price store first
-            const priceData = AppState.currentPrices[assetSymbol];
-            let price = priceData && priceData.usd > 0 ? priceData.usd : null;
-            
-            // If no price in store, fetch it
-            if (!price || price <= 0) {
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${assetSymbol}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(assetSymbol, price);
-                            }
-                        }
-                    } catch (e) {}
-                }
-            }
-            
+            const price = getCanonicalPrice(assetSymbol);
             const assetUpper = assetSymbol.toUpperCase();
             if (price && price > 0) {
                 rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
             } else {
-                rateInfo.textContent = `1 ${assetUpper} ≈ Updating...`;
+                // Try fetching if not available
+                const asset = topAssets.find(a => a.symbol === assetSymbol);
+                if (asset) {
+                    const fetchedPrice = await fetchPriceForAsset(asset, ++assetSelectionVersion);
+                    if (fetchedPrice && fetchedPrice > 0) {
+                        rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(fetchedPrice)}`;
+                    }
+                }
             }
         }
 
         async function updateDepositModalRateInfo(assetSymbol) {
             const rateInfo = document.getElementById('deposit-modal-rate-info');
             if (!rateInfo) return;
-            
-            const priceData = AppState.currentPrices[assetSymbol];
-            let price = priceData && priceData.usd > 0 ? priceData.usd : null;
-            
-            if (!price || price <= 0) {
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${assetSymbol}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(assetSymbol, price);
-                            }
-                        }
-                    } catch (e) {}
-                }
-            }
-            
+            const price = getCanonicalPrice(assetSymbol);
             const assetUpper = assetSymbol.toUpperCase();
             if (price && price > 0) {
                 rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
             } else {
-                rateInfo.textContent = `1 ${assetUpper} ≈ Updating...`;
+                const asset = topAssets.find(a => a.symbol === assetSymbol);
+                if (asset) {
+                    const fetchedPrice = await fetchPriceForAsset(asset, ++assetSelectionVersion);
+                    if (fetchedPrice && fetchedPrice > 0) {
+                        rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(fetchedPrice)}`;
+                    }
+                }
             }
         }
 
         async function prefetchDepositPrices() {
-            const asset = currentAsset ? currentAsset.symbol : 'btc';
-            const priceData = AppState.currentPrices[asset];
-            if (!priceData || priceData.usd <= 0) {
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            const price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(asset, price);
-                            }
-                        }
-                    } catch (e) {}
-                }
-            }
+            // Prefetch all prices for the top assets
+            const promises = topAssets.map(asset => fetchPriceForAsset(asset, ++assetSelectionVersion));
+            await Promise.allSettled(promises);
         }
 
         // ===== FIXED: updateFiatEstimate uses canonical price store =====
@@ -10484,29 +10340,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const fiatDisplay = document.getElementById('deposit-fiat-value');
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const amountUSD = parseFloat(amountInput.value) || 0;
-            
-            let price = 0;
-            const priceData = AppState.currentPrices[asset];
-            if (priceData && priceData.usd > 0) {
-                price = priceData.usd;
-            } else {
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(asset, price);
-                            }
-                        }
-                    } catch (e) {}
+            let price = getCanonicalPrice(asset);
+            if (!price || price === 0) {
+                const assetObj = topAssets.find(a => a.symbol === asset);
+                if (assetObj) {
+                    price = await fetchPriceForAsset(assetObj, ++assetSelectionVersion);
                 }
             }
-            
             if (amountUSD > 0 && price && price > 0) {
                 const cryptoAmount = amountUSD / price;
                 const assetUpper = asset.toUpperCase();
@@ -10515,42 +10355,23 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 if (rateInfo) {
                     rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
-            } else if (amountUSD > 0 && (!price || price <= 0)) {
-                fiatDisplay.textContent = '≈ Updating...';
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
             }
         }
 
-        // ===== FIXED: updateDepositModalFiatEstimate uses canonical price store =====
         async function updateDepositModalFiatEstimate() {
             const amountInput = document.getElementById('deposit-modal-amount-input');
             const fiatDisplay = document.getElementById('deposit-modal-fiat-value');
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const amountUSD = parseFloat(amountInput.value) || 0;
-            
-            let price = 0;
-            const priceData = AppState.currentPrices[asset];
-            if (priceData && priceData.usd > 0) {
-                price = priceData.usd;
-            } else {
-                const token = getAuthToken();
-                if (token) {
-                    try {
-                        const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                            headers: { 'Authorization': `Bearer ${token}` }
-                        });
-                        if (response.ok) {
-                            const data = await response.json();
-                            price = data.data?.price || data.price || 0;
-                            if (price > 0) {
-                                updateCanonicalPrice(asset, price);
-                            }
-                        }
-                    } catch (e) {}
+            let price = getCanonicalPrice(asset);
+            if (!price || price === 0) {
+                const assetObj = topAssets.find(a => a.symbol === asset);
+                if (assetObj) {
+                    price = await fetchPriceForAsset(assetObj, ++assetSelectionVersion);
                 }
             }
-            
             if (amountUSD > 0 && price && price > 0) {
                 const cryptoAmount = amountUSD / price;
                 const assetUpper = asset.toUpperCase();
@@ -10559,8 +10380,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 if (rateInfo) {
                     rateInfo.textContent = `1 ${assetUpper} ≈ ${formatFiat(price)}`;
                 }
-            } else if (amountUSD > 0 && (!price || price <= 0)) {
-                fiatDisplay.textContent = '≈ Updating...';
             } else {
                 fiatDisplay.textContent = '≈ 0.0000';
             }
@@ -10725,6 +10544,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
+        // ===== FIXED: executeDeposit uses canonical price store =====
         async function executeDeposit() {
             const amountInput = document.getElementById('deposit-amount-input');
             const depositBtn = document.getElementById('deposit-btn');
@@ -10762,21 +10582,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     handleSessionExpired();
                     throw new Error('Please log in again.');
                 }
-                // ===== FIXED: Use canonical price store =====
-                let price = 0;
-                const priceData = AppState.currentPrices[asset];
-                if (priceData && priceData.usd > 0) {
-                    price = priceData.usd;
-                } else {
-                    const resp = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        price = data.data?.price || data.price || 0;
-                        if (price > 0) {
-                            updateCanonicalPrice(asset, price);
-                        }
+                let price = getCanonicalPrice(asset);
+                if (!price || price === 0) {
+                    const assetObj = topAssets.find(a => a.symbol === asset);
+                    if (assetObj) {
+                        price = await fetchPriceForAsset(assetObj, ++assetSelectionVersion);
                     }
                 }
                 if (!price || price === 0) throw new Error('Price not available for this asset.');
@@ -12611,8 +12421,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         // SOCKET.IO - Real-time updates
         // =============================================
-        let pendingPriceRender = false;
-
         function initSocketIO() {
             const token = getAuthToken();
             if (!token) {
@@ -12692,19 +12500,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 fullAssetsList = [...userPortfolio];
                 renderAssetsWithBalanceEnhanced();
             });
+            let pendingPriceRender = false;
+            // ===== FIXED: WebSocket price_update now updates canonical price store =====
             socket.on('price_update', (prices) => {
-                // ===== FIXED: Update canonical price store =====
                 for (const [assetSymbol, priceData] of Object.entries(prices)) {
                     if (priceData.price > 0) {
-                        // Update canonical store
-                        updateCanonicalPrice(
-                            assetSymbol,
-                            priceData.price,
-                            priceData.change24h || 0,
-                            Date.now()
-                        );
+                        // ===== FIXED: Store in canonical price store =====
+                        setCanonicalPrice(assetSymbol, priceData.price, priceData.change24h);
                         
-                        // Update fullAssetsList
                         const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
                         if (assetIndex !== -1) {
                             fullAssetsList[assetIndex].currentPrice = priceData.price;
@@ -12720,22 +12523,42 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                         .totalAmount)) * 100 : 0;
                             }
                         }
+                        // Update cachedPriceData for backward compatibility
+                        cachedPriceData[assetSymbol.toLowerCase()] = priceData.price;
+                    }
+                }
+                // ===== FIXED: Update picker UI with new prices =====
+                if (currentAsset) {
+                    const priceData = getCanonicalPriceData(currentAsset.symbol);
+                    if (priceData && priceData.usd && priceData.usd > 0) {
+                        const rateValueEl = document.getElementById('picker-rate-value');
+                        if (rateValueEl) {
+                            rateValueEl.textContent = formatFiat(priceData.usd);
+                        }
+                        const rateValueModalEl = document.getElementById('picker-modal-rate-value');
+                        if (rateValueModalEl) {
+                            rateValueModalEl.textContent = formatFiat(priceData.usd);
+                        }
+                        const depositAmount = document.getElementById('deposit-amount-input');
+                        if (depositAmount && parseFloat(depositAmount.value) > 0) {
+                            updateFiatEstimate();
+                        }
+                        const modalAmount = document.getElementById('deposit-modal-amount-input');
+                        if (modalAmount && parseFloat(modalAmount.value) > 0) {
+                            updateDepositModalFiatEstimate();
+                        }
+                        // Update deposit rate info
+                        const rateInfo = document.getElementById('deposit-rate-info');
+                        if (rateInfo) {
+                            rateInfo.textContent = `1 ${currentAsset.symbol.toUpperCase()} ≈ ${formatFiat(priceData.usd)}`;
+                        }
+                        const rateInfoModal = document.getElementById('deposit-modal-rate-info');
+                        if (rateInfoModal) {
+                            rateInfoModal.textContent = `1 ${currentAsset.symbol.toUpperCase()} ≈ ${formatFiat(priceData.usd)}`;
+                        }
                     }
                 }
                 
-                // Update deposit UI
-                const depositAmount = document.getElementById('deposit-amount-input');
-                const modalAmount = document.getElementById('deposit-modal-amount-input');
-                if (currentAsset && parseFloat(depositAmount?.value || 0) > 0) {
-                    updateDepositRateInfo(currentAsset.symbol);
-                    updateFiatEstimate();
-                }
-                if (currentAsset && parseFloat(modalAmount?.value || 0) > 0) {
-                    updateDepositModalRateInfo(currentAsset.symbol);
-                    updateDepositModalFiatEstimate();
-                }
-                
-                // Throttled UI update
                 if (!pendingPriceRender) {
                     pendingPriceRender = true;
                     requestAnimationFrame(() => {
@@ -12823,69 +12646,43 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
         function setupRealTimePriceListener() {
             if (!socket) return;
-            socket.on('price_update', (prices) => {
-                // ===== FIXED: Update canonical price store =====
-                for (const [assetSymbol, priceData] of Object.entries(prices)) {
-                    if (priceData.price > 0) {
-                        updateCanonicalPrice(
-                            assetSymbol,
-                            priceData.price,
-                            priceData.change24h || 0,
-                            Date.now()
-                        );
-                        const assetIndex = fullAssetsList.findIndex(a => a.asset === assetSymbol.toLowerCase());
-                        if (assetIndex !== -1) {
-                            fullAssetsList[assetIndex].currentPrice = priceData.price;
-                            fullAssetsList[assetIndex].change24h = priceData.change24h || 0;
-                        }
-                    }
-                }
-            });
+            // ===== FIXED: WebSocket price_update already handled above =====
+            // No need for duplicate listener
         }
 
         function startBackgroundPriceRefresh() {
             setInterval(async () => {
                 if (currentAsset) {
                     const asset = currentAsset.symbol;
-                    // Check canonical store first
-                    const priceData = AppState.currentPrices[asset];
-                    let price = priceData && priceData.usd > 0 ? priceData.usd : null;
-                    
-                    if (!price || price <= 0) {
-                        const token = getAuthToken();
-                        if (token) {
-                            try {
-                                const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${asset}`, {
-                                    headers: { 'Authorization': `Bearer ${token}` }
-                                });
-                                if (response.ok) {
-                                    const data = await response.json();
-                                    price = data.data?.price || data.price || 0;
-                                    if (price > 0) {
-                                        updateCanonicalPrice(asset, price);
-                                    }
-                                }
-                            } catch (e) {}
+                    const assetObj = topAssets.find(a => a.symbol === asset);
+                    if (assetObj) {
+                        const price = await fetchPriceForAsset(assetObj, ++assetSelectionVersion);
+                        if (price && price > 0) {
+                            const rateInfo = document.getElementById('deposit-rate-info');
+                            if (rateInfo) {
+                                rateInfo.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                            }
+                            const rateInfoModal = document.getElementById('deposit-modal-rate-info');
+                            if (rateInfoModal) {
+                                rateInfoModal.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                            }
+                            const rateValueEl = document.getElementById('picker-rate-value');
+                            if (rateValueEl) {
+                                rateValueEl.textContent = formatFiat(price);
+                            }
+                            const rateValueModalEl = document.getElementById('picker-modal-rate-value');
+                            if (rateValueModalEl) {
+                                rateValueModalEl.textContent = formatFiat(price);
+                            }
                         }
-                    }
-                    
-                    if (price && price > 0) {
-                        const rateInfo = document.getElementById('deposit-rate-info');
-                        if (rateInfo) {
-                            rateInfo.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                        const amountInput = document.getElementById('deposit-amount-input');
+                        if (amountInput && parseFloat(amountInput.value) > 0) {
+                            await updateFiatEstimate();
                         }
-                        const rateInfoModal = document.getElementById('deposit-modal-rate-info');
-                        if (rateInfoModal) {
-                            rateInfoModal.textContent = `1 ${asset.toUpperCase()} ≈ ${formatFiat(price)}`;
+                        const modalAmount = document.getElementById('deposit-modal-amount-input');
+                        if (modalAmount && parseFloat(modalAmount.value) > 0) {
+                            await updateDepositModalFiatEstimate();
                         }
-                    }
-                    const amountInput = document.getElementById('deposit-amount-input');
-                    if (amountInput && parseFloat(amountInput.value) > 0) {
-                        await updateFiatEstimate();
-                    }
-                    const modalAmount = document.getElementById('deposit-modal-amount-input');
-                    if (modalAmount && parseFloat(modalAmount.value) > 0) {
-                        await updateDepositModalFiatEstimate();
                     }
                 }
             }, 25000);
@@ -13511,18 +13308,19 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             } catch (error) { console.warn('Asset balances REST fetch failed:', error); }
         }
 
-        // ===== FIXED: fetchPriceFromRest uses canonical price store =====
+        // ===== FIXED: fetchPriceFromRest now uses canonical store =====
         async function fetchPriceFromRest(assetSymbol) {
             try {
+                const symbol = assetSymbol.toLowerCase();
                 // Check canonical store first
-                const priceData = AppState.currentPrices[assetSymbol];
-                if (priceData && priceData.usd > 0) {
-                    return priceData.usd;
+                const cachedPrice = getCanonicalPrice(symbol);
+                if (cachedPrice !== null && cachedPrice > 0) {
+                    return cachedPrice;
                 }
-                
+
                 const token = getAuthToken();
                 if (!token) return null;
-                const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${assetSymbol}`, {
+                const response = await fetch(`https://bithash-backend-ycuf.onrender.com/api/prices/${symbol}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 if (response.status === 401 || response.status === 403) {
@@ -13533,9 +13331,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const data = await response.json();
                     const price = data.data?.price || data.price || 0;
                     if (price > 0) {
-                        updateCanonicalPrice(assetSymbol, price);
+                        setCanonicalPrice(symbol, price);
+                        return price;
                     }
-                    return price;
                 }
                 return null;
             } catch (e) {
@@ -13831,11 +13629,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     if (data.data && data.data.asset) AppState.defaultAsset = data.data.asset;
                 }
             } catch (error) { console.warn('Could not fetch deposit asset, using default BTC'); }
-            // ===== FIXED: Do not overwrite user's saved displayAsset with default =====
-            // Only set displayAsset if it hasn't been loaded from preferences yet
-            if (!userPreferences.displayAsset || userPreferences.displayAsset === 'btc') {
-                userPreferences.displayAsset = AppState.defaultAsset;
-            }
+            userPreferences.displayAsset = AppState.defaultAsset;
         }
 
         // =============================================
@@ -14422,10 +14216,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     updateAssetPickerUIModal(currentAsset);
                 }
                 
-                // ===== FIXED: Fetch all 20 crypto rates on initialization =====
-                await fetchAllPrices();
-                updatePickerPriceDisplay();
-                
                 document.getElementById('transactions-prev').addEventListener('click', () => {
                     if (transactionsPage > 1) { transactionsPage--;
                         renderTransactionsTable(); }
@@ -14467,104 +14257,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }, 3000);
             }, 1000);
         });
-
-        console.log('✅ Multi-Chain Deposit System Initialized');
-        console.log('✅ NATIVE assets (ETH, BNB, MATIC, AVAX): native transfer (to + value)');
-        console.log('✅ ERC-20 tokens (USDT, USDC, SHIB, LINK, UNI, WBTC): contract transfer (to + data)');
-        console.log('✅ Non-EVM assets (BTC, SOL, XRP, etc.): manual address generation with QR code');
-        console.log('✅ Chain switching: wallet_switchEthereumChain + wallet_addEthereumChain');
-        console.log('✅ Required chain determined from selected asset dropdown');
-        console.log('✅ Uses provider.request() directly - NO BrowserProvider');
-        console.log('✅ No window.ethereum fallback - uses EIP-6963 or stored provider');
-        console.log('✅ MATIC correctly classified as native asset');
-        console.log(`✅ EVM assets: ${evmAssets.join(', ')}`);
-        console.log(`✅ Non-EVM assets: ${nonEvmAssets.join(', ')}`);
-        console.log(`✅ Connected wallets: ${connectedWallets.length}`);
-        console.log('✅ FIXED: Chain ID normalization with normalizeChainId()');
-        console.log('✅ FIXED: Native ETH transfer without calldata (pure tx)');
-        console.log('✅ FIXED: WalletConnect session_request listener added');
-        console.log('✅ FIXED: Better mobile flow with session wait');
-        console.log('✅ FIXED: Mobile wallet wake-up via deep link before transaction');
-        console.log('✅ FIXED: eth_sendTransaction added to WalletConnect methods');
-        console.log('✅ FIXED: wallet_switchEthereumChain and wallet_addEthereumChain added to methods');
-        console.log('✅ FIXED: Wait for chainChanged event before sending transaction');
-        console.log('✅ FIXED: Reuse existing WalletConnect session during deposits');
-        console.log('✅ FIXED: Trust Wallet Android uses universal link instead of custom scheme');
-        console.log('✅ FIXED: provider.connect() called BEFORE launching wallet (correct flow)');
-        console.log('✅ FIXED: Session state tracking with wcSessionState object');
-        console.log('✅ FIXED: Wait for accounts after session establishment');
-        console.log('✅ FIXED: Multiple retry attempts for account fetching');
-        console.log('✅ FIXED: Redesigned with premium institutional fintech visual style');
-        console.log('✅ FIXED: Mobile-first redesign with compact balance panel');
-        console.log('✅ FIXED: Sophisticated buttons with restrained radius');
-        console.log('✅ REMOVED: Live indicator from Transaction Analytics (requirement #3)');
-        console.log('✅ REMOVED: Interest and Referral from Transaction Analytics chart (requirement #2)');
-        console.log('✅ REMOVED: Crypto Selector from dashboard (requirement #7)');
-        console.log('✅ ASSET CARDS: Always expanded with all details visible (requirements #8, #9, #10, #11)');
-        console.log('✅ MINING CARDS: Substantially larger with 6-8px progress bar (requirements #12, #13)');
-        console.log('✅ TRANSACTIONS: Major visual improvement with mobile stacked treatment (requirements #15-21)');
-        console.log('✅ PAGINATION: 36-40px buttons with premium styling (requirement #22)');
-        console.log('✅ PNL: Always color coded green/red (requirement #6)');
-        console.log('✅ HEADER: Edge-to-edge with 72px height and backdrop blur (requirements #1, #2)');
-        console.log('✅ HEADER: Theme button added next to USD and Settings (requirement #3)');
-        console.log('✅ THEME: 3-way selector (Dark/Light/System) with popover (requirement #4)');
-        console.log('✅ THEME: Loaded from database before dashboard renders (requirement #5)');
-        console.log('✅ THEME: CSS variables properly structured for Light/Dark/System (requirement #6)');
-        console.log('✅ MOBILE PNL: Fixed class assignment with positive/negative colors (requirement #7)');
-        console.log('✅ ASSET SELECTOR: Removed from UI, kept for legitimate use cases (requirements #8, #9)');
-        console.log('✅ CURRENCY: Renamed to currency-selector-modal with independent state (requirement #10)');
-        console.log('✅ SPACING: Premium spacing with 18px gaps and 132px min-height cards (requirement #11)');
-        console.log('✅ LAYOUT: Full viewport width with responsive internal spacing (requirement #12)');
-        console.log('✅ MOBILE HEADER: Compact with theme button visible (requirement #13)');
-        console.log('✅ REMOVED ALL section subtitles/descriptions (global rule)');
-        console.log('✅ FIXED Mobile Total Portfolio PnL: label neutral, figures colored');
-        console.log('✅ SPLIT PnL into separate elements: label, amount, percent');
-        console.log('✅ THREE PnL states: positive, negative, neutral');
-        console.log('✅ ICON communicates direction: ↑ for gain, ↓ for loss, — for zero');
-        console.log('✅ Total Portfolio is mobile hero component');
-        console.log('✅ Increased mobile financial typography (clamp, 7vw, 2.25rem)');
-        console.log('✅ Removed subtitles but increased spacing');
-        console.log('✅ Single premium section-header system');
-        console.log('✅ Tabular numerals for all financial values');
-        console.log('✅ Desktop remains full width with responsive padding');
-        console.log('✅ All cards now use --bg-surface (uniform background)');
-        console.log('✅ Balance cards, asset cards, web3 section, loan section, referral section all use --bg-surface');
-        console.log('✅ Sidebar uses --bg-surface (uniform with cards)');
-        console.log('✅ Footer now visible in light theme with proper CSS overrides');
-        console.log('✅ Theme toggle button icon changed to moon (fa-moon)');
-        console.log('✅ PROMO CODE: Added entry point in dashboard actions area');
-        console.log('✅ PROMO CODE: Created dedicated modal with premium styling');
-        console.log('✅ PROMO CODE: New isolated endpoint POST /api/promos/redeem');
-        console.log('✅ PROMO CODE: Duplicate prevention with isRedeemingPromo flag');
-        console.log('✅ PROMO CODE: Enter key support for submission');
-        console.log('✅ PROMO CODE: Success state with reward display and Done button');
-        console.log('✅ PROMO CODE: Targeted balance/asset refresh after redemption');
-        console.log('✅ MOBILE SIDEBAR: Removed display:none !important conflict');
-        console.log('✅ MOBILE SIDEBAR: Transform-based off-canvas with backdrop');
-        console.log('✅ MOBILE SIDEBAR: Proper open/close/toggle functions');
-        console.log('✅ MOBILE SIDEBAR: Escape key and backdrop click support');
-        console.log('✅ MOBILE SIDEBAR: Closes on navigation item click');
-        console.log('✅ MOBILE SIDEBAR: Resize handler for desktop transition');
-        console.log('✅ AUTH: Removed Login/Sign Up buttons from Dashboard');
-        console.log('✅ AUTH: No token → redirect to login.html');
-        console.log('✅ AUTH: 401/403 API responses → handleSessionExpired() → redirect login.html');
-        console.log('✅ AUTH: authenticatedFetch() wrapper centralizes session handling');
-        console.log('✅ AUTH: WalletConnect expiration does NOT redirect to login.html');
-        console.log('✅ UPGRADED: Select Wallet now uses premium picker with logos');
-        console.log('✅ UPGRADED: Deposit Crypto now uses Deposit page\'s premium asset picker');
-        console.log('✅ UPGRADED: Asset picker has search, popular assets, network badges, selected state');
-        console.log('✅ UPGRADED: Wallet picker shows MetaMask, Trust, Phantom, Rainbow logos');
-        console.log('✅ UPGRADED: Both pickers use single source of truth (topAssets)');
-        console.log('✅ UPGRADED: Mobile pickers match desktop quality with touch targets');
-        // ===== FIXED: Canonical price store - single source of truth =====
-        console.log('✅ FIXED: Canonical price store - AppState.currentPrices using asset symbol as key');
-        console.log('✅ FIXED: Removed cachedPriceData - all prices now in AppState.currentPrices');
-        console.log('✅ FIXED: fetchAllPrices() fetches all 20 crypto rates on initialization');
-        console.log('✅ FIXED: WebSocket price updates update canonical store');
-        console.log('✅ FIXED: checkUserDefaultAsset no longer overwrites user displayAsset');
-        console.log('✅ FIXED: Asset picker reads from canonical price store');
-        console.log('✅ FIXED: Deposit UI uses canonical price store');
-        console.log('✅ FIXED: formatFiat no longer shows $0.00 for missing prices (shows "—" or "Updating...")');
     </script>
 </body>
 </html>
