@@ -2939,7 +2939,7 @@
                                         </div>
                                         <span class="panel-asset-network" id="withdraw-asset-network">Bitcoin Network</span>
                                     </div>
-                                    <button class="panel-change-asset" id="panel-change-asset" onclick="toggleAssetPicker()">
+                                    <button type="button" class="panel-change-asset" id="panel-change-asset" aria-expanded="false" aria-controls="asset-picker-popover">
                                         Change <i class="fas fa-chevron-right"></i>
                                     </button>
                                 </div>
@@ -3710,33 +3710,91 @@
         // =============================================
         // ASSET PICKER
         // =============================================
-        function toggleAssetPicker() {
-            assetPickerOpen = !assetPickerOpen;
+        function setupAssetPicker() {
+            const changeButton = document.getElementById('panel-change-asset');
             const popover = document.getElementById('asset-picker-popover');
-            if (assetPickerOpen) {
-                popover.classList.add('open');
-                renderPickerAssets();
-                document.getElementById('picker-search-input').value = '';
-                filterPickerAssets();
-            } else {
-                popover.classList.remove('open');
+            const searchInput = document.getElementById('picker-search-input');
+
+            if (!changeButton || !popover) {
+                console.warn('Asset picker elements not found');
+                return;
+            }
+
+            changeButton.addEventListener('click', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                const isOpen = popover.classList.contains('open');
+
+                if (isOpen) {
+                    closeAssetPicker();
+                } else {
+                    openAssetPicker();
+                }
+            });
+
+            if (searchInput) {
+                searchInput.addEventListener('input', filterPickerAssets);
             }
         }
 
-        function renderPickerAssets() {
+        function openAssetPicker() {
+            const popover = document.getElementById('asset-picker-popover');
+            const button = document.getElementById('panel-change-asset');
+
+            if (!popover) return;
+
+            populateAssetPicker();
+
+            popover.classList.add('open');
+
+            assetPickerOpen = true;
+
+            if (button) {
+                button.setAttribute('aria-expanded', 'true');
+            }
+
+            requestAnimationFrame(() => {
+                document.getElementById('picker-search-input')?.focus();
+            });
+        }
+
+        function closeAssetPicker() {
+            const popover = document.getElementById('asset-picker-popover');
+            const button = document.getElementById('panel-change-asset');
+
+            if (popover) {
+                popover.classList.remove('open');
+            }
+
+            assetPickerOpen = false;
+
+            if (button) {
+                button.setAttribute('aria-expanded', 'false');
+            }
+        }
+
+        function toggleAssetPicker() {
+            const popover = document.getElementById('asset-picker-popover');
+            if (popover.classList.contains('open')) {
+                closeAssetPicker();
+            } else {
+                openAssetPicker();
+            }
+        }
+
+        function populateAssetPicker() {
             const assetList = document.getElementById('picker-asset-list');
             if (!assetList) return;
 
             assetList.innerHTML = '';
 
-            // Get user's assets with balances
             const userAssetSymbols = AppState.cryptoAssets.map(a => a.symbol);
             const hasBalance = (symbol) => {
                 const asset = AppState.cryptoAssets.find(a => a.symbol === symbol);
                 return asset && asset.totalAmount > 0;
             };
 
-            // Separate assets: first those with balance, then others
             const sortedAssets = [...topAssets].sort((a, b) => {
                 const aHasBalance = hasBalance(a.symbol);
                 const bHasBalance = hasBalance(b.symbol);
@@ -3745,7 +3803,6 @@
                 return 0;
             });
 
-            // Add section label for assets with balance
             let hasBalanceSection = false;
             sortedAssets.forEach(asset => {
                 if (hasBalance(asset.symbol) && !hasBalanceSection) {
@@ -3803,7 +3860,6 @@
                 option.style.display = match ? 'flex' : 'none';
             });
 
-            // Hide section labels if no visible assets
             const labels = document.querySelectorAll('#picker-asset-list .picker-section-label');
             labels.forEach(label => {
                 let hasVisible = false;
@@ -3836,13 +3892,12 @@
             }
         }
 
-        function selectPickerAsset(symbol) {
+        async function selectPickerAsset(symbol) {
             const asset = topAssets.find(a => a.symbol === symbol);
             if (!asset) return;
 
-            // Check if user has balance for this asset
             const userAsset = AppState.cryptoAssets.find(a => a.symbol === symbol);
-            if (!userAsset || userAsset.totalAmount <= 0) {
+            if (!userAsset || Number(userAsset.totalAmount) <= 0) {
                 showNotification('warning', 'No Balance', `You have no ${asset.symbol.toUpperCase()} balance to withdraw.`);
                 return;
             }
@@ -3852,32 +3907,39 @@
             AppState.selectedAsset = asset;
 
             updateAssetPickerUI(asset);
+            updateAssetLabels(asset);
 
-            assetPickerOpen = false;
-            const popover = document.getElementById('asset-picker-popover');
-            if (popover) popover.classList.remove('open');
+            closeAssetPicker();
 
-            fetchPriceForAsset(asset, version).then(price => {
-                if (version !== assetSelectionVersion || !AppState.selectedAsset || AppState.selectedAsset.symbol !== asset.symbol) {
+            updateCryptoBalanceDisplay();
+
+            try {
+                const price = await fetchPriceForAsset(asset, version);
+
+                if (version !== assetSelectionVersion || AppState.selectedAsset?.symbol !== asset.symbol) {
                     return;
                 }
-                if (price !== null && price > 0) {
-                    AppState.currentAssetRate = price;
-                    AppState.assetPrices[asset.symbol] = price;
-                    const rateValueEl = document.getElementById('withdraw-asset-rate');
-                    if (rateValueEl) rateValueEl.textContent = formatUSD(price);
-                    const amountInput = document.getElementById('crypto-withdraw-amount');
-                    if (amountInput && parseFloat(amountInput.value) > 0) {
-                        amountInput.dispatchEvent(new Event('input'));
-                    }
-                    updateSummary();
+
+                if (Number(price) > 0) {
+                    AppState.currentAssetRate = Number(price);
+                    AppState.assetPrices[asset.symbol] = Number(price);
                 }
-            });
+
+                updateCryptoBalanceDisplay();
+
+                const amountInput = document.getElementById('crypto-withdraw-amount');
+                if (amountInput && parseFloat(amountInput.value) > 0) {
+                    amountInput.dispatchEvent(new Event('input'));
+                }
+
+                updateSummary();
+
+            } catch (error) {
+                console.error('Failed to update asset price:', error);
+                updateCryptoBalanceDisplay();
+            }
 
             loadSavedAddresses(asset.symbol);
-            updateCryptoBalanceDisplay();
-            updateSummary();
-            updateAssetLabels(asset);
         }
 
         function updateAssetPickerUI(asset) {
@@ -3928,12 +3990,10 @@
         // =============================================
         async function fetchPriceForAsset(asset, version) {
             try {
-                // First check if we have a cached price
                 if (cachedPriceData[asset.symbol] && cachedPriceData[asset.symbol] > 0) {
                     return cachedPriceData[asset.symbol];
                 }
 
-                // Try to get from backend
                 const token = getAuthToken();
                 if (token) {
                     try {
@@ -3954,7 +4014,6 @@
                     }
                 }
 
-                // Fallback to CoinGecko
                 const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${asset.id}&vs_currencies=usd`);
                 if (response.ok) {
                     const data = await response.json();
@@ -3972,7 +4031,6 @@
             }
         }
 
-        // Fetch price for current asset with update indicator
         async function refreshCurrentPrice() {
             const asset = AppState.selectedAsset;
             if (!asset) return;
@@ -3990,7 +4048,6 @@
                     updateCryptoBalanceDisplay();
                     updateSummary();
                     
-                    // Update price update time
                     const timeEl = document.getElementById('price-update-time');
                     if (timeEl) {
                         const now = new Date();
@@ -4004,12 +4061,9 @@
             }
         }
 
-        // Start periodic price updates
         function startPriceUpdates() {
-            // Initial fetch
             refreshCurrentPrice();
 
-            // Update every 30 seconds
             if (AppState.priceUpdateTimer) {
                 clearInterval(AppState.priceUpdateTimer);
             }
@@ -4133,7 +4187,6 @@
                         };
                     });
 
-                    // Filter to only assets with balance for initial selection
                     const assetsWithBalance = AppState.cryptoAssets.filter(a => a.totalAmount > 0);
                     
                     if (assetsWithBalance.length > 0) {
@@ -4144,7 +4197,6 @@
                             updateAssetLabels(firstAsset);
                         }
                     } else if (!AppState.selectedAsset) {
-                        // If no assets with balance, default to BTC but show zero balance
                         AppState.selectedAsset = topAssets[0];
                         updateAssetPickerUI(topAssets[0]);
                         updateAssetLabels(topAssets[0]);
@@ -4163,37 +4215,63 @@
         // =============================================
         function updateCryptoBalanceDisplay() {
             const asset = AppState.selectedAsset || topAssets[0];
-            const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
 
-            let balance = 0;
-            let value = 0;
+            const cryptoAsset = AppState.cryptoAssets.find(
+                a => a.symbol === asset.symbol
+            );
 
-            if (cryptoAsset) {
-                balance = cryptoAsset.totalAmount || 0;
-                value = cryptoAsset.currentValue || 0;
-            }
+            const balance = Number(cryptoAsset?.totalAmount) || 0;
+
+            const backendValue = Number(cryptoAsset?.currentValue) || 0;
+
+            const assetPrice =
+                Number(AppState.currentAssetRate) ||
+                Number(AppState.assetPrices?.[asset.symbol]) ||
+                Number(cryptoAsset?.currentPrice) ||
+                0;
+
+            const calculatedValue =
+                balance > 0 && assetPrice > 0
+                    ? balance * assetPrice
+                    : 0;
+
+            const displayValue =
+                calculatedValue > 0
+                    ? calculatedValue
+                    : backendValue;
 
             AppState.currentCryptoBalance = balance;
 
-            // Update balance panel elements
             const balanceEl = document.getElementById('withdraw-available-balance');
-            if (balanceEl) balanceEl.textContent = formatNumberWithCommas(balance, 8);
-
-            const usdEl = document.getElementById('withdraw-available-usd');
-            if (usdEl) usdEl.textContent = `≈ ${formatUSD(value)}`;
-
-            const hintEl = document.getElementById('amount-available-hint');
-            if (hintEl) hintEl.textContent = formatNumberWithCommas(balance, 8);
-
-            // Update rate display
-            const rateEl = document.getElementById('withdraw-asset-rate');
-            if (rateEl && AppState.currentAssetRate > 0) {
-                rateEl.textContent = formatUSD(AppState.currentAssetRate);
+            if (balanceEl) {
+                balanceEl.textContent = formatNumberWithCommas(balance, 8);
             }
 
-            // Update amount input symbol
+            const usdEl = document.getElementById('withdraw-available-usd');
+            if (usdEl) {
+                usdEl.textContent =
+                    displayValue > 0
+                        ? `≈ ${formatUSD(displayValue)}`
+                        : '≈ Price unavailable';
+            }
+
+            const hintEl = document.getElementById('amount-available-hint');
+            if (hintEl) {
+                hintEl.textContent = formatNumberWithCommas(balance, 8);
+            }
+
+            const rateEl = document.getElementById('withdraw-asset-rate');
+            if (rateEl) {
+                rateEl.textContent =
+                    assetPrice > 0
+                        ? formatUSD(assetPrice)
+                        : '—';
+            }
+
             const symbolEl = document.getElementById('amount-asset-symbol');
-            if (symbolEl) symbolEl.textContent = asset.symbol.toUpperCase();
+            if (symbolEl) {
+                symbolEl.textContent = asset.symbol.toUpperCase();
+            }
 
             updateSummary();
         }
@@ -4219,11 +4297,9 @@
             document.getElementById('summary-remain-crypto').textContent = `${formatNumberWithCommas(remainingCrypto, 8)} ${asset.symbol.toUpperCase()}`;
             document.getElementById('summary-remain-usd').textContent = `≈ ${formatUSD(remainingUsd)}`;
 
-            // Update amount USD hint
             const usdHintEl = document.getElementById('amount-usd-hint');
             if (usdHintEl) usdHintEl.textContent = formatUSD(usdAmount);
 
-            // Update capacity indicator
             let capacityPercent = 0;
             if (availableBalance > 0 && cryptoAmount > 0) {
                 capacityPercent = Math.min(100, (cryptoAmount / availableBalance) * 100);
@@ -4238,7 +4314,6 @@
             }
             if (percentEl) percentEl.textContent = Math.round(capacityPercent) + '%';
 
-            // Bank summary
             const bankAmount = parseFloat(document.getElementById('bank-withdraw-amount')?.value) || 0;
             document.getElementById('bank-summary-source').textContent = source;
             document.getElementById('bank-summary-amount').textContent = formatUSD(bankAmount);
@@ -4311,7 +4386,6 @@
             }
 
             const maxUsd = availableBalance * price;
-            // Check against min withdrawal
             if (maxUsd < AppState.MIN_WITHDRAWAL) {
                 showNotification('warning', 'Amount Too Small', 
                     `Your balance (${formatUSD(maxUsd)}) is below the minimum withdrawal of $${AppState.MIN_WITHDRAWAL}.`);
@@ -4331,7 +4405,6 @@
         // GAS FEE - BACKGROUND LOGIC ONLY
         // =============================================
         async function getRequiredGasFee(withdrawalAmount) {
-            // Background gas fee calculation - not displayed to user
             const btcGasFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
             const asset = AppState.selectedAsset || topAssets[0];
 
@@ -4648,7 +4721,6 @@
                 return;
             }
 
-            // Gas fee calculated in background - not displayed
             const requiredGasFee = await getRequiredGasFee(usdAmount);
 
             const withdrawalData = {
@@ -5190,14 +5262,12 @@
                 updateSummary();
             });
 
-            // Price updates via socket
             AppState.socket.on('price_update', (data) => {
                 console.log('Price update received:', data);
                 if (data.symbol && data.price) {
                     AppState.assetPrices[data.symbol] = data.price;
                     cachedPriceData[data.symbol] = data.price;
                     
-                    // If this is the currently selected asset, update the display
                     if (AppState.selectedAsset && AppState.selectedAsset.symbol === data.symbol) {
                         AppState.currentAssetRate = data.price;
                         const rateEl = document.getElementById('withdraw-asset-rate');
@@ -5223,20 +5293,23 @@
         // CLOSE ASSET PICKER ON CLICK OUTSIDE
         // =============================================
         function setupAssetPickerCloseOnOutsideClick() {
-            document.addEventListener('click', function(e) {
+            document.addEventListener('click', function(event) {
+                if (!assetPickerOpen) return;
+
                 const container = document.getElementById('asset-picker-container');
-                if (container && !container.contains(e.target)) {
-                    const popover = document.getElementById('asset-picker-popover');
-                    if (popover) popover.classList.remove('open');
-                    assetPickerOpen = false;
+                const button = document.getElementById('panel-change-asset');
+
+                const clickedInsidePicker = container?.contains(event.target);
+                const clickedButton = button?.contains(event.target);
+
+                if (!clickedInsidePicker && !clickedButton) {
+                    closeAssetPicker();
                 }
             });
 
-            document.addEventListener('keydown', function(e) {
-                if (e.key === 'Escape' && assetPickerOpen) {
-                    const popover = document.getElementById('asset-picker-popover');
-                    if (popover) popover.classList.remove('open');
-                    assetPickerOpen = false;
+            document.addEventListener('keydown', function(event) {
+                if (event.key === 'Escape' && assetPickerOpen) {
+                    closeAssetPicker();
                 }
             });
         }
@@ -5272,9 +5345,9 @@
                 initializeOtpSystem();
 
                 initSocketIO();
+                setupAssetPicker();
                 setupAssetPickerCloseOnOutsideClick();
 
-                // Start periodic price updates from backend
                 startPriceUpdates();
 
                 document.getElementById('current-year').textContent = new Date().getFullYear();
