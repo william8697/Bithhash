@@ -8882,12 +8882,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let currentAsset = null;
         let assetSelectionVersion = 0;
 
-        // ===== CONCURRENCY LOCKS =====
+        // ===== FIXED: Active deposit operation lock =====
         let activeDepositOperation = null;
-        let isWeb3OperationInProgress = false;
-
-        // ===== EIP-6963 PROVIDERS =====
-        const EIP6963_PROVIDERS = new Map();
+        let activeDepositOperationId = null;
 
         // =============================================
         // TOP ASSETS - Single source of truth
@@ -9114,11 +9111,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const normalized1 = normalizeChainId(chainId1);
             const normalized2 = normalizeChainId(chainId2);
             return normalized1 === normalized2;
-        }
-
-        // ===== UUID generation for operations =====
-        function generateOperationId() {
-            return 'op_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
         }
 
         function updateMobileBalances() {
@@ -9593,6 +9585,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             
             // Update the modal picker too
             updateAssetPickerUIModal(asset);
+            
+            // Update modal network
+            updateDepositModalNetwork();
         }
 
         function selectPickerAssetModal(symbol) {
@@ -9617,6 +9612,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             updateDepositRateInfo(asset.symbol);
             hideDepositAddress();
             hideDepositModalAddress();
+            
+            // Update modal network
+            updateDepositModalNetwork();
         }
 
         function updateAssetPickerUI(asset) {
@@ -9979,87 +9977,87 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         const nonEvmAssets = ['btc', 'sol', 'xrp', 'doge', 'ada', 'dot', 'trx', 'ltc', 'near', 'bch'];
 
         // =============================================
-        // EIP-6963 PROVIDER INITIALIZATION - Desktop only
+        // WEB3 PROVIDER INITIALIZATION - EIP-6963
         // =============================================
+        // ===== FIXED: No window.ethereum fallback - EIP-6963 only =====
         function initializeEIP6963() {
             if (eip6963Initialized) return;
             
-            // Only initialize EIP-6963 on desktop
-            if (isMobileDevice()) {
-                console.log('Mobile device detected - skipping EIP-6963 initialization');
-                return;
-            }
+            const providers = new Map();
             
             window.addEventListener("eip6963:announceProvider", (event) => {
                 const detail = event.detail;
-                if (!EIP6963_PROVIDERS.has(detail.info.uuid)) {
-                    EIP6963_PROVIDERS.set(detail.info.uuid, detail);
-                    console.log('EIP-6963 provider announced:', detail.info.name);
+                // Store by RDNS for lookup
+                if (detail.info && detail.info.rdns) {
+                    providers.set(detail.info.rdns, detail);
+                }
+                if (!discoveredProviders.some(p => p.info.rdns === detail.info.rdns)) {
+                    discoveredProviders.push(detail);
                 }
             });
             
             window.dispatchEvent(new Event("eip6963:requestProvider"));
             eip6963Initialized = true;
-            
             setTimeout(() => {
                 detectInstalledWallets();
             }, 2000);
+            
+            // Store providers map for later use
+            window._eip6963Providers = providers;
         }
 
-        // ===== FIXED: getProviderByRDNS - NO window.ethereum fallback =====
+        // ===== FIXED: Get provider by RDNS only - no window.ethereum fallback =====
         function getProviderByRDNS(targetRdns) {
-            // Only use EIP-6963 providers on desktop
-            if (isMobileDevice()) {
-                return null;
-            }
+            const providersMap = window._eip6963Providers || new Map();
             
-            for (const [uuid, provider] of EIP6963_PROVIDERS) {
-                if (provider.info.rdns === targetRdns) {
+            // First check EIP-6963 discovered providers
+            for (const provider of discoveredProviders) {
+                if (provider.info && provider.info.rdns === targetRdns) {
                     return provider;
                 }
             }
             
-            // Check for EIP-6963 provider by name as well
-            for (const [uuid, provider] of EIP6963_PROVIDERS) {
-                const name = provider.info.name?.toLowerCase() || '';
-                const rdnsParts = targetRdns.split('.');
-                const lastName = rdnsParts[rdnsParts.length - 1];
-                if (name.includes(lastName) || name.includes(targetRdns.split('.').join(''))) {
-                    return provider;
-                }
+            // Also check the map directly
+            if (providersMap.has(targetRdns)) {
+                return providersMap.get(targetRdns);
             }
             
+            // REMOVED: window.ethereum fallback - EIP-6963 only
             return null;
         }
 
-        // ===== REMOVED: window.ethereum fallback - no longer used =====
+        // ===== FIXED: detectInstalledWallets - EIP-6963 only =====
+        function detectInstalledWallets() {
+            let installed = false;
+            
+            // Only use EIP-6963 discovered providers
+            if (discoveredProviders.length > 0) {
+                installed = true;
+            }
+            
+            // REMOVED: window.ethereum detection - EIP-6963 only
+            // REMOVED: window.solana detection - not relevant for EVM
+            
+            isWalletInstalled = installed;
+            walletCheckComplete = true;
+            updateMobileDepositButtonVisibility();
+            return installed;
+        }
 
-        // =============================================
-        // WALLETCONNECT - Mobile only
-        // =============================================
         async function silentlyInitWalletConnect(attempt = 1) {
             if (universalWalletProvider) {
                 return universalWalletProvider;
             }
-            
-            // Only use WalletConnect on mobile
-            if (!isMobileDevice()) {
-                console.warn('WalletConnect should only be used on mobile devices');
-                return null;
-            }
-            
             if (attempt > MAX_WALLETCONNECT_RETRIES) {
                 console.error('WalletConnect SDK failed to load after maximum retries');
                 return null;
             }
-            
             try {
                 const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
                 if (!ProviderClass || typeof ProviderClass.init !== 'function') {
                     await new Promise(r => setTimeout(r, 1000));
                     return await silentlyInitWalletConnect(attempt + 1);
                 }
-                
                 universalWalletProvider = await ProviderClass.init({
                     projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                     showQrModal: false,
@@ -10077,16 +10075,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         mobileLinks: []
                     }
                 });
-                
                 signClient = universalWalletProvider;
                 walletConnectInitialized = true;
-                
                 universalWalletProvider.on("session_request", (data) => {
                     console.log("WalletConnect session_request received:", data);
                     wcSessionState.status = 'session_established';
                     wcSessionState.session = data;
                 });
-                
                 universalWalletProvider.on("connect", (data) => {
                     console.log("WalletConnect CONNECT event fired");
                     wcSessionState.status = 'connected';
@@ -10098,7 +10093,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         wcSessionState.chainId = data.chainId;
                     }
                 });
-                
                 universalWalletProvider.on("disconnect", (data) => {
                     console.log("WalletConnect DISCONNECT event fired");
                     web3WalletAddress = null;
@@ -10108,13 +10102,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     wcSessionState.session = null;
                     wcSessionState.accounts = [];
                 });
-                
                 universalWalletProvider.on("chainChanged", (data) => {
                     console.log("WalletConnect chainChanged:", data);
                     web3Network = data;
                     wcSessionState.chainId = data;
                 });
-                
                 universalWalletProvider.on("accountsChanged", (data) => {
                     console.log("WalletConnect accountsChanged:", data);
                     if (data && data.length > 0) {
@@ -10122,7 +10114,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         wcSessionState.accounts = data;
                     }
                 });
-                
                 universalWalletProvider.on("session_update", (data) => {
                     console.log("WalletConnect session_update:", data);
                     wcSessionState.status = 'session_established';
@@ -10131,7 +10122,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         wcSessionState.accounts = data;
                     }
                 });
-                
                 return universalWalletProvider;
             } catch (err) {
                 console.error('Provider init error:', err);
@@ -10202,44 +10192,38 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         // CONNECT SELECTED WALLET - Uses premium selector
         // =============================================
+        // ===== FIXED: Mobile WalletConnect lifecycle - proper flow =====
+        // ===== FIXED: No window.ethereum fallback - EIP-6963 only =====
         async function connectSelectedWallet() {
-            // Use the selected wallet from the premium picker
             const walletType = selectedWallet.id;
             const connectBtn = document.getElementById('web3-connect-btn');
             const statusDiv = document.getElementById('web3-status-indicator');
             const errorDiv = document.getElementById('web3-error-msg');
             
+            // Prevent concurrent connections
             if (isConnecting) return;
-            if (isWeb3OperationInProgress) {
-                showNotification('warning', 'Operation in Progress', 'Please wait for the current wallet operation to complete.');
+            
+            // Prevent duplicate wallet connections
+            const existingWallet = connectedWallets.find(w => w.type === walletType);
+            if (existingWallet) {
+                errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+                errorDiv.style.display = 'block';
+                showNotification('warning', 'Wallet Already Connected',
+                    `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
                 return;
             }
             
             isConnecting = true;
-            isWeb3OperationInProgress = true;
             wcSessionState.status = 'connecting';
             setButtonLoading(connectBtn, 'processing', 'Linking...');
             errorDiv.style.display = 'none';
             
             try {
-                const existingWallet = connectedWallets.find(w => w.type === walletType);
-                if (existingWallet) {
-                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-                    errorDiv.style.display = 'block';
-                    showNotification('warning', 'Wallet Already Connected',
-                        `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
-                    isConnecting = false;
-                    isWeb3OperationInProgress = false;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                    return;
-                }
+                // Check if this is desktop or mobile
+                const isMobile = isMobileDevice();
                 
-                const operationId = generateOperationId();
-                console.log(`[${operationId}] Starting wallet connection for ${walletType}`);
-                
-                if (!isMobileDevice()) {
-                    // Desktop: Use EIP-6963 only
+                if (!isMobile) {
+                    // ===== DESKTOP: EIP-6963 only =====
                     const targetRdns = {
                         'metamask': 'io.metamask',
                         'trust': 'com.trustwallet.app',
@@ -10248,6 +10232,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     }[walletType] || 'io.metamask';
                     
                     const injectedTarget = getProviderByRDNS(targetRdns);
+                    
                     if (injectedTarget) {
                         try {
                             setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
@@ -10260,7 +10245,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     errorDiv.style.display = 'block';
                                     showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                                     isConnecting = false;
-                                    isWeb3OperationInProgress = false;
                                     connectBtn.disabled = false;
                                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                                     return;
@@ -10274,10 +10258,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     connectBtn.style.color = '#22C55E';
                                     connectBtn.disabled = true;
                                 }, 500);
-                                showNotification('success', 'Wallet Connected',
-                                    `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
-                                isConnecting = false;
-                                isWeb3OperationInProgress = false;
                                 return;
                             }
                         } catch (err) {
@@ -10287,7 +10267,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 errorDiv.style.display = 'block';
                                 showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
                                 isConnecting = false;
-                                isWeb3OperationInProgress = false;
                                 connectBtn.disabled = false;
                                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                                 return;
@@ -10295,49 +10274,21 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             throw err;
                         }
                     } else {
+                        // No EIP-6963 provider found - redirect to install
                         const appStoreUrl = getAppStoreUrl(walletType);
                         showNotification('info', 'Wallet Required',
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                         window.open(appStoreUrl, '_blank');
                         isConnecting = false;
-                        isWeb3OperationInProgress = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
                     }
                 } else {
-                    // Mobile: Use WalletConnect v2 only
-                    console.log(`[${operationId}] Mobile flow: initializing WalletConnect for`, walletType);
+                    // ===== MOBILE: WalletConnect v2 only =====
+                    console.log('Mobile flow: initializing WalletConnect for', walletType);
                     
-                    // Check if we have an existing session that can be reused
-                    if (universalWalletProvider && walletConnectInitialized) {
-                        try {
-                            const accounts = await universalWalletProvider.request({ method: "eth_accounts" });
-                            if (accounts && accounts.length > 0) {
-                                console.log(`[${operationId}] Reusing existing WalletConnect session`);
-                                const address = accounts[0];
-                                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                                if (!walletExists) {
-                                    await linkWalletToBackend(address, walletType, '0x1');
-                                    setButtonLoading(connectBtn, 'submitted', 'Linked');
-                                    setTimeout(() => {
-                                        connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
-                                        connectBtn.style.background = 'rgba(34,197,94,0.15)';
-                                        connectBtn.style.color = '#22C55E';
-                                        connectBtn.disabled = true;
-                                    }, 500);
-                                    showNotification('success', 'Wallet Connected',
-                                        `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
-                                    isConnecting = false;
-                                    isWeb3OperationInProgress = false;
-                                    return;
-                                }
-                            }
-                        } catch (e) {
-                            console.log(`[${operationId}] Existing session not usable, creating new one`);
-                        }
-                    }
-                    
+                    // Get or create WC session
                     const provider = await silentlyInitWalletConnect();
                     if (!provider) {
                         const appStoreUrl = getAppStoreUrl(walletType);
@@ -10345,7 +10296,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                         window.open(appStoreUrl, '_blank');
                         isConnecting = false;
-                        isWeb3OperationInProgress = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
@@ -10353,10 +10303,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     
                     setButtonLoading(connectBtn, 'approving', 'Connecting...');
                     
+                    // Generate WC URI
                     let wcUri = null;
                     const uriPromise = new Promise((resolve) => {
                         const uriHandler = (uri) => {
-                            console.log(`[${operationId}] WalletConnect URI emitted:`, uri);
+                            console.log('WalletConnect URI emitted:', uri);
                             wcUri = uri;
                             activeWcUri = uri;
                             wcSessionState.uri = uri;
@@ -10377,23 +10328,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     
                     const connectPromise = provider.connect();
                     const uri = await uriPromise;
-                    console.log(`[${operationId}] WalletConnect URI ready:`, uri);
+                    console.log('WalletConnect URI ready:', uri);
                     
+                    // Create deep link and open wallet
                     const deepLink = openDeepLink(walletType, uri);
-                    console.log(`[${operationId}] Opening wallet with deep link:`, deepLink);
+                    console.log('Opening wallet with deep link:', deepLink);
                     wcSessionState.status = 'wallet_launched';
                     
-                    // Store operation in localStorage for recovery
-                    const operation = {
-                        id: operationId,
-                        type: 'connect',
-                        walletType: walletType,
-                        timestamp: Date.now(),
-                        status: 'wallet_launched'
-                    };
-                    localStorage.setItem('activeWeb3Operation', JSON.stringify(operation));
-                    
-                    // Open the wallet using window.open (doesn't navigate away)
+                    // ===== FIXED: Open wallet without navigating away =====
+                    // Use window.open for mobile - this opens the wallet app
+                    // without destroying the current page context
                     window.open(deepLink, '_blank');
                     
                     setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
@@ -10401,11 +10345,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     // Wait for connection with timeout
                     const connectResult = await Promise.race([
                         connectPromise,
-                        new Promise((_, reject) => 
-                            setTimeout(() => reject(new Error('Connection timeout - please approve in your wallet')), 60000)
-                        )
+                        new Promise((_, reject) => {
+                            setTimeout(() => reject(new Error('Connection timeout - please approve in your wallet')), 60000);
+                        })
                     ]);
                     
+                    // Get accounts after connection
                     let accounts = provider.accounts;
                     let attempts = 0;
                     const maxAttempts = 30;
@@ -10421,7 +10366,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         try {
                             accounts = await provider.request({ method: "eth_requestAccounts" });
                         } catch (e) {
-                            console.warn(`[${operationId}] eth_requestAccounts failed:`, e);
+                            console.warn('eth_requestAccounts failed:', e);
                         }
                     }
                     
@@ -10436,10 +10381,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         errorDiv.style.display = 'block';
                         showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                         isConnecting = false;
-                        isWeb3OperationInProgress = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                        localStorage.removeItem('activeWeb3Operation');
                         return;
                     }
                     
@@ -10447,7 +10390,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     try {
                         chainId = await provider.request({ method: 'eth_chainId' });
                     } catch (e) {
-                        console.warn(`[${operationId}] Could not get chainId, using default`);
+                        console.warn('Could not get chainId, using default');
                     }
                     
                     await linkWalletToBackend(address, walletType, chainId);
@@ -10455,8 +10398,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     wcSessionState.status = 'connected';
                     wcSessionState.accounts = accounts;
                     wcSessionState.chainId = chainId;
-                    
-                    localStorage.removeItem('activeWeb3Operation');
                     
                     setButtonLoading(connectBtn, 'submitted', 'Linked');
                     setTimeout(() => {
@@ -10473,7 +10414,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.error('Wallet connection error:', error);
                 wcSessionState.status = 'idle';
                 wcSessionState.error = error.message;
-                localStorage.removeItem('activeWeb3Operation');
                 
                 let errorMessage = error.message || 'Failed to connect wallet.';
                 if (errorMessage.includes('user rejected')) {
@@ -10483,13 +10423,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 } else if (errorMessage.includes('timeout')) {
                     errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
                 }
+                
                 errorDiv.textContent = errorMessage;
                 errorDiv.style.display = 'block';
                 showNotification('error', 'Connection Failed', errorMessage);
             }
             
             isConnecting = false;
-            isWeb3OperationInProgress = false;
             connectBtn.disabled = false;
             if (!web3WalletAddress) {
                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
@@ -10498,7 +10438,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
         function updateWalletLogo() {
             // This is now handled by the premium wallet picker
-            // The selectedWallet object is updated via selectWalletOption
         }
 
         // =============================================
@@ -10527,9 +10466,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         let priceFetchInterval = null;
-        // ===== FIXED: Remove cachedPriceData - use AppState.currentPrices instead =====
-        // cachedPriceData is removed to avoid duplicate price stores
-        // All prices now live in AppState.currentPrices
 
         // ===== FIXED: updateDepositRateInfo uses canonical price store =====
         async function updateDepositRateInfo(assetSymbol) {
@@ -10840,6 +10776,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             // Update modal picker to match main
             if (currentAsset) {
                 updateAssetPickerUIModal(currentAsset);
+                // ===== FIXED: Update modal network when opening =====
                 updateDepositModalNetwork();
                 updateDepositModalRateInfo(currentAsset.symbol);
             }
@@ -10871,12 +10808,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
-        // ===== FIXED: executeDeposit with operation ID and concurrency lock =====
+        // ===== FIXED: executeDeposit with operation locking and proper mobile flow =====
         async function executeDeposit() {
-            // Check for active deposit operation
+            // ===== FIXED: Operation lock - prevent concurrent deposits =====
             if (activeDepositOperation) {
-                showNotification('warning', 'Deposit in Progress',
-                    'Please wait for the current deposit to complete before starting another.');
+                showNotification(
+                    'warning',
+                    'Deposit already in progress',
+                    'Please complete or cancel the current deposit request before starting another.'
+                );
                 return;
             }
 
@@ -10886,22 +10826,20 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const amountUSD = parseFloat(amountInput.value);
             
-            // Create operation ID
-            const operationId = generateOperationId();
+            // ===== FIXED: Create operation ID =====
+            const operationId = crypto.randomUUID ? crypto.randomUUID() : 'dep_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             activeDepositOperation = {
                 id: operationId,
                 asset: asset,
-                amountUSD: amountUSD,
+                amount: amountUSD,
                 status: 'created',
                 createdAt: Date.now()
             };
+            activeDepositOperationId = operationId;
             
-            // Store operation in localStorage for recovery
-            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-
-            setButtonLoading(depositBtn, 'processing', 'Preparing...');
+            setButtonLoading(depositBtn, 'processing', 'Processing...');
             statusMsg.style.color = 'var(--text-secondary)';
-            statusMsg.textContent = 'Preparing deposit...';
+            statusMsg.textContent = 'Initializing deposit...';
             
             const hasWalletAddress = web3WalletAddress || (connectedWallets && connectedWallets.length > 0);
             if (!hasWalletAddress) {
@@ -10910,7 +10848,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                localStorage.removeItem('activeDepositOperation');
+                activeDepositOperationId = null;
                 return;
             }
             
@@ -10922,7 +10860,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 statusMsg.textContent = 'No wallet found. Please link a wallet.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                localStorage.removeItem('activeDepositOperation');
+                activeDepositOperationId = null;
                 return;
             }
             
@@ -10931,18 +10869,18 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 statusMsg.textContent = 'Please enter a valid amount.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
-                localStorage.removeItem('activeDepositOperation');
+                activeDepositOperationId = null;
                 return;
             }
-
+            
             try {
                 const token = getAuthToken();
                 if (!token) {
                     handleSessionExpired();
                     throw new Error('Please log in again.');
                 }
-
-                // ===== FIXED: Use canonical price store =====
+                
+                // Get price from canonical store
                 let price = 0;
                 const priceData = AppState.currentPrices[asset];
                 if (priceData && priceData.usd > 0) {
@@ -10959,25 +10897,18 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         }
                     }
                 }
-                
                 if (!price || price === 0) throw new Error('Price not available for this asset.');
                 
                 const cryptoAmount = amountUSD / price;
                 statusMsg.textContent = `Amount: ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()}`;
-                activeDepositOperation.status = 'preparing';
-                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                 
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
                 
                 statusMsg.textContent = 'Getting deposit address...';
-                activeDepositOperation.status = 'getting_address';
-                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                
                 const depositAddressResponse = await fetch(`https://bithash-backend-ycuf.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
-                
                 if (!depositAddressResponse.ok) {
                     if (depositAddressResponse.status === 401 || depositAddressResponse.status === 403) {
                         handleSessionExpired();
@@ -10986,58 +10917,60 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const err = await depositAddressResponse.json();
                     throw new Error(err.message || 'Failed to get deposit address.');
                 }
-                
                 const addressData = await depositAddressResponse.json();
                 const depositAddress = addressData.data?.address || addressData.address;
                 if (!depositAddress) {
                     throw new Error('No deposit address returned. Please try again.');
                 }
-                
                 const contractAddress = addressData.data?.contractAddress || null;
                 const tokenDecimals = addressData.data?.decimals || 18;
                 const isERC20 = addressData.data?.isERC20 || false;
                 const tokenSymbol = addressData.data?.tokenSymbol || asset.toUpperCase();
                 const chainId = addressData.data?.chainId || 1;
                 
-                console.log(`[${operationId}] === ERC20 Deposit ===`);
-                console.log(`[${operationId}] Token:`, tokenSymbol);
-                console.log(`[${operationId}] Chain ID:`, chainId);
-                console.log(`[${operationId}] Contract:`, contractAddress);
-                console.log(`[${operationId}] Decimals:`, tokenDecimals);
-                console.log(`[${operationId}] Recipient:`, depositAddress);
-                console.log(`[${operationId}] Amount (USD):`, amountUSD);
-                console.log(`[${operationId}] Amount (Crypto):`, cryptoAmount);
+                console.log("=== ERC20 Deposit ===");
+                console.log("Token:", tokenSymbol);
+                console.log("Chain ID:", chainId);
+                console.log("Contract:", contractAddress);
+                console.log("Decimals:", tokenDecimals);
+                console.log("Recipient:", depositAddress);
+                console.log("Amount (USD):", amountUSD);
+                console.log("Amount (Crypto):", cryptoAmount);
+                console.log("Operation ID:", operationId);
                 
                 if (isEVM) {
                     let providerToUse = web3Provider;
-                    
                     if (!providerToUse) {
-                        if (isMobileDevice()) {
-                            // Mobile: Use WalletConnect
-                            if (universalWalletProvider && walletConnectInitialized) {
-                                providerToUse = universalWalletProvider;
-                                console.log(`[${operationId}] Reusing existing WalletConnect session`);
+                        if (universalWalletProvider && walletConnectInitialized) {
+                            providerToUse = universalWalletProvider;
+                            console.log('Reusing existing WalletConnect session');
+                        } else {
+                            const isMobile = isMobileDevice();
+                            if (isMobile) {
+                                // Mobile: Use WalletConnect
+                                if (!universalWalletProvider) {
+                                    const wcProvider = await silentlyInitWalletConnect();
+                                    if (!wcProvider) {
+                                        throw new Error('No wallet provider available. Please install a wallet.');
+                                    }
+                                    providerToUse = wcProvider;
+                                } else {
+                                    providerToUse = universalWalletProvider;
+                                }
                             } else {
-                                const wcProvider = await silentlyInitWalletConnect();
-                                if (!wcProvider) {
+                                // Desktop: EIP-6963 only
+                                const targetRdns = {
+                                    'metamask': 'io.metamask',
+                                    'trust': 'com.trustwallet.app',
+                                    'phantom': 'app.phantom',
+                                    'rainbow': 'me.rainbow'
+                                }[walletTypeToUse] || 'io.metamask';
+                                const injectedTarget = getProviderByRDNS(targetRdns);
+                                if (injectedTarget) {
+                                    providerToUse = injectedTarget.provider;
+                                } else {
                                     throw new Error('No wallet provider available. Please install a wallet.');
                                 }
-                                providerToUse = wcProvider;
-                            }
-                        } else {
-                            // Desktop: Use EIP-6963
-                            const targetRdns = {
-                                'metamask': 'io.metamask',
-                                'trust': 'com.trustwallet.app',
-                                'phantom': 'app.phantom',
-                                'rainbow': 'me.rainbow'
-                            }[walletTypeToUse] || 'io.metamask';
-                            
-                            const injectedTarget = getProviderByRDNS(targetRdns);
-                            if (injectedTarget) {
-                                providerToUse = injectedTarget.provider;
-                            } else {
-                                throw new Error('No wallet provider found. Please install a wallet.');
                             }
                         }
                     }
@@ -11048,7 +10981,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     } catch (e) {
                         accounts = await providerToUse.request({ method: 'eth_accounts' });
                     }
-                    
                     if (!accounts || accounts.length === 0) {
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
@@ -11056,21 +10988,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     let currentChainId;
                     try {
                         currentChainId = await providerToUse.request({ method: 'eth_chainId' });
-                        console.log(`[${operationId}] Current Chain ID:`, currentChainId);
-                        console.log(`[${operationId}] Required Chain ID:`, chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`);
+                        console.log("Current Chain ID:", currentChainId);
+                        console.log("Required Chain ID:", chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`);
                     } catch (e) {
-                        console.warn(`[${operationId}] Could not get chainId, assuming default:`, e);
+                        console.warn('Could not get chainId, assuming default:', e);
                         currentChainId = '0x1';
                     }
                     
                     const requiredChainId = chainId === 1 ? '0x1' : `0x${chainId.toString(16)}`;
-                    
                     if (!compareChainIds(currentChainId, requiredChainId)) {
                         statusMsg.textContent = `Switching to ${networkInfo.network}...`;
-                        activeDepositOperation.status = 'switching_network';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                         setButtonLoading(depositBtn, 'approving', `Switching to ${networkInfo.network}...`);
-                        
                         let chainSwitchResolved = false;
                         const chainSwitchPromise = new Promise((resolve, reject) => {
                             const timeout = setTimeout(() => {
@@ -11078,9 +11006,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     reject(new Error('Chain switch timeout - please approve in your wallet'));
                                 }
                             }, 30000);
-                            
                             const chainChangeHandler = (data) => {
-                                console.log(`[${operationId}] Chain changed to:`, data);
+                                console.log('Chain changed to:', data);
                                 chainSwitchResolved = true;
                                 clearTimeout(timeout);
                                 try {
@@ -11088,11 +11015,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 } catch (e) {}
                                 resolve(data);
                             };
-                            
                             try {
                                 providerToUse.on('chainChanged', chainChangeHandler);
                             } catch (e) {
-                                console.warn(`[${operationId}] Could not add chainChanged listener:`, e);
+                                console.warn('Could not add chainChanged listener:', e);
                                 setTimeout(() => {
                                     if (!chainSwitchResolved) {
                                         chainSwitchResolved = true;
@@ -11101,7 +11027,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 }, 3000);
                             }
                         });
-                        
                         try {
                             await providerToUse.request({
                                 method: 'wallet_switchEthereumChain',
@@ -11114,8 +11039,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         } catch (switchError) {
                             if (switchError.code === 4902) {
                                 statusMsg.textContent = `Adding ${networkInfo.network} to wallet...`;
-                                activeDepositOperation.status = 'adding_network';
-                                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                                 setButtonLoading(depositBtn, 'approving', `Adding ${networkInfo.network}...`);
                                 try {
                                     const chainParams = {
@@ -11151,68 +11074,33 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     } catch (e) {
                         accounts = await providerToUse.request({ method: 'eth_accounts' });
                     }
-                    
                     if (!accounts || accounts.length === 0) {
                         throw new Error('No accounts found. Please unlock your wallet.');
                     }
                     
                     const isMobile = isMobileDevice();
                     if (isMobile && (walletTypeToUse === 'metamask' || walletTypeToUse === 'trust' || walletTypeToUse === 'rainbow' || walletTypeToUse === 'phantom')) {
-                        // Mobile: Open wallet via deep link without navigating away
                         statusMsg.textContent = 'Opening wallet app...';
-                        activeDepositOperation.status = 'opening_wallet';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        console.log(`[${operationId}] Mobile device detected - opening wallet app`);
-                        
-                        // Generate a new URI for this transaction
-                        let wcUri = activeWcUri;
-                        if (!wcUri && universalWalletProvider) {
-                            try {
-                                // Try to get a fresh URI
-                                const uriPromise = new Promise((resolve) => {
-                                    const handler = (uri) => {
-                                        wcUri = uri;
-                                        activeWcUri = uri;
-                                        resolve(uri);
-                                    };
-                                    universalWalletProvider.once("display_uri", handler);
-                                    setTimeout(() => {
-                                        if (universalWalletProvider._uri) {
-                                            wcUri = universalWalletProvider._uri;
-                                            activeWcUri = wcUri;
-                                            resolve(wcUri);
-                                        }
-                                    }, 500);
-                                });
-                                wcUri = await uriPromise;
-                            } catch (e) {
-                                console.warn(`[${operationId}] Could not get fresh URI:`, e);
-                            }
+                        console.log('Mobile device detected - opening wallet app');
+                        const walletDeepLink = {
+                            'metamask': 'https://metamask.app.link/',
+                            'trust': 'https://link.trustwallet.com/',
+                            'rainbow': 'rainbow://',
+                            'phantom': 'phantom://'
+                        }[walletTypeToUse] || 'https://metamask.app.link/';
+                        // Use window.open without navigating away
+                        const wakeWindow = window.open(walletDeepLink, '_blank');
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        if (wakeWindow && !wakeWindow.closed) {
+                            try { wakeWindow.close(); } catch (e) {}
                         }
-                        
-                        if (wcUri) {
-                            const deepLink = openDeepLink(walletTypeToUse, wcUri);
-                            console.log(`[${operationId}] Opening wallet with deep link:`, deepLink);
-                            
-                            // Store operation in localStorage for recovery
-                            localStorage.setItem('activeDepositOperation', JSON.stringify({
-                                ...activeDepositOperation,
-                                status: 'wallet_launched'
-                            }));
-                            
-                            // Open wallet without navigating away
-                            window.open(deepLink, '_blank');
-                            statusMsg.textContent = 'Waiting for wallet approval...';
-                            activeDepositOperation.status = 'awaiting_approval';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        }
+                        statusMsg.textContent = 'Ready to approve transaction in wallet...';
+                        setButtonLoading(depositBtn, 'approving', 'Open wallet to approve...');
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                     }
                     
                     if (isERC20 && contractAddress) {
                         statusMsg.textContent = 'Verifying token balance...';
-                        activeDepositOperation.status = 'verifying_balance';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        
                         try {
                             const provider = new ethers.BrowserProvider(providerToUse);
                             const signer = await provider.getSigner(accounts[0]);
@@ -11228,72 +11116,58 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 'function transferFrom(address from, address to, uint256 amount) returns (bool)'
                             ];
                             const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
-                            
                             try {
-                                console.log(`[${operationId}] === Validating ERC-20 Contract ===`);
+                                console.log("=== Validating ERC-20 Contract ===");
                                 const name = await tokenContract.name();
                                 const symbol = await tokenContract.symbol();
                                 const decimals = await tokenContract.decimals();
-                                console.log(`[${operationId}] ✅ Contract Name:`, name);
-                                console.log(`[${operationId}] ✅ Contract Symbol:`, symbol);
-                                console.log(`[${operationId}] ✅ Contract Decimals:`, decimals);
+                                console.log("✅ Contract Name:", name);
+                                console.log("✅ Contract Symbol:", symbol);
+                                console.log("✅ Contract Decimals:", decimals);
                             } catch (contractError) {
-                                console.error(`[${operationId}] ❌ Contract validation failed:`, contractError);
+                                console.error("❌ Contract validation failed:", contractError);
                                 throw new Error(`Token contract validation failed: ${contractError.message}`);
                             }
-                            
                             try {
                                 const balance = await tokenContract.balanceOf(accounts[0]);
                                 const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
-                                console.log(`[${operationId}] 💰 Wallet Balance: ${formattedBalance} ${tokenSymbol}`);
-                                console.log(`[${operationId}] 💰 Amount to Send: ${cryptoAmount} ${tokenSymbol}`);
+                                console.log(`💰 Wallet Balance: ${formattedBalance} ${tokenSymbol}`);
+                                console.log(`💰 Amount to Send: ${cryptoAmount} ${tokenSymbol}`);
                                 if (Number(formattedBalance) < cryptoAmount) {
                                     throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmount}`);
                                 }
                             } catch (balanceError) {
-                                console.error(`[${operationId}] ❌ Balance check failed:`, balanceError);
+                                console.error("❌ Balance check failed:", balanceError);
                                 throw new Error(`Balance check failed: ${balanceError.message}`);
                             }
-                            
                             const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
-                            console.log(`[${operationId}] 🔢 Amount Raw: ${amountRaw.toString()}`);
-                            
+                            console.log(`🔢 Amount Raw: ${amountRaw.toString()}`);
                             try {
                                 statusMsg.textContent = 'Estimating gas...';
-                                activeDepositOperation.status = 'estimating_gas';
-                                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                                 const gasEstimate = await tokenContract.transfer.estimateGas(depositAddress, amountRaw);
-                                console.log(`[${operationId}] ⛽ Gas Estimate: ${gasEstimate.toString()}`);
+                                console.log(`⛽ Gas Estimate: ${gasEstimate.toString()}`);
                             } catch (gasError) {
-                                console.error(`[${operationId}] ❌ Gas estimation failed:`, gasError);
+                                console.error("❌ Gas estimation failed:", gasError);
                                 throw new Error(`Gas estimation failed: ${gasError.message}`);
                             }
-                            
                             try {
                                 statusMsg.textContent = 'Simulating transaction...';
-                                activeDepositOperation.status = 'simulating';
-                                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                                 const simulation = await tokenContract.transfer.staticCall(depositAddress, amountRaw);
-                                console.log(`[${operationId}] ✅ Simulation result: ${simulation}`);
+                                console.log(`✅ Simulation result: ${simulation}`);
                                 if (!simulation) {
                                     throw new Error('Transaction simulation returned false. The transfer would fail on-chain.');
                                 }
                             } catch (simError) {
-                                console.error(`[${operationId}] ❌ Simulation failed:`, simError);
+                                console.error("❌ Simulation failed:", simError);
                                 throw new Error(`Transaction simulation failed: ${simError.message}`);
                             }
-                            
                             statusMsg.textContent = 'Building transaction...';
-                            activeDepositOperation.status = 'building_transaction';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                             const tx = await tokenContract.transfer.populateTransaction(depositAddress, amountRaw);
-                            
-                            console.log(`[${operationId}] === Transaction to Sign ===`);
-                            console.log(`[${operationId}] To:`, tx.to);
-                            console.log(`[${operationId}] Data:`, tx.data);
-                            console.log(`[${operationId}] Value:`, tx.value?.toString() || "0");
-                            console.log(`[${operationId}] =============================`);
-                            
+                            console.log("=== Transaction to Sign ===");
+                            console.log("To:", tx.to);
+                            console.log("Data:", tx.data);
+                            console.log("Value:", tx.value?.toString() || "0");
+                            console.log("=============================");
                             if (tx.to.toLowerCase() !== contractAddress.toLowerCase()) {
                                 throw new Error(`Transaction 'to' is wrong: ${tx.to} (expected: ${contractAddress})`);
                             }
@@ -11303,28 +11177,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             if (tx.value && tx.value > 0) {
                                 throw new Error(`Transaction value should be 0 for ERC-20 transfers, got: ${tx.value}`);
                             }
-                            
                             statusMsg.textContent = 'Approving transaction in wallet...';
-                            activeDepositOperation.status = 'awaiting_approval';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                            setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
-                            
+                            setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                             const txResponse = await tokenContract.transfer(depositAddress, amountRaw);
-                            console.log(`[${operationId}] 📤 Transaction sent: ${txResponse.hash}`);
-                            
+                            console.log(`📤 Transaction sent: ${txResponse.hash}`);
                             statusMsg.textContent = 'Transaction submitted!';
-                            activeDepositOperation.status = 'submitted';
-                            activeDepositOperation.txHash = txResponse.hash;
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                             setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                            
-                            showNotification('success', 'Deposit Submitted', 
-                                `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${networkInfo.network}.`);
-                            
+                            showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} on ${networkInfo.network}.`);
                             statusMsg.textContent = 'Confirming with backend...';
-                            activeDepositOperation.status = 'confirming';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                            
                             const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                                 method: 'POST',
                                 headers: {
@@ -11340,38 +11200,28 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     network: networkInfo.network,
                                     chainId: chainId,
                                     contractAddress: contractAddress,
-                                    tokenDecimals: tokenDecimals
+                                    tokenDecimals: tokenDecimals,
+                                    operationId: operationId
                                 })
                             });
-                            
                             if (confirmResponse.ok) {
                                 statusMsg.style.color = 'var(--success)';
                                 statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
-                                activeDepositOperation.status = 'confirmed';
-                                localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                                showNotification('success', 'Deposit Confirmed', 
-                                    `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} is being processed.`);
+                                showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} is being processed.`);
                                 await loadBalancesFromRest();
                                 await loadAssetBalancesFromRest();
                                 await loadTransactions();
-                                // Clear operation after success
-                                activeDepositOperation = null;
-                                localStorage.removeItem('activeDepositOperation');
                             } else {
                                 const err = await confirmResponse.json();
                                 throw new Error(err.message || 'Failed to confirm deposit.');
                             }
-                            
                             hideDepositAddress();
                         } catch (erc20Error) {
-                            console.error(`[${operationId}] ❌ ERC-20 transaction error:`, erc20Error);
+                            console.error("❌ ERC-20 transaction error:", erc20Error);
                             throw erc20Error;
                         }
                     } else if (!isERC20) {
                         statusMsg.textContent = 'Preparing native transfer...';
-                        activeDepositOperation.status = 'preparing_transfer';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        
                         const decimals = 18;
                         const amountRaw = ethers.parseUnits(cryptoAmount.toString(), decimals);
                         const txData = {
@@ -11379,86 +11229,39 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             value: '0x' + amountRaw.toString(16),
                             from: accounts[0]
                         };
-                        
-                        console.log(`[${operationId}] === Native Transfer ===`);
-                        console.log(`[${operationId}] To:`, txData.to);
-                        console.log(`[${operationId}] Value:`, txData.value);
-                        console.log(`[${operationId}] From:`, txData.from);
-                        console.log(`[${operationId}] Data field present:`, txData.hasOwnProperty('data') ? 'YES (ERROR)' : 'NO (CORRECT)');
-                        
+                        console.log("=== Native Transfer ===");
+                        console.log("To:", txData.to);
+                        console.log("Value:", txData.value);
+                        console.log("From:", txData.from);
+                        console.log("Data field present:", txData.hasOwnProperty('data') ? 'YES (ERROR)' : 'NO (CORRECT)');
                         if (txData.data) {
-                            console.warn(`[${operationId}] ⚠️ Data field detected in native transfer - removing it`);
+                            console.warn("⚠️ Data field detected in native transfer - removing it");
                             delete txData.data;
                         }
-                        
                         if (!txData.value || txData.value === '0x0') {
                             throw new Error('Invalid amount for native transfer');
                         }
-                        
                         if (isMobileDevice()) {
                             statusMsg.textContent = 'Opening wallet for approval...';
-                            activeDepositOperation.status = 'opening_wallet';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                             setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
-                            
-                            // Ensure we have a fresh URI for the transaction
-                            let wcUri = activeWcUri;
-                            if (!wcUri && universalWalletProvider) {
-                                try {
-                                    const uriPromise = new Promise((resolve) => {
-                                        const handler = (uri) => {
-                                            wcUri = uri;
-                                            activeWcUri = uri;
-                                            resolve(uri);
-                                        };
-                                        universalWalletProvider.once("display_uri", handler);
-                                        setTimeout(() => {
-                                            if (universalWalletProvider._uri) {
-                                                wcUri = universalWalletProvider._uri;
-                                                activeWcUri = wcUri;
-                                                resolve(wcUri);
-                                            }
-                                        }, 500);
-                                    });
-                                    wcUri = await uriPromise;
-                                } catch (e) {
-                                    console.warn(`[${operationId}] Could not get URI:`, e);
-                                }
-                            }
-                            
-                            if (wcUri) {
-                                const deepLink = openDeepLink(walletTypeToUse, wcUri);
-                                console.log(`[${operationId}] Opening wallet with deep link:`, deepLink);
-                                window.open(deepLink, '_blank');
+                            try {
+                                await providerToUse.request({ method: 'eth_chainId' });
+                            } catch (e) {
+                                console.log('Provider ping failed, will retry request directly');
                             }
                         }
-                        
                         statusMsg.textContent = 'Approving transaction in wallet...';
-                        activeDepositOperation.status = 'awaiting_approval';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        setButtonLoading(depositBtn, 'approving', 'Approve in wallet...');
-                        
+                        setButtonLoading(depositBtn, 'approving', 'Approving in wallet...');
                         const txHash = await providerToUse.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
                         });
-                        
-                        console.log(`[${operationId}] 📤 Native transaction sent: ${txHash}`);
-                        console.log(`[${operationId}] ✅ Native transfer sent without calldata (pure ETH transfer)`);
-                        
+                        console.log(`📤 Native transaction sent: ${txHash}`);
+                        console.log("✅ Native transfer sent without calldata (pure ETH transfer)");
                         statusMsg.textContent = 'Transaction submitted!';
-                        activeDepositOperation.status = 'submitted';
-                        activeDepositOperation.txHash = txHash;
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                        
-                        showNotification('success', 'Deposit Submitted', 
-                            `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
-                        
+                        showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} on ${networkInfo.network}.`);
                         statusMsg.textContent = 'Confirming with backend...';
-                        activeDepositOperation.status = 'confirming';
-                        localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                        
                         const confirmResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/confirm', {
                             method: 'POST',
                             headers: {
@@ -11471,45 +11274,33 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 amount: cryptoAmount,
                                 walletAddress: walletToUse,
                                 depositAddress: depositAddress,
-                                network: networkInfo.network
+                                network: networkInfo.network,
+                                operationId: operationId
                             })
                         });
-                        
                         if (confirmResponse.ok) {
                             statusMsg.style.color = 'var(--success)';
                             statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
-                            activeDepositOperation.status = 'confirmed';
-                            localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
-                            showNotification('success', 'Deposit Confirmed', 
-                                `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
+                            showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
                             await loadBalancesFromRest();
                             await loadAssetBalancesFromRest();
                             await loadTransactions();
-                            // Clear operation after success
-                            activeDepositOperation = null;
-                            localStorage.removeItem('activeDepositOperation');
                         } else {
                             const err = await confirmResponse.json();
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
-                        
                         hideDepositAddress();
                     } else {
                         throw new Error(`Unknown asset type for ${asset}`);
                     }
                 } else {
-                    // Non-EVM - manual transfer
                     statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
-                    activeDepositOperation.status = 'address_generated';
-                    localStorage.setItem('activeDepositOperation', JSON.stringify(activeDepositOperation));
                     showDepositAddress(depositAddress, asset);
                     if (document.getElementById('deposit-modal').classList.contains('active')) {
                         showDepositModalAddress(depositAddress, asset);
                     }
-                    
                     showNotification('info', 'Manual Transfer Required',
                         `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the generated address.`);
-                    
                     const monitorResponse = await fetch('https://bithash-backend-ycuf.onrender.com/api/deposit/monitor', {
                         method: 'POST',
                         headers: {
@@ -11521,24 +11312,25 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             amount: cryptoAmount,
                             depositAddress: depositAddress,
                             walletAddress: walletToUse,
-                            network: networkInfo.network
+                            network: networkInfo.network,
+                            operationId: operationId
                         })
                     });
-                    
                     if (monitorResponse.ok) {
                         statusMsg.textContent = `Monitoring ${networkInfo.network} network for your deposit...`;
                     }
-                    
                     setButtonLoading(depositBtn, 'submitted', 'Address Generated');
                     setTimeout(() => {
                         setButtonLoading(depositBtn, 'idle', 'Deposit');
-                        // Clear operation after showing address
-                        activeDepositOperation = null;
-                        localStorage.removeItem('activeDepositOperation');
                     }, 3000);
                 }
+                
+                // ===== FIXED: Clear active operation on success =====
+                activeDepositOperation = null;
+                activeDepositOperationId = null;
+                
             } catch (error) {
-                console.error(`[${operationId}] Deposit error:`, error);
+                console.error('Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
                 if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
@@ -11567,9 +11359,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 statusMsg.textContent = errorMessage;
                 showNotification('error', 'Deposit Failed', errorMessage);
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
-                // Clear operation on error
+                
+                // ===== FIXED: Clear active operation on error =====
                 activeDepositOperation = null;
-                localStorage.removeItem('activeDepositOperation');
+                activeDepositOperationId = null;
             }
         }
 
@@ -12741,31 +12534,37 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }
                 if (response.ok) {
                     const data = await response.json();
-                    allTargetCryptos = data.assets || topAssets.slice(0, 20).map(a => ({ symbol: a.symbol, name: a.name,
-                        logo: a.logo }));
-                    // Ensure each target has currentPrice from canonical store
-                    allTargetCryptos = allTargetCryptos.map(crypto => {
-                        const priceData = AppState.currentPrices[crypto.symbol];
+                    // Ensure currentPrice is attached from canonical store if missing
+                    const assetsWithPrices = (data.assets || topAssets.slice(0, 20).map(a => ({ symbol: a.symbol, name: a.name, logo: a.logo }))).map(c => {
+                        const priceData = AppState.currentPrices[c.symbol];
                         return {
-                            ...crypto,
-                            currentPrice: priceData && priceData.usd > 0 ? priceData.usd : crypto.currentPrice || 0
+                            ...c,
+                            currentPrice: priceData && priceData.usd > 0 ? priceData.usd : c.currentPrice || 0
                         };
                     });
+                    allTargetCryptos = assetsWithPrices;
                 } else {
-                    allTargetCryptos = topAssets.slice(0, 20).map(a => ({ 
-                        symbol: a.symbol, 
-                        name: a.name, 
-                        logo: a.logo,
-                        currentPrice: (AppState.currentPrices[a.symbol] && AppState.currentPrices[a.symbol].usd) || 0
-                    }));
+                    // Fallback with prices from canonical store
+                    allTargetCryptos = topAssets.slice(0, 20).map(a => {
+                        const priceData = AppState.currentPrices[a.symbol];
+                        return {
+                            symbol: a.symbol,
+                            name: a.name,
+                            logo: a.logo,
+                            currentPrice: priceData && priceData.usd > 0 ? priceData.usd : 0
+                        };
+                    });
                 }
             } catch (error) {
-                allTargetCryptos = topAssets.slice(0, 20).map(a => ({ 
-                    symbol: a.symbol, 
-                    name: a.name, 
-                    logo: a.logo,
-                    currentPrice: (AppState.currentPrices[a.symbol] && AppState.currentPrices[a.symbol].usd) || 0
-                }));
+                allTargetCryptos = topAssets.slice(0, 20).map(a => {
+                    const priceData = AppState.currentPrices[a.symbol];
+                    return {
+                        symbol: a.symbol,
+                        name: a.name,
+                        logo: a.logo,
+                        currentPrice: priceData && priceData.usd > 0 ? priceData.usd : 0
+                    };
+                });
             }
         }
 
@@ -12787,7 +12586,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         <div class="asset-selector-item-info">
                             <div class="asset-selector-item-name">${crypto.name}</div>
                             <div class="asset-selector-item-symbol">${crypto.symbol.toUpperCase()}</div>
-                            ${crypto.currentPrice > 0 ? `<div style="font-size: 0.7rem; color: var(--gray);">${formatFiat(crypto.currentPrice)}</div>` : ''}
+                            ${crypto.currentPrice > 0 ? `<div style="font-size: 0.65rem; color: var(--text-muted);">${formatFiat(crypto.currentPrice)}</div>` : ''}
                         </div>
                     `;
                 toListContainer.appendChild(item);
@@ -12810,7 +12609,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             <div class="asset-selector-item-info">
                                 <div class="asset-selector-item-name">${crypto.name}</div>
                                 <div class="asset-selector-item-symbol">${crypto.symbol.toUpperCase()}</div>
-                                ${crypto.currentPrice > 0 ? `<div style="font-size: 0.7rem; color: var(--gray);">${formatFiat(crypto.currentPrice)}</div>` : ''}
+                                ${crypto.currentPrice > 0 ? `<div style="font-size: 0.65rem; color: var(--text-muted);">${formatFiat(crypto.currentPrice)}</div>` : ''}
                             </div>
                         `;
                     toListContainer.appendChild(item);
@@ -12829,54 +12628,52 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             document.getElementById('convert-step3-to-symbol').textContent = selectedToAssetObj.symbol.toUpperCase();
             const amountInput = document.getElementById('convert-amount-step3');
             amountInput.value = '';
+            // Show loading state instead of 0.000000
             document.getElementById('convert-step3-estimate').textContent = '—';
-            amountInput.oninput = () => estimateConversionStep3(amountInput.value);
+            amountInput.oninput = () => {
+                const amount = amountInput.value;
+                if (amount && parseFloat(amount) > 0) {
+                    estimateConversionStep3(amount);
+                } else {
+                    document.getElementById('convert-step3-estimate').textContent = '—';
+                }
+            };
         }
 
-        // ===== FIXED: estimateConversionStep3 uses canonical price store =====
+        // ===== FIXED: estimateConversionStep3 with proper price fetching =====
         function estimateConversionStep3(amount) {
             if (!selectedFromAssetObj || !selectedToAssetObj) return;
             
-            // Get prices from canonical store
-            const fromPriceData = AppState.currentPrices[selectedFromAssetObj.symbol];
-            const toPriceData = AppState.currentPrices[selectedToAssetObj.symbol];
-            
-            let fromPrice = fromPriceData && fromPriceData.usd > 0 ? fromPriceData.usd : selectedFromAssetObj.currentPrice || 0;
-            let toPrice = toPriceData && toPriceData.usd > 0 ? toPriceData.usd : selectedToAssetObj.currentPrice || 0;
-            
-            // Fallback to fetching if prices are zero
-            if (fromPrice === 0) {
-                const fromAsset = topAssets.find(a => a.symbol === selectedFromAssetObj.symbol);
-                if (fromAsset) {
-                    fetchPriceForAsset(fromAsset, assetSelectionVersion).then(price => {
-                        if (price && price > 0) {
-                            updateCanonicalPrice(selectedFromAssetObj.symbol, price);
-                            estimateConversionStep3(document.getElementById('convert-amount-step3').value);
-                        }
-                    });
+            // Get from price from canonical store or from the asset object
+            let fromPrice = selectedFromAssetObj.currentPrice || 0;
+            if (!fromPrice || fromPrice <= 0) {
+                const priceData = AppState.currentPrices[selectedFromAssetObj.symbol];
+                if (priceData && priceData.usd > 0) {
+                    fromPrice = priceData.usd;
                 }
             }
             
-            if (toPrice === 0) {
-                const toAsset = topAssets.find(a => a.symbol === selectedToAssetObj.symbol);
-                if (toAsset) {
-                    fetchPriceForAsset(toAsset, assetSelectionVersion).then(price => {
-                        if (price && price > 0) {
-                            updateCanonicalPrice(selectedToAssetObj.symbol, price);
-                            estimateConversionStep3(document.getElementById('convert-amount-step3').value);
-                        }
-                    });
+            // Get to price from canonical store or from the target asset
+            let toPrice = selectedToAssetObj.currentPrice || 0;
+            if (!toPrice || toPrice <= 0) {
+                const priceData = AppState.currentPrices[selectedToAssetObj.symbol];
+                if (priceData && priceData.usd > 0) {
+                    toPrice = priceData.usd;
                 }
             }
             
-            if (fromPrice > 0 && toPrice > 0 && amount && parseFloat(amount) > 0) {
-                const estimated = (parseFloat(amount) * fromPrice) / toPrice;
+            const amountNum = parseFloat(amount);
+            if (fromPrice && toPrice && amountNum > 0 && fromPrice > 0 && toPrice > 0) {
+                const estimated = (amountNum * fromPrice) / toPrice;
                 const estimatedAfterFee = estimated * (1 - 0.005);
                 document.getElementById('convert-step3-estimate').textContent = formatNumberWithCommas(estimatedAfterFee, 8);
-            } else if (parseFloat(amount) > 0 && (fromPrice === 0 || toPrice === 0)) {
-                document.getElementById('convert-step3-estimate').textContent = 'Fetching rate...';
             } else {
-                document.getElementById('convert-step3-estimate').textContent = '—';
+                // Show loading/placeholder instead of 0.000000
+                if (amountNum > 0) {
+                    document.getElementById('convert-step3-estimate').textContent = '—';
+                } else {
+                    document.getElementById('convert-step3-estimate').textContent = '—';
+                }
             }
         }
 
@@ -13710,8 +13507,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         function detectInstalledWallets() {
             let installed = false;
-            if (EIP6963_PROVIDERS.size > 0) installed = true;
-            // Check for Solana on desktop
+            if (discoveredProviders.length > 0) installed = true;
+            // REMOVED: window.ethereum detection - EIP-6963 only
             if (window.solana) installed = true;
             if (window.WalletConnectProvider) installed = true;
             isWalletInstalled = installed;
@@ -14238,8 +14035,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     if (data.data && data.data.asset) AppState.defaultAsset = data.data.asset;
                 }
             } catch (error) { console.warn('Could not fetch deposit asset, using default BTC'); }
-            // ===== FIXED: Do not overwrite user's saved displayAsset with default =====
-            // Only set displayAsset if it hasn't been loaded from preferences yet
             if (!userPreferences.displayAsset || userPreferences.displayAsset === 'btc') {
                 userPreferences.displayAsset = AppState.defaultAsset;
             }
@@ -14779,143 +14574,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // RECOVER ACTIVE OPERATIONS ON PAGE LOAD
-        // =============================================
-        function recoverActiveOperations() {
-            // Check for active deposit operation
-            const storedOp = localStorage.getItem('activeDepositOperation');
-            if (storedOp) {
-                try {
-                    const operation = JSON.parse(storedOp);
-                    const age = Date.now() - operation.createdAt;
-                    // If operation is older than 10 minutes, clear it
-                    if (age > 10 * 60 * 1000) {
-                        localStorage.removeItem('activeDepositOperation');
-                        return;
-                    }
-                    
-                    activeDepositOperation = operation;
-                    console.log(`Recovered active deposit operation: ${operation.id} (${operation.status})`);
-                    
-                    // Show status message
-                    const statusMsg = document.getElementById('deposit-status-msg');
-                    if (statusMsg) {
-                        const statusMessages = {
-                            'created': 'Preparing deposit...',
-                            'preparing': 'Preparing deposit...',
-                            'getting_address': 'Getting deposit address...',
-                            'switching_network': 'Switching network...',
-                            'adding_network': 'Adding network...',
-                            'verifying_balance': 'Verifying token balance...',
-                            'estimating_gas': 'Estimating gas...',
-                            'simulating': 'Simulating transaction...',
-                            'building_transaction': 'Building transaction...',
-                            'awaiting_approval': 'Waiting for wallet approval...',
-                            'opening_wallet': 'Opening wallet...',
-                            'submitted': 'Transaction submitted!',
-                            'confirming': 'Confirming with backend...',
-                            'confirmed': 'Deposit confirmed!'
-                        };
-                        statusMsg.textContent = statusMessages[operation.status] || 'Deposit in progress...';
-                        if (operation.status === 'confirmed') {
-                            statusMsg.style.color = 'var(--success)';
-                        } else if (operation.status === 'submitted') {
-                            statusMsg.style.color = 'var(--accent)';
-                        }
-                    }
-                    
-                    // If we have a transaction hash, show it
-                    if (operation.txHash) {
-                        const addressText = document.getElementById('deposit-address-text');
-                        if (addressText) {
-                            addressText.textContent = `Tx: ${operation.txHash.substring(0, 16)}...`;
-                            document.getElementById('deposit-address-container').classList.add('visible');
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Failed to recover operation:', e);
-                    localStorage.removeItem('activeDepositOperation');
-                }
-            }
-            
-            // Check for active Web3 operation
-            const storedWcOp = localStorage.getItem('activeWeb3Operation');
-            if (storedWcOp) {
-                try {
-                    const operation = JSON.parse(storedWcOp);
-                    const age = Date.now() - operation.timestamp;
-                    // If operation is older than 5 minutes, clear it
-                    if (age > 5 * 60 * 1000) {
-                        localStorage.removeItem('activeWeb3Operation');
-                        return;
-                    }
-                    
-                    console.log(`Recovered active Web3 operation: ${operation.id} (${operation.status})`);
-                    
-                    // If we were waiting for wallet approval, show status
-                    if (operation.status === 'wallet_launched') {
-                        const statusMsg = document.getElementById('deposit-status-msg');
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Waiting for wallet approval...';
-                        }
-                        showNotification('info', 'Wallet Operation Pending', 
-                            'Please complete the approval in your wallet.');
-                    }
-                } catch (e) {
-                    console.warn('Failed to recover Web3 operation:', e);
-                    localStorage.removeItem('activeWeb3Operation');
-                }
-            }
-        }
-
-        // =============================================
-        // PAGE VISIBILITY HANDLER - Mobile wallet return
-        // =============================================
-        function setupVisibilityHandler() {
-            document.addEventListener('visibilitychange', async function() {
-                if (document.visibilityState === 'visible') {
-                    // Page became visible again - likely returning from wallet
-                    console.log('Page became visible - checking for pending operations');
-                    
-                    // Check for pending deposit operation
-                    const storedOp = localStorage.getItem('activeDepositOperation');
-                    if (storedOp) {
-                        try {
-                            const operation = JSON.parse(storedOp);
-                            if (operation.status === 'awaiting_approval' || operation.status === 'wallet_launched') {
-                                // Try to reconnect and check status
-                                console.log(`Resuming operation: ${operation.id}`);
-                                
-                                // If we have a WalletConnect session, check accounts
-                                if (universalWalletProvider && walletConnectInitialized) {
-                                    try {
-                                        const accounts = await universalWalletProvider.request({ method: 'eth_accounts' });
-                                        if (accounts && accounts.length > 0) {
-                                            console.log('WalletConnect session still active, accounts:', accounts);
-                                            // If we have a pending deposit with tx hash, we might need to check status
-                                            if (operation.txHash) {
-                                                // Show status message
-                                                const statusMsg = document.getElementById('deposit-status-msg');
-                                                if (statusMsg) {
-                                                    statusMsg.textContent = 'Transaction submitted! Waiting for confirmation...';
-                                                    statusMsg.style.color = 'var(--accent)';
-                                                }
-                                            }
-                                        }
-                                    } catch (e) {
-                                        console.log('Could not check WalletConnect accounts:', e);
-                                    }
-                                }
-                            }
-                        } catch (e) {
-                            console.warn('Failed to resume operation:', e);
-                        }
-                    }
-                }
-            });
-        }
-
-        // =============================================
         // INITIALIZATION
         // =============================================
         window.addEventListener('load', function() {
@@ -14929,7 +14587,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 initMobileMenu();
                 initHeaderScrollEffect();
                 setupSidebarNavigation();
-                setupVisibilityHandler();
                 initializeEIP6963();
                 detectInstalledWallets();
                 await loadBalancesFromRest();
@@ -14965,14 +14622,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     AppState.selectedAsset = topAssets[0];
                     updateAssetPickerUI(currentAsset);
                     updateAssetPickerUIModal(currentAsset);
+                    // ===== FIXED: Initialize modal network =====
+                    updateDepositModalNetwork();
                 }
                 
                 // ===== FIXED: Fetch all 20 crypto rates on initialization =====
                 await fetchAllPrices();
                 updatePickerPriceDisplay();
-                
-                // Recover any active operations
-                recoverActiveOperations();
                 
                 document.getElementById('transactions-prev').addEventListener('click', () => {
                     if (transactionsPage > 1) { transactionsPage--;
