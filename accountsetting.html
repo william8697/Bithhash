@@ -6208,9 +6208,8 @@
     const I18N = (function() {
       let currentLanguage = 'en';
       let translations = {};
-      let translationCache = {};
 
-      // Default translations (fallback only)
+      // Default translations
       const DEFAULT_TRANSLATIONS = {
         en: {
           "loading.establishing": "Establishing Secure Connection",
@@ -6426,56 +6425,21 @@
         }
       };
 
-      /**
-       * Load translations from backend API
-       */
-      async function loadTranslations(lang) {
-        if (translationCache[lang]) {
-          translations = translationCache[lang];
-          currentLanguage = lang;
-          return translations;
-        }
-
-        try {
-          const response = await fetch(`/api/settings/translations/${lang}`, {
-            headers: {
-              'Accept': 'application/json'
-            }
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const data = await response.json();
-          
-          if (data.success && data.translations) {
-            translationCache[lang] = data.translations;
-            translations = data.translations;
-            currentLanguage = lang;
-            return translations;
-          } else {
-            throw new Error('Invalid translation response');
-          }
-        } catch (err) {
-          console.warn(`Failed to load translations for ${lang}:`, err);
-          // Fallback to English if available
-          if (lang !== 'en') {
-            return loadTranslations('en');
-          }
-          // Last resort: use default translations
-          translations = DEFAULT_TRANSLATIONS.en || {};
-          currentLanguage = 'en';
-          return translations;
-        }
+      function loadTranslations(lang) {
+        // Start with default translations for the requested language
+        // In a production environment, this would fetch from a server
+        // For now, we use the built-in translations
+        const defaultForLang = DEFAULT_TRANSLATIONS[lang] || DEFAULT_TRANSLATIONS.en;
+        translations = { ...defaultForLang };
+        currentLanguage = lang;
+        return translations;
       }
 
       function getTranslations(lang) {
         if (translations && currentLanguage === lang) {
           return translations;
         }
-        // Return empty object - caller should use loadTranslations
-        return {};
+        return loadTranslations(lang);
       }
 
       function t(key) {
@@ -6493,11 +6457,11 @@
         return key;
       }
 
-      async function setLanguage(lang) {
+      function setLanguage(lang) {
         if (!lang) return;
         const normalizedLang = lang.split('-')[0];
         if (normalizedLang && normalizedLang !== currentLanguage) {
-          await loadTranslations(normalizedLang);
+          loadTranslations(normalizedLang);
           applyTranslations();
           // Dispatch language change event
           window.dispatchEvent(new CustomEvent('languagechange', {
@@ -6586,10 +6550,10 @@
         });
       }
 
-      async function init(defaultLang) {
+      function init(defaultLang) {
         const savedLang = localStorage.getItem('bithash_language') || defaultLang || 'en';
         const normalizedLang = savedLang.split('-')[0];
-        await loadTranslations(normalizedLang);
+        loadTranslations(normalizedLang);
         applyTranslations();
         document.documentElement.lang = normalizedLang;
         return normalizedLang;
@@ -6624,9 +6588,8 @@
       }
 
       function formatTimeAgo(dateString) {
-        if (!dateString) return 'Not available';
+        if (!dateString) return 'Unknown';
         const date = new Date(dateString);
-        if (isNaN(date.getTime())) return 'Not available';
         const now = new Date();
         const seconds = Math.floor((now - date) / 1000);
 
@@ -6643,7 +6606,6 @@
       function formatDate(dateString) {
         if (!dateString) return '';
         const date = new Date(dateString);
-        if (isNaN(date.getTime())) return '';
         try {
           return date.toLocaleDateString('en-US', {
             year: 'numeric',
@@ -6659,7 +6621,6 @@
       function formatDateTime(dateString) {
         if (!dateString) return '';
         const date = new Date(dateString);
-        if (isNaN(date.getTime())) return '';
         try {
           return date.toLocaleString('en-US', {
             year: 'numeric',
@@ -6683,7 +6644,6 @@
       function formatDateTimeFull(dateString) {
         if (!dateString) return '';
         const date = new Date(dateString);
-        if (isNaN(date.getTime())) return '';
         try {
           return date.toLocaleString('en-US', {
             year: 'numeric',
@@ -6710,7 +6670,6 @@
       function formatDateShort(dateString) {
         if (!dateString) return '';
         const date = new Date(dateString);
-        if (isNaN(date.getTime())) return '';
         try {
           return date.toLocaleDateString('en-US', {
             month: 'short',
@@ -6836,7 +6795,7 @@
     }
 
     function normalizeApiError(error, context) {
-      const defaultMessage = 'Unable to complete this action. Please try again.';
+      const defaultMessage = 'We couldn\'t complete this action right now. Please try again.';
 
       const errorMap = {
         'API_KEY_NAME_EXISTS': 'An API key with this name already exists. Please choose another name.',
@@ -6850,9 +6809,7 @@
         'PASSWORDLESS_ACCOUNT': 'This account does not use a password. Continue with the available verification method.',
         'INVALID_PASSWORD': 'The password you entered is incorrect. Please try again.',
         'INVALID_CODE': 'The code you entered is invalid. Please try again.',
-        'ALREADY_ENABLED': 'Authenticator is already enabled for your account.',
-        'TWO_FACTOR_ALREADY_ENABLED': 'Two-factor authentication is already enabled for this account.',
-        'TWO_FACTOR_NOT_ENABLED': 'Two-factor authentication is not enabled for this account.'
+        'ALREADY_ENABLED': 'Authenticator is already enabled for your account.'
       };
 
       let errorCode = null;
@@ -7519,29 +7476,13 @@
     // =============================================
     async function loadSecurityOverview() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/security`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid security response');
-        }
-
-        const data = result.data || result;
+        const data = await apiCall(`${API_BASE_URL}/api/users/security`);
 
         const levelBadge = document.getElementById('security-level-badge');
         const statusText = document.getElementById('security-overview-status');
         const itemsGrid = document.getElementById('security-items');
 
-        const level = data.securityLevel || 'medium';
+        const level = data.securityLevel || 'unknown';
         levelBadge.textContent = level.charAt(0).toUpperCase() + level.slice(1);
         levelBadge.className = `security-level-badge ${level}`;
 
@@ -7560,18 +7501,10 @@
           const div = document.createElement('div');
           div.className = 'security-item';
 
-          const isActive = item.key === 'authenticator' 
-            ? (itemData.enabled === true) 
-            : (itemData.enabled || itemData.configured || itemData.activeCount > 0);
-          
-          let valueText = '';
-          if (item.key === 'devices') {
-            valueText = (itemData.activeCount || 0) + ' device' + ((itemData.activeCount || 0) !== 1 ? 's' : '');
-          } else if (item.key === 'authenticator') {
-            valueText = itemData.enabled === true ? 'Protected' : 'Not configured';
-          } else {
-            valueText = isActive ? 'Protected' : 'Not configured';
-          }
+          const isActive = itemData.enabled || itemData.configured || itemData.activeCount > 0;
+          const valueText = item.key === 'devices' ?
+            (itemData.activeCount || 0) :
+            (isActive ? 'Protected' : 'Not configured');
 
           div.innerHTML = `
                         <div class="security-item-icon">
@@ -7588,6 +7521,7 @@
 
       } catch (error) {
         console.error('Error loading security overview:', error);
+        const userMessage = normalizeApiError(error, 'security_load');
         document.getElementById('security-overview-status').textContent = 'Unable to load security status. Please try again.';
       }
     }
@@ -7657,8 +7591,7 @@
       error: null,
       enabled: null,
       enabledAt: null,
-      recoveryAvailable: null,
-      recoveryCodesCount: null,
+      recoveryCodes: [],
       enrollmentId: null,
       setupStep: 1
     };
@@ -7681,33 +7614,13 @@
 
       try {
         // ✅ FIX: Use the security endpoint which has the correct data
-        const response = await fetch(`${API_BASE_URL}/api/users/security`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid security response');
-        }
-
-        const data = result.data || result;
+        const data = await apiCall(`${API_BASE_URL}/api/users/security`);
         
         // ✅ FIX: The backend returns 'authenticator.enabled' in the security endpoint
-        const isEnabled = data.authenticator?.enabled === true;
-        const recoveryAvailable = data.authenticator?.recoveryAvailable === true;
-        const recoveryCodesCount = data.authenticator?.recoveryCodesCount || 0;
+        const isEnabled = data.authenticator?.enabled || false;
         
         authenticatorState.enabled = isEnabled;
         authenticatorState.enabledAt = data.authenticator?.enabledAt || null;
-        authenticatorState.recoveryAvailable = recoveryAvailable;
-        authenticatorState.recoveryCodesCount = recoveryCodesCount;
         authenticatorState.loading = false;
         authenticatorState.error = null;
 
@@ -7784,12 +7697,10 @@
       // Recovery card
       const recoveryCard = document.createElement('div');
       recoveryCard.className = 'two-factor-grid-item';
-      const recoveryStatus = authenticatorState.recoveryAvailable === true ? 'Available' : 'Not available';
       recoveryCard.innerHTML = `
         <div class="item-label">${I18N.t('twoFactor.recoveryAccess')}</div>
         <div class="item-value">
-          ${isEnabled ? recoveryStatus : '—'}
-          ${isEnabled && authenticatorState.recoveryCodesCount > 0 ? ` (${authenticatorState.recoveryCodesCount} codes)` : ''}
+          ${isEnabled ? I18N.t('twoFactor.recoveryDescription') : '—'}
         </div>
       `;
       grid.appendChild(recoveryCard);
@@ -7896,28 +7807,12 @@
     async function startAuthenticatorSetup() {
       try {
         // ✅ FIX: Check if 2FA is already enabled before trying to set up
-        const response = await fetch(`${API_BASE_URL}/api/users/security`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
+        const securityData = await apiCall(`${API_BASE_URL}/api/users/security`);
         
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid security response');
-        }
-
-        const data = result.data || result;
-        
-        if (data.authenticator?.enabled === true) {
+        if (securityData.authenticator?.enabled === true) {
           // Update the UI to show enabled state
           authenticatorState.enabled = true;
-          authenticatorState.enabledAt = data.authenticator?.enabledAt || null;
+          authenticatorState.enabledAt = securityData.authenticator?.enabledAt || null;
           updateAuthenticatorUI();
           
           showNotification('info', 'Already Enabled', 'Two-factor authentication is already enabled for this account.');
@@ -7926,31 +7821,12 @@
         }
 
         // If not enabled, proceed with setup
-        const setupResponse = await fetch(`${API_BASE_URL}/api/users/two-factor/authenticator/setup`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          }
+        const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/setup`, {
+          method: 'POST'
         });
 
-        if (!setupResponse.ok) {
-          const errorData = await setupResponse.json();
-          if (setupResponse.status === 409 && errorData.code === 'TWO_FACTOR_ALREADY_ENABLED') {
-            // Update UI to enabled state
-            authenticatorState.enabled = true;
-            updateAuthenticatorUI();
-            showNotification('info', 'Already Enabled', 'Two-factor authentication is already enabled for this account.');
-            closeAuthenticatorSetup();
-            return;
-          }
-          throw new Error(errorData.message || `HTTP ${setupResponse.status}`);
-        }
-
-        
-
-        authEnrollmentId = data.enrollmentId || data.data?.enrollmentId;
-        authSecret = data.manualKey || data.data?.manualKey;
+        authEnrollmentId = data.enrollmentId;
+        authSecret = data.manualKey;
 
         const qrContainer = document.getElementById('qr-code-container');
         qrContainer.innerHTML = '';
@@ -7983,7 +7859,7 @@
         console.error('Error setting up authenticator:', error);
         
         // ✅ FIX: Handle the 409 Conflict specifically
-        if (error.code === 'TWO_FACTOR_ALREADY_ENABLED' || error.status === 409 || 
+        if (error.code === 'ALREADY_ENABLED' || error.status === 409 || 
             (error.message && error.message.includes('already enabled'))) {
           // Update the UI to show enabled state
           authenticatorState.enabled = true;
@@ -8063,29 +7939,16 @@
       authVerifyOTPController.setLoading('Verifying...');
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
+        const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          },
           body: JSON.stringify({
             enrollmentId: authEnrollmentId,
             code: code
           })
         });
 
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-
         authenticatorState.enabled = true;
         authenticatorState.enabledAt = new Date().toISOString();
-        authenticatorState.recoveryAvailable = true;
-        authenticatorState.recoveryCodesCount = data.recoveryCodes?.length || 0;
         authenticatorState.recoveryCodes = data.recoveryCodes || [];
 
         const container = document.getElementById('auth-recovery-codes');
@@ -8106,10 +7969,6 @@
         showNotification('success', 'Authenticator Enabled', 'Two-factor authentication has been enabled successfully.');
 
         authVerifyOTPController.setSuccess('Verification successful!');
-
-        // Refresh security status
-        await loadTwoFactorStatus();
-        await loadSecurityOverview();
 
       } catch (error) {
         console.error('Error verifying OTP:', error);
@@ -8358,20 +8217,9 @@
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/two-factor/authenticator/disable/challenge`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          }
+        const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/disable/challenge`, {
+          method: 'POST'
         });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
 
         disableModalState.otpId = data.challengeId || data.data?.challengeId;
         disableModalState.email = data.data?.email || data.email;
@@ -8474,19 +8322,10 @@
           };
         }
 
-        const response = await fetch(`${API_BASE_URL}/api/users/two-factor/authenticator/disable/verify`, {
+        await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/disable/verify`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          },
           body: JSON.stringify(body)
         });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
 
         closeDisableAuthModal();
 
@@ -8757,20 +8596,9 @@
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/two-factor/recovery-codes/challenge`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          }
+        const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/recovery-codes/challenge`, {
+          method: 'POST'
         });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
 
         recoveryModalState.challengeId = data.challengeId || data.data?.challengeId;
         recoveryModalState.email = data.data?.email || data.email;
@@ -8873,21 +8701,10 @@
           };
         }
 
-        const response = await fetch(`${API_BASE_URL}/api/users/two-factor/recovery-codes/verify`, {
+        const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/recovery-codes/verify`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          },
           body: JSON.stringify(body)
         });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
 
         recoveryModalState.recoveryCodes = data.recoveryCodes || [];
 
@@ -9155,24 +8972,10 @@
 
       try {
         // ✅ FIX: Get devices from loginHistory
-        const response = await fetch(`${API_BASE_URL}/api/users/devices`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
+        const response = await apiCall(`${API_BASE_URL}/api/users/devices`);
         
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid devices response');
-        }
-
         // The backend returns devices in the response directly
-        const devices = result.devices || result.data || [];
+        const devices = response.devices || response.data || [];
         
         console.log('📱 Devices loaded:', devices);
 
@@ -9230,8 +9033,8 @@
             `${device.location.city}, ${device.location.country}` :
             device.location?.country || device.location?.city || 'Unknown location';
 
-          const lastActive = device.lastActiveAt || device.timestamp || null;
-          const formattedLastActive = lastActive ? DateTimeUtils.formatTimeAgo(lastActive) : 'Not available';
+          const lastActive = device.lastActiveAt || device.timestamp || new Date().toISOString();
+          const formattedLastActive = DateTimeUtils.formatTimeAgo(lastActive);
 
           // Determine device name
           const deviceName = device.name || device.os || device.browser || 'Unknown Device';
@@ -9311,16 +9114,9 @@
 
     async function logoutDevice(deviceId) {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/devices/${deviceId}/logout`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
+        await apiCall(`${API_BASE_URL}/api/users/devices/${deviceId}/logout`, {
+          method: 'POST'
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
 
         showNotification('success', 'Device Logged Out', 'Device has been logged out successfully.');
         await loadDevices();
@@ -9335,16 +9131,9 @@
 
     async function logoutAllDevices() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/devices/logout-all`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
+        await apiCall(`${API_BASE_URL}/api/users/devices/logout-all`, {
+          method: 'POST'
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
 
         showNotification('success', 'All Devices Logged Out', 'All other devices have been logged out.');
         await loadDevices();
@@ -9410,25 +9199,10 @@
           type: activityState.filter
         });
 
-        const response = await fetch(`${API_BASE_URL}/api/users/activity?${params}`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
+        const data = await apiCall(`${API_BASE_URL}/api/users/activity?${params}`);
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid activity response');
-        }
-
-        const data = result.data || result;
-        const activities = data.activities || [];
-        const pagination = data.pagination || {};
+        const activities = data.data?.activities || [];
+        const pagination = data.data?.pagination || {};
 
         if (reset) {
           activityState.activities = activities;
@@ -9716,23 +9490,8 @@
 
     async function loadLanguages() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/settings/languages`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid languages response');
-        }
-
-        languages = result.languages || [];
+        const data = await apiCall(`${API_BASE_URL}/api/settings/languages`);
+        languages = data.languages || [];
         renderLanguages();
       } catch (error) {
         console.error('Error loading languages:', error);
@@ -9743,23 +9502,8 @@
 
     async function loadTimezones() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/settings/timezones`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid timezones response');
-        }
-
-        timezones = result.timezones || [];
+        const data = await apiCall(`${API_BASE_URL}/api/settings/timezones`);
+        timezones = data.timezones || [];
         renderTimezones();
       } catch (error) {
         console.error('Error loading timezones:', error);
@@ -9770,24 +9514,8 @@
 
     async function loadUserPreferences() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/settings`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
+        const data = await apiCall(`${API_BASE_URL}/api/users/settings`);
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid settings response');
-        }
-
-        const data = result.data || result;
-        
         const langCode = data.language || 'en';
         const tzId = data.timezone || DateTimeUtils.getCurrentTimezone() || 'UTC';
 
@@ -9819,7 +9547,7 @@
 
         // Apply saved language to i18n
         if (langCode && langCode !== I18N.getLanguage()) {
-          await I18N.setLanguage(langCode);
+          I18N.setLanguage(langCode);
         }
 
       } catch (error) {
@@ -9969,21 +9697,13 @@
 
       autoSaveTimeout = setTimeout(async () => {
         try {
-          const response = await fetch(`${API_BASE_URL}/api/users/settings`, {
+          await apiCall(`${API_BASE_URL}/api/users/settings`, {
             method: 'PUT',
-            headers: {
-              'Authorization': `Bearer ${getAuthToken()}`,
-              'Content-Type': 'application/json'
-            },
             body: JSON.stringify({
               language: selectedLanguage.code,
               timezone: selectedTimezone.id
             })
           });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
 
           showNotification('success', 'Preferences Saved', 'Your preferences have been updated.');
 
@@ -10012,21 +9732,13 @@
       btn.innerHTML = '<span class="spinner"></span> Saving...';
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/settings`, {
+        await apiCall(`${API_BASE_URL}/api/users/settings`, {
           method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          },
           body: JSON.stringify({
             language: selectedLanguage.code,
             timezone: selectedTimezone.id
           })
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
 
         showNotification('success', 'Preferences Saved', 'Your preferences have been updated successfully.');
 
@@ -10114,23 +9826,7 @@
       const body = document.getElementById('api-keys-body');
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/api-keys`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid API keys response');
-        }
-
-        const data = result.data || result;
+        const data = await apiCall(`${API_BASE_URL}/api/users/api-keys`);
         const keys = data.keys || [];
 
         if (keys.length === 0) {
@@ -10200,16 +9896,9 @@
 
     async function revokeAPIKey(apiKeyId) {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/api-keys/${apiKeyId}`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
+        await apiCall(`${API_BASE_URL}/api/users/api-keys/${apiKeyId}`, {
+          method: 'DELETE'
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
 
         showNotification('success', 'API Key Revoked', 'API key has been revoked successfully.');
         await loadAPIKeys();
@@ -10244,21 +9933,10 @@
           expiresIn: parseInt(document.getElementById('api-key-expiry').value)
         };
 
-        const response = await fetch(`${API_BASE_URL}/api/users/api-keys`, {
+        const data = await apiCall(`${API_BASE_URL}/api/users/api-keys`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`,
-            'Content-Type': 'application/json'
-          },
           body: JSON.stringify(keyData)
         });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
 
         showNotification('success', 'API Key Created', 'API key created successfully!');
         showNotification('info', 'Important',
@@ -10311,23 +9989,7 @@
 
     async function checkUser2FAStatus() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/users/security`, {
-          headers: {
-            'Authorization': `Bearer ${getAuthToken()}`
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const result = await response.json();
-        
-        if (!result || result.status !== 'success') {
-          throw new Error('Invalid security response');
-        }
-
-        const data = result.data || result;
+        const data = await apiCall(`${API_BASE_URL}/api/users/security`);
         kycHas2FA = data.authenticator?.enabled || false;
         return kycHas2FA;
       } catch (error) {
@@ -10434,20 +10096,10 @@
           // This requires an enrollment ID - we'll use a stored one or get it from the user's active enrollment
           // For KYC verification via authenticator, we use a special challenge flow
           try {
-            const challengeResponse = await fetch(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
+            const challengeData = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
               method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-              },
               body: JSON.stringify({ code, purpose: 'kyc_verification' })
             });
-
-            if (!challengeResponse.ok) {
-              const errorData = await challengeResponse.json();
-              throw new Error(errorData.message || `HTTP ${challengeResponse.status}`);
-            }
-
             // If successful, the authenticator verification will handle the KYC submission
             showNotification('success', 'Verification Successful', 'KYC verified via authenticator!');
             document.getElementById('two-step-modal')?.classList.remove('active');
@@ -10684,111 +10336,58 @@
       });
     }
 
-   <!-- ============================================= -->
-<!-- KYC STATUS LOAD - FIXED TO HANDLE RESPONSE CONTRACT -->
-<!-- ============================================= -->
-async function loadKYCStatus() {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/users/kyc/status`, {
-      headers: {
-        'Authorization': `Bearer ${getAuthToken()}`
-      }
-    });
+    // =============================================
+    // KYC STATUS LOAD
+    // =============================================
+    async function loadKYCStatus() {
+      try {
+        const data = await apiCall(`${API_BASE_URL}/api/users/kyc/status`);
+        const status = data.status || 'unverified';
+        const text = data.message || 'Your verification status is unknown.';
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+        const banner = document.getElementById('kyc-status-banner');
+        const statusText = document.getElementById('kyc-status-text');
 
-    const result = await response.json();
-    
-    // Critical: Validate response structure
-    if (!result || result.status !== 'success') {
-      throw new Error('Invalid KYC status response');
-    }
+        banner.className = `kyc-status-banner ${status}`;
+        statusText.textContent = text;
 
-    // ✅ FIX: Read from result.data (not directly)
-    const kycData = result.data || result;
-    const status = kycData.status || 'unverified';
-    const text = kycData.message || 'Loading your verification status...';
-    const rejectionReason = kycData.rejectionReason || null;
-    const submittedAt = kycData.submittedAt || null;
-    const reviewedAt = kycData.reviewedAt || null;
-    const verifiedAt = kycData.verifiedAt || null;
-    const canSubmit = kycData.canSubmit === true;
-    const canResubmit = kycData.canResubmit === true;
+        const badgeMap = {
+          'verified': 'verified',
+          'pending': 'pending',
+          'rejected': 'rejected',
+          'unverified': 'unverified'
+        };
 
-    const banner = document.getElementById('kyc-status-banner');
-    const statusText = document.getElementById('kyc-status-text');
+        const identityBadge = document.getElementById('identity-verification-badge');
+        identityBadge.className = `verification-badge ${badgeMap[status] || 'unverified'}`;
+        identityBadge.innerHTML = `
+                    <i class="fas ${status === 'verified' ? 'fa-check-circle' : status === 'pending' ? 'fa-clock' : status === 'rejected' ? 'fa-times-circle' : 'fa-times-circle'}"></i>
+                    <span>${status.charAt(0).toUpperCase() + status.slice(1)}</span>
+                `;
 
-    if (banner) {
-      banner.className = `kyc-status-banner ${status}`;
-    }
-    if (statusText) {
-      statusText.textContent = text;
-    }
+        const submitBtn = document.getElementById('submit-kyc-btn');
+        if (status === 'verified') {
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'Already Verified';
+        } else if (status === 'pending') {
+          submitBtn.disabled = true;
+          submitBtn.textContent = 'Pending Review';
+        } else if (status === 'rejected') {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Resubmit Application';
+          document.getElementById('resubmission-section').style.display = 'block';
+          document.getElementById('rejection-reason').textContent = data.rejectionReason || 'No reason provided.';
+        } else {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Submit KYC Application';
+          document.getElementById('resubmission-section').style.display = 'none';
+        }
 
-    // Update badge
-    const badgeMap = {
-      'verified': 'verified',
-      'pending': 'pending',
-      'rejected': 'rejected',
-      'unverified': 'unverified'
-    };
-
-    const identityBadge = document.getElementById('identity-verification-badge');
-    if (identityBadge) {
-      identityBadge.className = `verification-badge ${badgeMap[status] || 'unverified'}`;
-      
-      const badgeIcon = status === 'verified' ? 'fa-check-circle' : 
-                        status === 'pending' ? 'fa-clock' : 
-                        status === 'rejected' ? 'fa-times-circle' : 'fa-times-circle';
-      const badgeText = status.charAt(0).toUpperCase() + status.slice(1);
-      identityBadge.innerHTML = `
-        <i class="fas ${badgeIcon}"></i>
-        <span>${badgeText}</span>
-      `;
-    }
-
-    // Show rejection reason if rejected
-    const resubmissionSection = document.getElementById('resubmission-section');
-    const rejectionReasonEl = document.getElementById('rejection-reason');
-    
-    if (status === 'rejected' && rejectionReason) {
-      if (resubmissionSection) resubmissionSection.style.display = 'block';
-      if (rejectionReasonEl) rejectionReasonEl.textContent = rejectionReason;
-    } else {
-      if (resubmissionSection) resubmissionSection.style.display = 'none';
-    }
-
-    // Update submit button
-    const submitBtn = document.getElementById('submit-kyc-btn');
-    if (submitBtn) {
-      if (status === 'verified') {
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Already Verified';
-      } else if (status === 'pending') {
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Pending Review';
-      } else if (status === 'rejected') {
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Resubmit Application';
-        if (resubmissionSection) resubmissionSection.style.display = 'block';
-        if (rejectionReasonEl) rejectionReasonEl.textContent = rejectionReason || 'No reason provided.';
-      } else {
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Submit KYC Application';
-        if (resubmissionSection) resubmissionSection.style.display = 'none';
+      } catch (error) {
+        console.error('Error loading KYC status:', error);
+        document.getElementById('kyc-status-text').textContent = 'Unable to load verification status.';
       }
     }
-
-  } catch (error) {
-    console.error('Error loading KYC status:', error);
-    const statusText = document.getElementById('kyc-status-text');
-    if (statusText) {
-      statusText.textContent = 'Unable to load verification status. Please try again.';
-    }
-  }
-}
 
     // =============================================
     // INITIALIZATION
@@ -10797,7 +10396,7 @@ async function loadKYCStatus() {
       setTimeout(async function() {
         // Initialize I18N first
         const savedLang = localStorage.getItem('bithash_language') || 'en';
-        await I18N.init(savedLang);
+        I18N.init(savedLang);
 
         // Initialize DateTime with saved timezone or browser timezone
         const savedTz = localStorage.getItem('bithash_timezone');
@@ -10901,18 +10500,10 @@ async function loadKYCStatus() {
               return;
             }
 
-            const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+            await apiCall(`${API_BASE_URL}/api/auth/send-otp`, {
               method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${getAuthToken()}`,
-                'Content-Type': 'application/json'
-              },
               body: JSON.stringify({ email })
             });
-
-            if (!response.ok) {
-              throw new Error(`HTTP ${response.status}`);
-            }
 
             showNotification('success', 'OTP Sent', 'A new verification code has been sent to your email.');
             startKycResendTimer();
