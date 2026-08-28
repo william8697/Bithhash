@@ -5254,6 +5254,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js">
   </script>
 
+  <!-- Socket.IO Client -->
+  <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+
   <!-- ============================================= -->
   <!-- PREMIUM OTP CONTROLLER - Single reusable component -->
   <!-- ============================================= -->
@@ -5711,8 +5714,7 @@
         }
 
         if (code && code.length === 6) {
-          // Populate cells
-          const digits = code.split('');
+          // Populate cells          const digits = code.split('');
           this.cells.forEach((cell, i) => {
             cell.value = digits[i] || '';
             cell.classList.add('filled');
@@ -6905,104 +6907,142 @@
     }
 
     // =============================================
-    // WEBSOCKET MANAGER - Real-time updates
+    // SOCKET.IO MANAGER - Real-time updates
     // =============================================
-    const WSManager = (function() {
-      let ws = null;
-      let reconnectAttempts = 0;
-      let reconnectTimer = null;
+    const SocketManager = (function() {
+      let socket = null;
       let isConnected = false;
+      let reconnectAttempts = 0;
       let messageHandlers = [];
-      let wsUrl = '';
+      let connectionCallbacks = [];
 
-      function connect(url) {
-        wsUrl = url;
-        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      function connect() {
+        if (socket && (socket.connected || socket.connecting)) {
+          return;
+        }
+
+        const token = getAuthToken();
+        if (!token) {
+          console.warn('SocketManager: No auth token available');
           return;
         }
 
         try {
-          ws = new WebSocket(url);
-          
-          ws.onopen = function() {
+          socket = io(API_BASE_URL, {
+            transports: ['websocket', 'polling'],
+            auth: {
+              token: token
+            },
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 30000,
+            timeout: 10000
+          });
+
+          socket.on('connect', function() {
             isConnected = true;
             reconnectAttempts = 0;
-            console.log('WebSocket connected');
-            // Send auth message
-            const token = getAuthToken();
-            if (token) {
-              sendMessage({ type: 'auth', token: token });
-            }
-          };
+            console.log('Socket.IO connected');
+            connectionCallbacks.forEach(cb => cb(true));
+          });
 
-          ws.onmessage = function(event) {
-            try {
-              const data = JSON.parse(event.data);
-              handleMessage(data);
-            } catch (e) {
-              console.error('WebSocket message parse error:', e);
-            }
-          };
-
-          ws.onclose = function(event) {
+          socket.on('disconnect', function(reason) {
             isConnected = false;
-            console.log('WebSocket disconnected:', event.code, event.reason);
-            handleReconnect();
-          };
+            console.log('Socket.IO disconnected:', reason);
+            if (reason === 'io server disconnect') {
+              // Server initiated disconnect, attempt to reconnect
+              socket.connect();
+            }
+          });
 
-          ws.onerror = function(error) {
-            console.error('WebSocket error:', error);
-          };
+          socket.on('connect_error', function(error) {
+            console.error('Socket.IO connection error:', error);
+            connectionCallbacks.forEach(cb => cb(false));
+          });
+
+          socket.on('error', function(error) {
+            console.error('Socket.IO error:', error);
+          });
+
+          // Handle real-time events
+          socket.on('device_update', function(data) {
+            console.log('Device update received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'device_update', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
+          socket.on('activity_update', function(data) {
+            console.log('Activity update received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'activity_update', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
+          socket.on('security_update', function(data) {
+            console.log('Security update received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'security_update', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
+          socket.on('kyc_update', function(data) {
+            console.log('KYC update received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'kyc_update', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
+          socket.on('preferences_update', function(data) {
+            console.log('Preferences update received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'preferences_update', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
+          socket.on('initial_state', function(data) {
+            console.log('Initial state received:', data);
+            messageHandlers.forEach(handler => {
+              try {
+                handler({ type: 'initial_state', data });
+              } catch (e) {
+                console.error('Socket handler error:', e);
+              }
+            });
+          });
+
         } catch (error) {
-          console.error('WebSocket connection error:', error);
-          handleReconnect();
+          console.error('Socket.IO connection error:', error);
         }
       }
 
-      function handleReconnect() {
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
+      function disconnect() {
+        if (socket) {
+          socket.disconnect();
+          socket = null;
+          isConnected = false;
         }
-
-        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 30000);
-        reconnectAttempts++;
-
-        reconnectTimer = setTimeout(() => {
-          console.log(`Attempting to reconnect (${reconnectAttempts})...`);
-          connect(wsUrl);
-        }, delay);
-      }
-
-      function handleMessage(data) {
-        // Dispatch to registered handlers
-        messageHandlers.forEach(handler => {
-          try {
-            handler(data);
-          } catch (e) {
-            console.error('WebSocket handler error:', e);
-          }
-        });
-
-        // Handle specific message types
-        if (data.type === 'device_update') {
-          // Devices updated - refresh devices
-          loadDevices();
-        } else if (data.type === 'activity_update') {
-          // New activity - refresh activities
-          loadActivities(true);
-        } else if (data.type === 'security_update') {
-          // Security status changed
-          loadSecurityOverview();
-          loadTwoFactorStatus();
-        }
-      }
-
-      function sendMessage(message) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(message));
-          return true;
-        }
-        return false;
       }
 
       function addHandler(handler) {
@@ -7018,32 +7058,38 @@
         }
       }
 
-      function disconnect() {
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
+      function onConnection(callback) {
+        if (typeof callback === 'function') {
+          connectionCallbacks.push(callback);
+          if (isConnected) {
+            callback(true);
+          }
         }
-        if (ws) {
-          ws.close();
-          ws = null;
-        }
-        isConnected = false;
       }
 
       function getStatus() {
         return {
           connected: isConnected,
-          readyState: ws ? ws.readyState : WebSocket.CLOSED
+          socket: socket
         };
+      }
+
+      function emit(event, data) {
+        if (socket && socket.connected) {
+          socket.emit(event, data);
+          return true;
+        }
+        return false;
       }
 
       return {
         connect,
         disconnect,
-        sendMessage,
         addHandler,
         removeHandler,
-        getStatus
+        onConnection,
+        getStatus,
+        emit
       };
     })();
 
@@ -7350,7 +7396,7 @@
     // =============================================
     function logout() {
       localStorage.removeItem('jwtToken');
-      WSManager.disconnect();
+      SocketManager.disconnect();
       window.location.href = 'logout';
     }
 
@@ -10222,25 +10268,173 @@
     }
 
     // =============================================
+    // KYC STATUS
+    // =============================================
+    async function loadKYCStatus() {
+      try {
+        const data = await apiCall(`${API_BASE_URL}/api/users/kyc/status`);
+
+        const banner = document.getElementById('kyc-status-banner');
+        const statusText = document.getElementById('kyc-status-text');
+        const identityBadge = document.getElementById('identity-verification-badge');
+        const addressBadge = document.getElementById('address-verification-badge');
+        const facialBadge = document.getElementById('facial-verification-badge');
+        const submitBtn = document.getElementById('submit-kyc-btn');
+        const resubmitSection = document.getElementById('resubmission-section');
+
+        const status = data.status || 'unverified';
+        const identityStatus = data.identity?.status || 'unverified';
+        const addressStatus = data.address?.status || 'unverified';
+        const facialStatus = data.facial?.status || 'unverified';
+
+        // Update banner
+        banner.className = `kyc-status-banner ${status}`;
+        const statusIcons = {
+          'verified': 'fa-check-circle',
+          'pending': 'fa-clock',
+          'rejected': 'fa-times-circle',
+          'unverified': 'fa-info-circle'
+        };
+        banner.querySelector('.kyc-status-icon i').className = `fas ${statusIcons[status] || 'fa-info-circle'}`;
+
+        const statusLabels = {
+          'verified': 'Verified',
+          'pending': 'Pending Review',
+          'rejected': 'Rejected',
+          'unverified': 'Not Verified'
+        };
+        statusText.textContent = `Your KYC status: ${statusLabels[status] || 'Unknown'}`;
+
+        // Update badges
+        const badgeStatusMap = {
+          'verified': 'verified',
+          'pending': 'pending',
+          'rejected': 'rejected',
+          'unverified': 'unverified'
+        };
+
+        updateVerificationBadge(identityBadge, identityStatus);
+        updateVerificationBadge(addressBadge, addressStatus);
+        updateVerificationBadge(facialBadge, facialStatus);
+
+        // Update submit button
+        const allVerified = identityStatus === 'verified' && addressStatus === 'verified' && facialStatus === 'verified';
+        if (allVerified && status === 'unverified') {
+          submitBtn.disabled = false;
+          submitBtn.style.display = 'flex';
+        } else if (status === 'verified') {
+          submitBtn.disabled = true;
+          submitBtn.style.display = 'none';
+        } else {
+          submitBtn.disabled = true;
+          submitBtn.style.display = 'flex';
+        }
+
+        // Show resubmission section if rejected
+        if (status === 'rejected') {
+          resubmitSection.style.display = 'block';
+          document.getElementById('rejection-reason').textContent = data.rejectionReason || 'Your application was rejected. Please review and resubmit.';
+        } else {
+          resubmitSection.style.display = 'none';
+        }
+
+      } catch (error) {
+        console.error('Error loading KYC status:', error);
+        const userMessage = normalizeApiError(error, 'kyc_load');
+        document.getElementById('kyc-status-text').textContent = 'Unable to load KYC status. Please try again.';
+      }
+    }
+
+    function updateVerificationBadge(badge, status) {
+      const statusMap = {
+        'verified': { class: 'verified', text: 'Verified' },
+        'pending': { class: 'pending', text: 'Pending' },
+        'rejected': { class: 'rejected', text: 'Rejected' },
+        'unverified': { class: 'unverified', text: 'Unverified' }
+      };
+
+      const info = statusMap[status] || statusMap['unverified'];
+      badge.className = `verification-badge ${info.class}`;
+      badge.innerHTML = `
+                <i class="fas ${status === 'verified' ? 'fa-check-circle' : status === 'pending' ? 'fa-clock' : status === 'rejected' ? 'fa-times-circle' : 'fa-times-circle'}"></i>
+                <span>${info.text}</span>
+            `;
+    }
+
+    // =============================================
+    // SOCKET.IO REALTIME HANDLERS
+    // =============================================
+    function initRealtimeHandlers() {
+      SocketManager.addHandler(function(message) {
+        const type = message.type;
+        const data = message.data;
+
+        switch (type) {
+          case 'device_update':
+            console.log('Realtime device update received');
+            loadDevices();
+            loadSecurityOverview();
+            break;
+
+          case 'activity_update':
+            console.log('Realtime activity update received');
+            loadActivities(true);
+            break;
+
+          case 'security_update':
+            console.log('Realtime security update received');
+            loadSecurityOverview();
+            loadTwoFactorStatus();
+            break;
+
+          case 'kyc_update':
+            console.log('Realtime KYC update received');
+            loadKYCStatus();
+            break;
+
+          case 'preferences_update':
+            console.log('Realtime preferences update received');
+            loadUserPreferences();
+            break;
+
+          case 'initial_state':
+            console.log('Initial state received:', data);
+            if (data.devices) {
+              // Devices already loaded
+            }
+            if (data.activities) {
+              // Activities already loaded
+            }
+            break;
+
+          default:
+            console.log('Unknown message type:', type);
+        }
+      });
+
+      SocketManager.onConnection(function(connected) {
+        if (connected) {
+          console.log('Socket.IO connected, refreshing data...');
+          // Refresh all data on connection
+          loadDevices();
+          loadActivities(true);
+          loadSecurityOverview();
+          loadTwoFactorStatus();
+          loadKYCStatus();
+        } else {
+          console.log('Socket.IO connection failed');
+          showNotification('warning', 'Realtime Disconnected', 'Real-time updates are temporarily unavailable. Some features may not update automatically.');
+        }
+      });
+    }
+
+    // =============================================
     // WEBSOCKET INITIALIZATION
     // =============================================
     function initWebSocket() {
-      const wsUrl = `${API_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/ws`;
-      WSManager.connect(wsUrl);
-      
-      // Add handler for real-time updates
-      WSManager.addHandler(function(data) {
-        if (data.type === 'device_update') {
-          loadDevices();
-        } else if (data.type === 'activity_update') {
-          loadActivities(true);
-        } else if (data.type === 'security_update') {
-          loadSecurityOverview();
-          loadTwoFactorStatus();
-        } else if (data.type === 'kyc_update') {
-          loadKYCStatus();
-        }
-      });
+      // Use Socket.IO instead of native WebSocket
+      SocketManager.connect();
+      initRealtimeHandlers();
     }
 
     // =============================================
@@ -10296,6 +10490,7 @@
           await loadUserPreferences();
 
           await loadAPIKeys();
+          await loadKYCStatus();
 
           initKYCDocumentUpload();
           initFacialVerification();
