@@ -779,8 +779,6 @@
       flex: 1;
     }
 
-    /* REMOVED: .two-step-status styles - verification status now shown inline */
-
     /* ============================================= */
     /* PREMIUM OTP COMPONENT STYLES */
     /* ============================================= */
@@ -4084,9 +4082,6 @@
         </p>
       </div>
 
-      <!-- REMOVED: two-step-status blocks - verification status now shown inline via OTP status -->
-      <!-- REMOVED: two-step-buttons - auto-verification on 6 digits removes need for confirm button -->
-
       <!-- Status message area for final result -->
       <div id="kyc-verification-result" style="display: none; margin-top: 16px; padding: 12px 16px; border-radius: 8px; text-align: center; font-weight: 500;"></div>
     </div>
@@ -6910,6 +6905,149 @@
     }
 
     // =============================================
+    // WEBSOCKET MANAGER - Real-time updates
+    // =============================================
+    const WSManager = (function() {
+      let ws = null;
+      let reconnectAttempts = 0;
+      let reconnectTimer = null;
+      let isConnected = false;
+      let messageHandlers = [];
+      let wsUrl = '';
+
+      function connect(url) {
+        wsUrl = url;
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          return;
+        }
+
+        try {
+          ws = new WebSocket(url);
+          
+          ws.onopen = function() {
+            isConnected = true;
+            reconnectAttempts = 0;
+            console.log('WebSocket connected');
+            // Send auth message
+            const token = getAuthToken();
+            if (token) {
+              sendMessage({ type: 'auth', token: token });
+            }
+          };
+
+          ws.onmessage = function(event) {
+            try {
+              const data = JSON.parse(event.data);
+              handleMessage(data);
+            } catch (e) {
+              console.error('WebSocket message parse error:', e);
+            }
+          };
+
+          ws.onclose = function(event) {
+            isConnected = false;
+            console.log('WebSocket disconnected:', event.code, event.reason);
+            handleReconnect();
+          };
+
+          ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
+          };
+        } catch (error) {
+          console.error('WebSocket connection error:', error);
+          handleReconnect();
+        }
+      }
+
+      function handleReconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+        }
+
+        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 30000);
+        reconnectAttempts++;
+
+        reconnectTimer = setTimeout(() => {
+          console.log(`Attempting to reconnect (${reconnectAttempts})...`);
+          connect(wsUrl);
+        }, delay);
+      }
+
+      function handleMessage(data) {
+        // Dispatch to registered handlers
+        messageHandlers.forEach(handler => {
+          try {
+            handler(data);
+          } catch (e) {
+            console.error('WebSocket handler error:', e);
+          }
+        });
+
+        // Handle specific message types
+        if (data.type === 'device_update') {
+          // Devices updated - refresh devices
+          loadDevices();
+        } else if (data.type === 'activity_update') {
+          // New activity - refresh activities
+          loadActivities(true);
+        } else if (data.type === 'security_update') {
+          // Security status changed
+          loadSecurityOverview();
+          loadTwoFactorStatus();
+        }
+      }
+
+      function sendMessage(message) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(message));
+          return true;
+        }
+        return false;
+      }
+
+      function addHandler(handler) {
+        if (typeof handler === 'function') {
+          messageHandlers.push(handler);
+        }
+      }
+
+      function removeHandler(handler) {
+        const index = messageHandlers.indexOf(handler);
+        if (index !== -1) {
+          messageHandlers.splice(index, 1);
+        }
+      }
+
+      function disconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        isConnected = false;
+      }
+
+      function getStatus() {
+        return {
+          connected: isConnected,
+          readyState: ws ? ws.readyState : WebSocket.CLOSED
+        };
+      }
+
+      return {
+        connect,
+        disconnect,
+        sendMessage,
+        addHandler,
+        removeHandler,
+        getStatus
+      };
+    })();
+
+    // =============================================
     // NOTIFICATION SYSTEM
     // =============================================
     let notificationQueue = [];
@@ -7212,6 +7350,7 @@
     // =============================================
     function logout() {
       localStorage.removeItem('jwtToken');
+      WSManager.disconnect();
       window.location.href = 'logout';
     }
 
@@ -7814,8 +7953,6 @@
         setAuthenticatorStep(2);
       });
 
-      // REMOVED: auth-step3-verify button handler - auto-verification handles it
-
       document.getElementById('auth-step4-finish')?.addEventListener('click', function() {
         closeAuthenticatorSetup();
         loadTwoFactorStatus();
@@ -8257,8 +8394,6 @@
         observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
       });
 
-      // REMOVED: disable-confirm-btn click handler - auto-verification handles it
-
       document.getElementById('disable-resend-otp')?.addEventListener('click', function() {
         if (disableModalState.method === 'otp') {
           requestDisableOTP();
@@ -8652,8 +8787,6 @@
         });
         observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
       });
-
-      // REMOVED: recovery-verify-btn click handler - auto-verification handles it
 
       document.getElementById('recovery-resend-otp')?.addEventListener('click', function() {
         if (recoveryModalState.method === 'otp') {
@@ -10089,6 +10222,28 @@
     }
 
     // =============================================
+    // WEBSOCKET INITIALIZATION
+    // =============================================
+    function initWebSocket() {
+      const wsUrl = `${API_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/ws`;
+      WSManager.connect(wsUrl);
+      
+      // Add handler for real-time updates
+      WSManager.addHandler(function(data) {
+        if (data.type === 'device_update') {
+          loadDevices();
+        } else if (data.type === 'activity_update') {
+          loadActivities(true);
+        } else if (data.type === 'security_update') {
+          loadSecurityOverview();
+          loadTwoFactorStatus();
+        } else if (data.type === 'kyc_update') {
+          loadKYCStatus();
+        }
+      });
+    }
+
+    // =============================================
     // INITIALIZATION
     // =============================================
     window.addEventListener('load', function() {
@@ -10124,6 +10279,9 @@
         // Initialize KYC OTP controllers
         initKycOTPController();
         initKycAuthOTPController();
+
+        // Initialize WebSocket for real-time updates
+        initWebSocket();
 
         // Load data
         try {
