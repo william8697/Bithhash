@@ -1319,7 +1319,7 @@
         }
 
         /* ============================================= */
-        /* TWO-FACTOR AUTHENTICATION */
+        /* TWO-FACTOR AUTHENTICATION — FIXED STATE MANAGEMENT */
         /* ============================================= */
         .two-factor-card {
             background: var(--bg-base);
@@ -1385,6 +1385,11 @@
         .two-factor-status-badge.disabled {
             background: rgba(108, 116, 128, 0.15);
             color: var(--text-muted);
+        }
+
+        .two-factor-status-badge.unknown {
+            background: rgba(255, 184, 0, 0.15);
+            color: var(--warning);
         }
 
         .two-factor-description {
@@ -3316,7 +3321,7 @@
             </div>
 
             <!-- ============================================= -->
-            <!-- TWO-FACTOR AUTHENTICATION SECTION -->
+            <!-- TWO-FACTOR AUTHENTICATION SECTION — FIXED STATE -->
             <!-- ============================================= -->
             <div class="settings-section" id="two-factor-section">
                 <h2 class="settings-section-title">
@@ -3332,16 +3337,16 @@
                         <div class="two-factor-header-info">
                             <div class="two-factor-title">
                                 Authenticator App
-                                <span class="two-factor-status-badge disabled" id="auth-status-badge">Disabled</span>
+                                <span class="two-factor-status-badge unknown" id="auth-status-badge">Loading...</span>
                             </div>
                             <p class="two-factor-description" id="auth-status-description">
-                                Use Google Authenticator or another compatible TOTP application to generate secure verification codes.
+                                Loading authenticator status...
                             </p>
                             <p class="two-factor-meta" id="auth-status-meta"></p>
                         </div>
                     </div>
                     <div class="two-factor-actions" id="auth-actions">
-                        <button class="btn btn-primary btn-sm" id="auth-setup-btn">Set up authenticator</button>
+                        <!-- Actions rendered by JavaScript based on state -->
                     </div>
                 </div>
             </div>
@@ -3353,7 +3358,7 @@
                 <h2 class="settings-section-title">
                     <i class="fas fa-laptop"></i> Active Devices
                 </h2>
-                <p class="settings-section-subtitle" id="devices-subtitle">Devices currently signed in to your account</p>
+                <p class="settings-section-subtitle" id="devices-subtitle">Loading devices...</p>
 
                 <div class="settings-card">
                     <h3 class="settings-card-title">
@@ -4332,44 +4337,60 @@
         }
 
         // =============================================
-        // TWO-FACTOR AUTHENTICATION - FIXED: Proper GET endpoint with status states
+        // TWO-FACTOR AUTHENTICATION — FIXED: Proper state management
         // =============================================
         let authenticatorState = {
-            enabled: false,
-            enrollmentId: null,
+            loading: true,
+            error: null,
+            enabled: null,
             enabledAt: null,
             recoveryCodes: [],
-            setupStep: 1,
-            loading: true,
-            error: null
+            enrollmentId: null,
+            setupStep: 1
         };
 
+        /**
+         * Loads the 2FA status from the server.
+         * NEVER treats API errors as "disabled".
+         * States: loading -> enabled=true/false/null(error)
+         */
         async function loadTwoFactorStatus() {
             const badge = document.getElementById('auth-status-badge');
             const description = document.getElementById('auth-status-description');
             const meta = document.getElementById('auth-status-meta');
             const actions = document.getElementById('auth-actions');
 
+            // Set loading state
+            authenticatorState.loading = true;
+            authenticatorState.error = null;
+            badge.textContent = 'Loading...';
+            badge.className = 'two-factor-status-badge unknown';
+            description.textContent = 'Loading authenticator status...';
+            meta.textContent = '';
+            actions.innerHTML = '';
+
             try {
                 const data = await apiCall(`${API_BASE_URL}/api/users/two-factor`);
 
-                authenticatorState.loading = false;
-                authenticatorState.error = null;
+                // Server response is authoritative
                 authenticatorState.enabled = data.authenticator?.enabled || false;
                 authenticatorState.enabledAt = data.authenticator?.enabledAt || null;
+                authenticatorState.loading = false;
+                authenticatorState.error = null;
 
                 updateAuthenticatorUI();
 
             } catch (error) {
                 console.error('Error loading 2FA status:', error);
+                // CRITICAL FIX: API error != disabled
                 authenticatorState.loading = false;
-                authenticatorState.error = 'Unable to verify authenticator status.';
-                authenticatorState.enabled = null;
+                authenticatorState.error = error.message || 'Unable to verify authenticator status';
+                authenticatorState.enabled = null; // Unknown state
 
-                // Display error state - never default to disabled
+                // Show error state
                 badge.textContent = 'Unknown';
-                badge.className = 'two-factor-status-badge disabled';
-                description.textContent = 'Security status unavailable. Your authenticator status could not be verified.';
+                badge.className = 'two-factor-status-badge unknown';
+                description.textContent = 'Unable to verify authenticator status. Please try again.';
                 meta.textContent = '';
                 actions.innerHTML = `
                     <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
@@ -4379,17 +4400,31 @@
             }
         }
 
+        /**
+         * Updates the UI based on the current authenticator state.
+         * Handles: LOADING, ENABLED, DISABLED, ERROR states explicitly.
+         */
         function updateAuthenticatorUI() {
             const badge = document.getElementById('auth-status-badge');
             const description = document.getElementById('auth-status-description');
             const meta = document.getElementById('auth-status-meta');
             const actions = document.getElementById('auth-actions');
 
-            // Handle error/unknown state
-            if (authenticatorState.error) {
+            // Handle loading state
+            if (authenticatorState.loading) {
+                badge.textContent = 'Loading...';
+                badge.className = 'two-factor-status-badge unknown';
+                description.textContent = 'Loading authenticator status...';
+                meta.textContent = '';
+                actions.innerHTML = '';
+                return;
+            }
+
+            // Handle error state (enabled === null means unknown)
+            if (authenticatorState.error || authenticatorState.enabled === null) {
                 badge.textContent = 'Unknown';
-                badge.className = 'two-factor-status-badge disabled';
-                description.textContent = authenticatorState.error;
+                badge.className = 'two-factor-status-badge unknown';
+                description.textContent = authenticatorState.error || 'Unable to verify authenticator status.';
                 meta.textContent = '';
                 actions.innerHTML = `
                     <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
@@ -4399,19 +4434,7 @@
                 return;
             }
 
-            if (authenticatorState.loading) {
-                badge.textContent = 'Loading...';
-                badge.className = 'two-factor-status-badge disabled';
-                description.textContent = 'Verifying authenticator status...';
-                meta.textContent = '';
-                actions.innerHTML = `
-                    <span class="btn btn-outline btn-sm" disabled>
-                        <i class="fas fa-spinner fa-spin"></i> Loading
-                    </span>
-                `;
-                return;
-            }
-
+            // Handle enabled state
             if (authenticatorState.enabled === true) {
                 badge.textContent = 'Enabled';
                 badge.className = 'two-factor-status-badge enabled';
@@ -4420,6 +4443,8 @@
                 if (authenticatorState.enabledAt) {
                     const date = new Date(authenticatorState.enabledAt);
                     meta.textContent = `Enabled ${date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}`;
+                } else {
+                    meta.textContent = '';
                 }
 
                 actions.innerHTML = `
@@ -4434,7 +4459,11 @@
                 document.getElementById('auth-recovery-codes-btn')?.addEventListener('click', regenerateRecoveryCodes);
                 document.getElementById('auth-disable-btn')?.addEventListener('click', disableAuthenticator);
 
-            } else if (authenticatorState.enabled === false) {
+                return;
+            }
+
+            // Handle disabled state (enabled === false)
+            if (authenticatorState.enabled === false) {
                 badge.textContent = 'Disabled';
                 badge.className = 'two-factor-status-badge disabled';
                 description.textContent = 'Use Google Authenticator or another compatible TOTP application to generate secure verification codes.';
@@ -4445,35 +4474,18 @@
                 `;
 
                 document.getElementById('auth-setup-btn')?.addEventListener('click', openAuthenticatorSetup);
-
-            } else {
-                // null/unknown state
-                badge.textContent = 'Unknown';
-                badge.className = 'two-factor-status-badge disabled';
-                description.textContent = 'Unable to determine authenticator status. Please refresh.';
-                meta.textContent = '';
-                actions.innerHTML = `
-                    <button class="btn btn-outline btn-sm" onclick="loadTwoFactorStatus()">
-                        <i class="fas fa-sync"></i> Retry
-                    </button>
-                `;
+                return;
             }
         }
 
         // =============================================
-        // AUTHENTICATOR SETUP - with 409 ALREADY_ENABLED handling
+        // AUTHENTICATOR SETUP
         // =============================================
         let authEnrollmentId = null;
         let authSecret = null;
         let authOtpTimer = null;
 
         function openAuthenticatorSetup() {
-            // Check if already enabled
-            if (authenticatorState.enabled === true) {
-                showNotification('warning', 'Already Enabled', 'Authenticator is already enabled for this account.');
-                return;
-            }
-
             const modal = document.getElementById('authenticator-modal');
             modal.classList.add('active');
             document.body.style.overflow = 'hidden';
@@ -4536,23 +4548,24 @@
                     qrContainer.innerHTML = '<p style="color: var(--text-muted);">Unable to generate QR code. Please use the manual setup key below.</p>';
                 }
 
+                // Show secret key
                 document.getElementById('auth-secret-key').textContent = data.manualKey || 'No secret key available';
 
+                // Move to step 2
                 setAuthenticatorStep(2);
 
             } catch (error) {
                 console.error('Error setting up authenticator:', error);
-
                 // Handle 409 ALREADY_ENABLED gracefully
-                if (error.message && error.message.includes('ALREADY_ENABLED')) {
-                    showNotification('info', 'Already Enabled', 'Authenticator is already enabled for this account.');
+                if (error.message && error.message.includes('409')) {
+                    showNotification('info', 'Already Enabled', 'Authenticator is already enabled for your account.');
                     closeAuthenticatorSetup();
+                    // Refresh the status to show correct state
                     await loadTwoFactorStatus();
-                    return;
+                } else {
+                    showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
+                    closeAuthenticatorSetup();
                 }
-
-                showNotification('error', 'Setup Failed', error.message || 'Failed to initialize authenticator setup.');
-                closeAuthenticatorSetup();
             }
         }
 
@@ -4666,6 +4679,7 @@
                 authenticatorState.enabledAt = new Date().toISOString();
                 authenticatorState.recoveryCodes = data.recoveryCodes || [];
 
+                // Render recovery codes
                 const container = document.getElementById('auth-recovery-codes');
                 container.innerHTML = '';
                 authenticatorState.recoveryCodes.forEach(code => {
@@ -4760,16 +4774,22 @@
         }
 
         // =============================================
-        // DISABLE AUTHENTICATOR
+        // DISABLE AUTHENTICATOR — Requires password
         // =============================================
         async function disableAuthenticator() {
-            if (!confirm('Are you sure you want to disable authenticator-based two-factor authentication? This will reduce your account security.')) {
+            // Use proper modal rather than confirm
+            const password = prompt('Enter your password to disable authenticator-based two-factor authentication:');
+            if (password === null) return; // User cancelled
+
+            if (!password || password.trim() === '') {
+                showNotification('warning', 'Password Required', 'Please enter your password to disable authenticator.');
                 return;
             }
 
             try {
                 await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/disable`, {
-                    method: 'POST'
+                    method: 'POST',
+                    body: JSON.stringify({ password: password })
                 });
 
                 authenticatorState.enabled = false;
@@ -4780,21 +4800,30 @@
 
             } catch (error) {
                 console.error('Error disabling authenticator:', error);
-                showNotification('error', 'Disable Failed', error.message || 'Failed to disable authenticator.');
+                if (error.message && error.message.includes('Invalid password')) {
+                    showNotification('error', 'Invalid Password', 'The password you entered is incorrect. Please try again.');
+                } else {
+                    showNotification('error', 'Disable Failed', error.message || 'Failed to disable authenticator.');
+                }
             }
         }
 
         // =============================================
-        // REGENERATE RECOVERY CODES
+        // REGENERATE RECOVERY CODES — Requires password
         // =============================================
         async function regenerateRecoveryCodes() {
-            if (!confirm('This will generate new recovery codes and invalidate any previously issued codes. Continue?')) {
+            const password = prompt('Enter your password to regenerate recovery codes:');
+            if (password === null) return;
+
+            if (!password || password.trim() === '') {
+                showNotification('warning', 'Password Required', 'Please enter your password to regenerate recovery codes.');
                 return;
             }
 
             try {
                 const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/recovery-codes`, {
-                    method: 'POST'
+                    method: 'POST',
+                    body: JSON.stringify({ password: password })
                 });
 
                 authenticatorState.recoveryCodes = data.recoveryCodes || [];
@@ -4809,27 +4838,52 @@
 
             } catch (error) {
                 console.error('Error regenerating recovery codes:', error);
-                showNotification('error', 'Regenerate Failed', error.message || 'Failed to regenerate recovery codes.');
+                if (error.message && error.message.includes('Invalid password')) {
+                    showNotification('error', 'Invalid Password', 'The password you entered is incorrect. Please try again.');
+                } else {
+                    showNotification('error', 'Regenerate Failed', error.message || 'Failed to regenerate recovery codes.');
+                }
             }
         }
 
         // =============================================
-        // ACTIVE DEVICES - FIXED: Proper response handling
+        // ACTIVE DEVICES — FIXED: Proper response handling
         // =============================================
         async function loadDevices() {
             const container = document.getElementById('devices-container');
             const countEl = document.getElementById('device-count');
             const logoutAllBtn = document.getElementById('logout-all-devices-btn');
+            const subtitle = document.getElementById('devices-subtitle');
+
+            // Show loading state
+            container.innerHTML = `
+                <div class="skeleton-device">
+                    <div class="skeleton skeleton-circle"></div>
+                    <div style="flex:1;">
+                        <div class="skeleton skeleton-text" style="height:18px;"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                    </div>
+                </div>
+                <div class="skeleton-device">
+                    <div class="skeleton skeleton-circle"></div>
+                    <div style="flex:1;">
+                        <div class="skeleton skeleton-text" style="height:18px;"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                        <div class="skeleton skeleton-text short"></div>
+                    </div>
+                </div>
+            `;
 
             try {
                 const response = await apiCall(`${API_BASE_URL}/api/users/devices`);
-                const devices = response.data?.devices || [];
+                // FIX: Handle response.devices structure (no extra .data wrapper)
+                const devices = response.devices || [];
 
                 const activeCount = devices.filter(d => d.sessionStatus !== 'revoked').length;
 
                 countEl.textContent = `${activeCount} device${activeCount !== 1 ? 's' : ''}`;
-                document.getElementById('devices-subtitle').textContent =
-                    `${activeCount} device${activeCount !== 1 ? 's' : ''} currently signed in to your account`;
+                subtitle.textContent = `${activeCount} device${activeCount !== 1 ? 's' : ''} currently signed in to your account`;
 
                 if (devices.length === 0) {
                     container.innerHTML = `
@@ -4915,10 +4969,6 @@
                             e.stopPropagation();
                             const deviceId = this.dataset.deviceId;
                             const deviceName = device.name || 'Unknown Device';
-                            const locationText = device.location?.city && device.location?.country ?
-                                `${device.location.city}, ${device.location.country}` :
-                                'Unknown location';
-
                             if (confirm(`Log out this device?\n\n${deviceName}\n${locationText}\nLast active ${lastActive}\n\nThis will immediately revoke this device's active session.`)) {
                                 logoutDevice(deviceId);
                             }
@@ -4977,7 +5027,7 @@
         }
 
         // =============================================
-        // RECENT ACTIVITY - FIXED: Proper response handling
+        // RECENT ACTIVITY — FIXED: Proper response handling
         // =============================================
         let activityState = {
             page: 1,
@@ -5001,6 +5051,28 @@
             const container = document.getElementById('activity-container');
             const loadMoreBtn = document.getElementById('load-more-activity');
 
+            // Show loading skeleton
+            if (reset) {
+                container.innerHTML = `
+                    <div class="skeleton-activity">
+                        <div class="skeleton skeleton-circle"></div>
+                        <div style="flex:1;">
+                            <div class="skeleton skeleton-text" style="height:16px;"></div>
+                            <div class="skeleton skeleton-text short"></div>
+                            <div class="skeleton skeleton-text short"></div>
+                        </div>
+                    </div>
+                    <div class="skeleton-activity">
+                        <div class="skeleton skeleton-circle"></div>
+                        <div style="flex:1;">
+                            <div class="skeleton skeleton-text" style="height:16px;"></div>
+                            <div class="skeleton skeleton-text short"></div>
+                            <div class="skeleton skeleton-text short"></div>
+                        </div>
+                    </div>
+                `;
+            }
+
             try {
                 const params = new URLSearchParams({
                     page: activityState.page,
@@ -5010,6 +5082,7 @@
 
                 const data = await apiCall(`${API_BASE_URL}/api/users/activity?${params}`);
 
+                // FIX: Handle response.data.activities structure
                 const activities = data.data?.activities || [];
                 const pagination = data.data?.pagination || {};
 
@@ -5289,7 +5362,7 @@
         }
 
         // =============================================
-        // PREFERENCES
+        // PREFERENCES — Languages with Flags
         // =============================================
         let languages = [];
         let timezones = [];
@@ -5678,29 +5751,26 @@
         }
 
         // =============================================
-        // KYC FUNCTIONS (kept from original)
+        // KYC FUNCTIONS (preserved from original)
         // =============================================
         function initKYCDocumentUpload() {
-            // KYC document upload logic would go here
-            // Kept as placeholder for compatibility
+            // Placeholder for KYC document upload
         }
 
         function initFacialVerification() {
-            // Facial verification logic would go here
-            // Kept as placeholder for compatibility
+            // Placeholder for facial verification
         }
 
         function handleDocumentUpload(e, side) {
-            // Document upload handler
             showNotification('info', 'KYC Upload', 'KYC document upload is not fully implemented in this version.');
         }
 
         function removeDocument(side) {
-            // Remove document handler
+            // Placeholder
         }
 
         function removeAddressDocument() {
-            // Remove address document handler
+            // Placeholder
         }
 
         // =============================================
@@ -5746,10 +5816,13 @@
         // =============================================
         window.addEventListener('load', function() {
             setTimeout(async function() {
+                // Hide loading overlay
                 document.getElementById('loading-overlay').classList.add('hidden');
 
+                // Set current year in footer
                 document.getElementById('current-year').textContent = new Date().getFullYear();
 
+                // Initialize components
                 initSettingsNavigation();
                 initMobileMenu();
                 initHeaderScrollEffect();
@@ -5760,6 +5833,7 @@
                 initActivityFilters();
                 initPreferenceSelectors();
 
+                // Load data
                 try {
                     await loadProfile();
                     await loadSecurityOverview();
@@ -5781,6 +5855,7 @@
                     showNotification('error', 'Load Error', 'Some settings could not be loaded. Please refresh the page.');
                 }
 
+                // Form submissions
                 document.getElementById('profile-form').addEventListener('submit', function(e) {
                     e.preventDefault();
                     saveProfile();
