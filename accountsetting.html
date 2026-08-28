@@ -35,8 +35,7 @@
   </script>
 
   <!-- Socket.IO Client -->
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js">
-  </script>
+  <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
 
   <style>
     /* ============================================= */
@@ -3970,7 +3969,6 @@
   </style>
 </head>
 <body>
-
   <!-- Loading Overlay -->
   <div class="loading-overlay" id="loading-overlay">
     <img src="https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png" alt="BitHash Logo" class="loading-logo" />
@@ -4185,7 +4183,6 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="auth-step3-back" data-i18n="common.back">Back</button>
-          <!-- REMOVED: Verify button - auto-verification on 6 digits -->
         </div>
       </div>
 
@@ -4332,7 +4329,6 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="disable-verify-back" data-i18n="common.back">Back</button>
-          <!-- REMOVED: Disable confirm button - auto-verification on 6 digits -->
         </div>
       </div>
     </div>
@@ -4452,7 +4448,6 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="recovery-verify-back" data-i18n="common.back">Back</button>
-          <!-- REMOVED: Verify button - auto-verification on 6 digits -->
         </div>
       </div>
 
@@ -5256,10 +5251,6 @@
 
   <!-- QR Code Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js">
-  </script>
-
-  <!-- Socket.IO Client -->
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js">
   </script>
 
   <!-- ============================================= -->
@@ -6809,7 +6800,9 @@
         'PASSWORDLESS_ACCOUNT': 'This account does not use a password. Continue with the available verification method.',
         'INVALID_PASSWORD': 'The password you entered is incorrect. Please try again.',
         'INVALID_CODE': 'The code you entered is invalid. Please try again.',
-        'ALREADY_ENABLED': 'Authenticator is already enabled for your account.'
+        'ALREADY_ENABLED': 'Authenticator is already enabled for your account.',
+        'ENROLLMENT_NOT_FOUND': 'The verification enrollment was not found. Please restart the process.',
+        'ENROLLMENT_EXPIRED': 'The verification enrollment has expired. Please restart the process.'
       };
 
       let errorCode = null;
@@ -6918,97 +6911,102 @@
     const SocketManager = (function() {
       let socket = null;
       let isConnected = false;
-      let isAuthenticated = false;
       let reconnectAttempts = 0;
-      let eventHandlers = new Map();
-      let connectionListeners = [];
+      let maxReconnectAttempts = 10;
+      let eventHandlers = {};
+      let connectionCallbacks = [];
 
-      function connect() {
+      function connect(token) {
         if (socket && socket.connected) {
           return;
         }
 
-        const token = getAuthToken();
-        if (!token) {
-          console.warn('SocketManager: No auth token available');
-          return;
+        if (socket) {
+          socket.disconnect();
+          socket = null;
         }
 
+        const socketUrl = API_BASE_URL;
+
         try {
-          socket = io(API_BASE_URL, {
+          socket = io(socketUrl, {
             transports: ['websocket', 'polling'],
             auth: {
               token: token
             },
             reconnection: true,
-            reconnectionAttempts: Infinity,
+            reconnectionAttempts: 5,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 5000,
             timeout: 20000
           });
 
-          socket.on('connect', () => {
+          socket.on('connect', function() {
             isConnected = true;
             reconnectAttempts = 0;
             console.log('Socket.IO connected');
-            connectionListeners.forEach(listener => listener('connect'));
+            connectionCallbacks.forEach(cb => cb(true));
           });
 
-          socket.on('authenticated', () => {
-            isAuthenticated = true;
-            console.log('Socket.IO authenticated');
-            connectionListeners.forEach(listener => listener('authenticated'));
+          socket.on('connect_error', function(error) {
+            console.error('Socket.IO connection error:', error);
+            isConnected = false;
           });
 
-          socket.on('error', (error) => {
+          socket.on('disconnect', function(reason) {
+            isConnected = false;
+            console.log('Socket.IO disconnected:', reason);
+            connectionCallbacks.forEach(cb => cb(false));
+          });
+
+          socket.on('error', function(error) {
             console.error('Socket.IO error:', error);
           });
 
-          socket.on('connect_error', (error) => {
-            console.error('Socket.IO connection error:', error);
-            isConnected = false;
-            isAuthenticated = false;
-            connectionListeners.forEach(listener => listener('connect_error', error));
-          });
-
-          socket.on('disconnect', (reason) => {
-            isConnected = false;
-            isAuthenticated = false;
-            console.log('Socket.IO disconnected:', reason);
-            connectionListeners.forEach(listener => listener('disconnect', reason));
-          });
-
-          socket.on('reconnect', (attempt) => {
-            console.log('Socket.IO reconnected after', attempt, 'attempts');
-            isConnected = true;
-            const token = getAuthToken();
-            if (token) {
-              socket.auth = { token };
+          // Handle real-time events
+          socket.on('device_update', function(data) {
+            if (eventHandlers.device_update) {
+              eventHandlers.device_update(data);
             }
+            // Refresh devices
+            loadDevices();
           });
 
-          socket.on('device_update', (data) => {
-            handleEvent('device_update', data);
+          socket.on('activity_update', function(data) {
+            if (eventHandlers.activity_update) {
+              eventHandlers.activity_update(data);
+            }
+            // Refresh activities
+            loadActivities(true);
           });
 
-          socket.on('activity_update', (data) => {
-            handleEvent('activity_update', data);
+          socket.on('security_update', function(data) {
+            if (eventHandlers.security_update) {
+              eventHandlers.security_update(data);
+            }
+            loadSecurityOverview();
+            loadTwoFactorStatus();
           });
 
-          socket.on('security_update', (data) => {
-            handleEvent('security_update', data);
+          socket.on('kyc_update', function(data) {
+            if (eventHandlers.kyc_update) {
+              eventHandlers.kyc_update(data);
+            }
+            loadKYCStatus();
           });
 
-          socket.on('preferences_update', (data) => {
-            handleEvent('preferences_update', data);
+          socket.on('preferences_update', function(data) {
+            if (eventHandlers.preferences_update) {
+              eventHandlers.preferences_update(data);
+            }
+            loadUserPreferences();
           });
 
-          socket.on('kyc_update', (data) => {
-            handleEvent('kyc_update', data);
-          });
-
-          socket.on('settings_ready', (data) => {
-            handleEvent('settings_ready', data);
+          // Admin events
+          socket.on('stats-update', function(data) {
+            if (eventHandlers.stats_update) {
+              eventHandlers.stats_update(data);
+            }
           });
 
         } catch (error) {
@@ -7020,48 +7018,39 @@
         if (socket) {
           socket.disconnect();
           socket = null;
+          isConnected = false;
         }
-        isConnected = false;
-        isAuthenticated = false;
       }
 
       function on(event, handler) {
-        if (!eventHandlers.has(event)) {
-          eventHandlers.set(event, new Set());
-        }
-        eventHandlers.get(event).add(handler);
-      }
-
-      function off(event, handler) {
-        if (eventHandlers.has(event)) {
-          eventHandlers.get(event).delete(handler);
+        if (typeof handler === 'function') {
+          eventHandlers[event] = handler;
         }
       }
 
-      function handleEvent(event, data) {
-        if (eventHandlers.has(event)) {
-          eventHandlers.get(event).forEach(handler => {
-            try {
-              handler(data);
-            } catch (e) {
-              console.error('Error in Socket.IO event handler for', event, ':', e);
-            }
-          });
-        }
+      function off(event) {
+        delete eventHandlers[event];
       }
 
-      function addConnectionListener(listener) {
-        if (typeof listener === 'function') {
-          connectionListeners.push(listener);
+      function emit(event, data) {
+        if (socket && socket.connected) {
+          socket.emit(event, data);
+          return true;
         }
+        return false;
       }
 
       function getStatus() {
         return {
           connected: isConnected,
-          authenticated: isAuthenticated,
-          socketId: socket ? socket.id : null
+          socket: socket
         };
+      }
+
+      function onConnectionChange(callback) {
+        if (typeof callback === 'function') {
+          connectionCallbacks.push(callback);
+        }
       }
 
       return {
@@ -7069,8 +7058,9 @@
         disconnect,
         on,
         off,
-        addConnectionListener,
-        getStatus
+        emit,
+        getStatus,
+        onConnectionChange
       };
     })();
 
@@ -8077,7 +8067,7 @@
     let disableModalState = {
       step: 1,
       method: null,
-      otpId: null,
+      challengeId: null,
       email: null,
       timer: null,
       remainingSeconds: 0,
@@ -8097,11 +8087,8 @@
           statusContainerId: 'disable-otp-status',
           errorTextId: 'disable-otp-error-text',
           onComplete: function(code) {
-            // Check if the confirm button exists before accessing its disabled property
-            const confirmBtn = document.getElementById('disable-confirm-btn');
-            if (confirmBtn && !confirmBtn.disabled) {
-              verifyDisableCode();
-            }
+            // Auto-verify on completion
+            verifyDisableCode();
           },
           autoVerifyDelay: 300
         });
@@ -8116,11 +8103,8 @@
           statusContainerId: 'disable-auth-status',
           errorTextId: 'disable-auth-error-text',
           onComplete: function(code) {
-            // Check if the confirm button exists before accessing its disabled property
-            const confirmBtn = document.getElementById('disable-confirm-btn');
-            if (confirmBtn && !confirmBtn.disabled) {
-              verifyDisableCode();
-            }
+            // Auto-verify on completion
+            verifyDisableCode();
           },
           autoVerifyDelay: 300
         });
@@ -8134,7 +8118,7 @@
 
       disableModalState.step = 1;
       disableModalState.method = null;
-      disableModalState.otpId = null;
+      disableModalState.challengeId = null;
       disableModalState.email = null;
       disableModalState.isVerifying = false;
 
@@ -8150,12 +8134,6 @@
         btn.classList.remove('btn-primary');
         btn.classList.add('btn-outline');
       });
-
-      // Safely access the confirm button
-      const confirmBtn = document.getElementById('disable-confirm-btn');
-      if (confirmBtn) {
-        confirmBtn.disabled = true;
-      }
 
       // Reset OTP controllers
       if (disableOTPController) disableOTPController.reset();
@@ -8190,7 +8168,7 @@
           method: 'POST'
         });
 
-        disableModalState.otpId = data.challengeId || data.data?.challengeId;
+        disableModalState.challengeId = data.challengeId || data.data?.challengeId;
         disableModalState.email = data.data?.email || data.email;
 
         const emailEl = document.getElementById('disable-otp-email');
@@ -8245,15 +8223,6 @@
       if (disableModalState.isVerifying) return;
       disableModalState.isVerifying = true;
 
-      const btn = document.getElementById('disable-confirm-btn');
-      if (!btn) {
-        disableModalState.isVerifying = false;
-        return;
-      }
-
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Verifying...';
-
       try {
         let body = {};
 
@@ -8262,8 +8231,6 @@
             if (disableOTPController) {
               disableOTPController.setError('Please enter all 6 digits.');
             }
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
             disableModalState.isVerifying = false;
             return;
           }
@@ -8271,7 +8238,7 @@
           body = {
             method: 'otp',
             otp: disableOTPController.getCode(),
-            challengeId: disableModalState.otpId
+            challengeId: disableModalState.challengeId
           };
 
         } else if (disableModalState.method === 'authenticator') {
@@ -8279,8 +8246,6 @@
             if (disableAuthController) {
               disableAuthController.setError('Please enter all 6 digits.');
             }
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
             disableModalState.isVerifying = false;
             return;
           }
@@ -8323,8 +8288,6 @@
           }
         }
       } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
         disableModalState.isVerifying = false;
       }
     }
@@ -8344,11 +8307,6 @@
         disableModalState.method = 'otp';
         document.getElementById('disable-otp-section').classList.add('active');
         document.getElementById('disable-auth-section').classList.remove('active');
-        // Safely access the confirm button
-        const confirmBtn = document.getElementById('disable-confirm-btn');
-        if (confirmBtn) {
-          confirmBtn.disabled = true;
-        }
 
         document.querySelectorAll('#disable-method-otp, #disable-method-auth').forEach(btn => {
           btn.classList.remove('btn-primary');
@@ -8374,11 +8332,6 @@
         disableModalState.method = 'authenticator';
         document.getElementById('disable-auth-section').classList.add('active');
         document.getElementById('disable-otp-section').classList.remove('active');
-        // Safely access the confirm button
-        const confirmBtn = document.getElementById('disable-confirm-btn');
-        if (confirmBtn) {
-          confirmBtn.disabled = true;
-        }
 
         document.querySelectorAll('#disable-method-otp, #disable-method-auth').forEach(btn => {
           btn.classList.remove('btn-primary');
@@ -8398,29 +8351,6 @@
         }, 300);
       });
 
-      // OTP controller status updates for button enable/disable
-      document.addEventListener('DOMContentLoaded', function() {
-        const checkOTPCompletion = setInterval(() => {
-          const method = disableModalState.method;
-          const confirmBtn = document.getElementById('disable-confirm-btn');
-          if (!confirmBtn) return;
-
-          if (method === 'otp' && disableOTPController) {
-            confirmBtn.disabled = !disableOTPController.isComplete();
-          } else if (method === 'authenticator' && disableAuthController) {
-            confirmBtn.disabled = !disableAuthController.isComplete();
-          }
-        }, 200);
-
-        const modal = document.getElementById('disable-auth-modal');
-        const observer = new MutationObserver(() => {
-          if (!modal.classList.contains('active')) {
-            clearInterval(checkOTPCompletion);
-          }
-        });
-        observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
-      });
-
       document.getElementById('disable-resend-otp')?.addEventListener('click', function() {
         if (disableModalState.method === 'otp') {
           requestDisableOTP();
@@ -8430,11 +8360,6 @@
             setTimeout(() => {
               disableOTPController.focusFirstEmpty();
             }, 100);
-          }
-          // Safely access the confirm button
-          const confirmBtn = document.getElementById('disable-confirm-btn');
-          if (confirmBtn) {
-            confirmBtn.disabled = true;
           }
         }
       });
@@ -8472,11 +8397,8 @@
           statusContainerId: 'recovery-otp-status',
           errorTextId: 'recovery-otp-error-text',
           onComplete: function(code) {
-            // Check if the verify button exists before accessing its disabled property
-            const verifyBtn = document.getElementById('recovery-verify-btn');
-            if (verifyBtn && !verifyBtn.disabled) {
-              verifyRecoveryCode();
-            }
+            // Auto-verify on completion
+            verifyRecoveryCode();
           },
           autoVerifyDelay: 300
         });
@@ -8490,11 +8412,8 @@
           statusContainerId: 'recovery-auth-status',
           errorTextId: 'recovery-auth-error-text',
           onComplete: function(code) {
-            // Check if the verify button exists before accessing its disabled property
-            const verifyBtn = document.getElementById('recovery-verify-btn');
-            if (verifyBtn && !verifyBtn.disabled) {
-              verifyRecoveryCode();
-            }
+            // Auto-verify on completion
+            verifyRecoveryCode();
           },
           autoVerifyDelay: 300
         });
@@ -8525,16 +8444,6 @@
         btn.classList.remove('btn-primary');
         btn.classList.add('btn-outline');
       });
-
-      // Safely access buttons
-      const verifyBtn = document.getElementById('recovery-verify-btn');
-      if (verifyBtn) {
-        verifyBtn.disabled = true;
-      }
-      const doneBtn = document.getElementById('recovery-done-btn');
-      if (doneBtn) {
-        doneBtn.disabled = true;
-      }
 
       if (recoveryOTPController) recoveryOTPController.reset();
       if (recoveryAuthController) recoveryAuthController.reset();
@@ -8624,15 +8533,6 @@
       if (recoveryModalState.isSubmitting) return;
       recoveryModalState.isSubmitting = true;
 
-      const btn = document.getElementById('recovery-verify-btn');
-      if (!btn) {
-        recoveryModalState.isSubmitting = false;
-        return;
-      }
-
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Verifying...';
-
       try {
         let body = {};
 
@@ -8641,8 +8541,6 @@
             if (recoveryOTPController) {
               recoveryOTPController.setError('Please enter all 6 digits.');
             }
-            btn.disabled = false;
-            btn.innerHTML = 'Verify';
             recoveryModalState.isSubmitting = false;
             return;
           }
@@ -8658,8 +8556,6 @@
             if (recoveryAuthController) {
               recoveryAuthController.setError('Please enter all 6 digits.');
             }
-            btn.disabled = false;
-            btn.innerHTML = 'Verify';
             recoveryModalState.isSubmitting = false;
             return;
           }
@@ -8717,8 +8613,6 @@
           }
         }
       } finally {
-        btn.disabled = false;
-        btn.innerHTML = 'Verify';
         recoveryModalState.isSubmitting = false;
       }
     }
@@ -8738,11 +8632,6 @@
         recoveryModalState.method = 'otp';
         document.getElementById('recovery-otp-section').classList.add('active');
         document.getElementById('recovery-auth-section').classList.remove('active');
-        // Safely access the verify button
-        const verifyBtn = document.getElementById('recovery-verify-btn');
-        if (verifyBtn) {
-          verifyBtn.disabled = true;
-        }
 
         document.querySelectorAll('#recovery-method-otp, #recovery-method-auth').forEach(btn => {
           btn.classList.remove('btn-primary');
@@ -8768,11 +8657,6 @@
         recoveryModalState.method = 'authenticator';
         document.getElementById('recovery-auth-section').classList.add('active');
         document.getElementById('recovery-otp-section').classList.remove('active');
-        // Safely access the verify button
-        const verifyBtn = document.getElementById('recovery-verify-btn');
-        if (verifyBtn) {
-          verifyBtn.disabled = true;
-        }
 
         document.querySelectorAll('#recovery-method-otp, #recovery-method-auth').forEach(btn => {
           btn.classList.remove('btn-primary');
@@ -8792,29 +8676,6 @@
         }, 300);
       });
 
-      // OTP controller status updates for button enable/disable
-      document.addEventListener('DOMContentLoaded', function() {
-        const checkRecoveryCompletion = setInterval(() => {
-          const method = recoveryModalState.method;
-          const verifyBtn = document.getElementById('recovery-verify-btn');
-          if (!verifyBtn) return;
-
-          if (method === 'otp' && recoveryOTPController) {
-            verifyBtn.disabled = !recoveryOTPController.isComplete();
-          } else if (method === 'authenticator' && recoveryAuthController) {
-            verifyBtn.disabled = !recoveryAuthController.isComplete();
-          }
-        }, 200);
-
-        const modal = document.getElementById('recovery-codes-modal');
-        const observer = new MutationObserver(() => {
-          if (!modal.classList.contains('active')) {
-            clearInterval(checkRecoveryCompletion);
-          }
-        });
-        observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
-      });
-
       document.getElementById('recovery-resend-otp')?.addEventListener('click', function() {
         if (recoveryModalState.method === 'otp') {
           requestRecoveryOTP();
@@ -8824,11 +8685,6 @@
             setTimeout(() => {
               recoveryOTPController.focusFirstEmpty();
             }, 100);
-          }
-          // Safely access the verify button
-          const verifyBtn = document.getElementById('recovery-verify-btn');
-          if (verifyBtn) {
-            verifyBtn.disabled = true;
           }
         }
       });
@@ -9910,7 +9766,7 @@
     }
 
     // =============================================
-    // KYC FUNCTIONS (preserved from original)
+    // KYC FUNCTIONS
     // =============================================
     function initKYCDocumentUpload() {
       // Placeholder for KYC document upload
@@ -10037,28 +9893,30 @@
       }
 
       try {
-        let endpoint = `${API_BASE_URL}/api/auth/verify-otp`;
-        let body = { email, otp: code };
+        // For KYC verification, we need to use a specific endpoint
+        // This should be a dedicated KYC verification endpoint that handles both email OTP and authenticator verification
+        // For now, we'll use the existing authenticator verification with a purpose flag
+        let endpoint = `${API_BASE_URL}/api/users/kyc/verification/verify`;
+        let body = { 
+          method: method,
+          code: code
+        };
 
-        // If using authenticator method, use the 2FA verification endpoint
-        if (method === 'authenticator') {
+        // If using email OTP, we need to include the OTP and challenge ID
+        if (method === 'email') {
+          // For email OTP, we need to send the OTP code with a challenge
+          // The challenge should have been created when the modal opened
+          // For now, we'll use the existing OTP verification
+          endpoint = `${API_BASE_URL}/api/auth/verify-otp`;
+          body = { email, otp: code };
+        } else if (method === 'authenticator') {
+          // For authenticator, use the authenticator verification endpoint
+          // with a purpose flag for KYC
           endpoint = `${API_BASE_URL}/api/users/two-factor/authenticator/verify`;
-          // For authenticator, we need to verify the 2FA code
-          // This requires an enrollment ID - we'll use a stored one or get it from the user's active enrollment
-          // For KYC verification via authenticator, we use a special challenge flow
-          try {
-            const challengeData = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
-              method: 'POST',
-              body: JSON.stringify({ code, purpose: 'kyc_verification' })
-            });
-            // If successful, the authenticator verification will handle the KYC submission
-            showNotification('success', 'Verification Successful', 'KYC verified via authenticator!');
-            document.getElementById('two-step-modal')?.classList.remove('active');
-            await loadKYCStatus();
-            return;
-          } catch (authError) {
-            throw authError;
-          }
+          body = { 
+            code: code,
+            purpose: 'kyc_verification'
+          };
         }
 
         const response = await fetch(endpoint, {
@@ -10073,15 +9931,14 @@
         const data = await response.json();
 
         if (!response.ok) {
-          throw new Error(data.message || 'OTP verification failed');
+          throw new Error(data.message || 'Verification failed');
         }
 
         // SUCCESS
-        showNotification('success', 'Verification Successful', 'KYC submitted successfully! Your application is now under review.');
+        showNotification('success', 'Verification Successful', 'KYC verified successfully! Your application is now under review.');
 
         // Close modal and update UI
         document.getElementById('two-step-modal')?.classList.remove('active');
-        document.getElementById('otp-success').style.display = 'block';
         document.getElementById('kyc-verification-result').style.display = 'block';
         document.getElementById('kyc-verification-result').innerHTML = `
                     <span style="color: var(--success);">✅ KYC submitted successfully! Your application is now under review.</span>
@@ -10091,7 +9948,7 @@
         await loadKYCStatus();
 
       } catch (error) {
-        console.error('KYC OTP verification error:', error);
+        console.error('KYC verification error:', error);
         const userMessage = error.message || 'Invalid verification code. Please try again.';
         showNotification('error', 'Verification Failed', userMessage);
 
@@ -10138,24 +9995,13 @@
         // Show method selector with both options
         methodSelector.style.display = 'flex';
         description.textContent = 'For security, please verify your identity using one of the methods below to finalize your KYC submission.';
-
-        // Pre-select email method by default (not random)
-        kycSelectedMethod = 'email';
         selectKycMethod('email');
-
-        // Make email active by default
-        document.getElementById('kyc-method-email').classList.add('active');
-        document.getElementById('kyc-method-auth').classList.remove('active');
-        emailSection.classList.add('active');
-        authSection.classList.remove('active');
-
       } else {
         // Only show email OTP
         methodSelector.style.display = 'none';
         description.textContent = 'For security, we\'ve sent a 6-digit verification code to your registered email address to finalize your KYC submission:';
         emailSection.classList.add('active');
         authSection.classList.remove('active');
-        kycSelectedMethod = 'email';
       }
 
       // Initialize OTP controllers
@@ -10243,101 +10089,121 @@
     }
 
     // =============================================
-    // SOCKET.IO INITIALIZATION
-    // =============================================
-    function initSocketIO() {
-      SocketManager.connect();
-
-      SocketManager.addConnectionListener((event, data) => {
-        if (event === 'authenticated') {
-          console.log('Socket.IO authenticated successfully');
-          // Load initial data after authentication
-          loadDevices();
-          loadActivities(true);
-          loadTwoFactorStatus();
-        }
-      });
-
-      SocketManager.on('device_update', (data) => {
-        loadDevices();
-      });
-
-      SocketManager.on('activity_update', (data) => {
-        loadActivities(true);
-      });
-
-      SocketManager.on('security_update', (data) => {
-        loadSecurityOverview();
-        loadTwoFactorStatus();
-      });
-
-      SocketManager.on('kyc_update', (data) => {
-        loadKYCStatus();
-      });
-
-      SocketManager.on('preferences_update', (data) => {
-        if (data.language) {
-          I18N.setLanguage(data.language);
-        }
-        loadUserPreferences();
-      });
-
-      SocketManager.on('settings_ready', (data) => {
-        console.log('Settings ready event received:', data);
-      });
-    }
-
-    // =============================================
     // KYC STATUS LOAD
     // =============================================
     async function loadKYCStatus() {
       try {
         const data = await apiCall(`${API_BASE_URL}/api/users/kyc/status`);
         const status = data.status || 'unverified';
-        const text = data.message || 'Your verification status is unknown.';
-
-        const banner = document.getElementById('kyc-status-banner');
         const statusText = document.getElementById('kyc-status-text');
+        const banner = document.getElementById('kyc-status-banner');
 
-        banner.className = `kyc-status-banner ${status}`;
-        statusText.textContent = text;
-
-        const badgeMap = {
-          'verified': 'verified',
-          'pending': 'pending',
-          'rejected': 'rejected',
-          'unverified': 'unverified'
+        // Update banner
+        banner.className = 'kyc-status-banner';
+        const statusMap = {
+          'verified': { class: 'verified', icon: 'fa-check-circle', text: 'Verified' },
+          'pending': { class: 'pending', icon: 'fa-clock', text: 'Pending Review' },
+          'rejected': { class: 'rejected', icon: 'fa-times-circle', text: 'Rejected' },
+          'unverified': { class: '', icon: 'fa-info-circle', text: 'Not Submitted' }
         };
 
-        const identityBadge = document.getElementById('identity-verification-badge');
-        identityBadge.className = `verification-badge ${badgeMap[status] || 'unverified'}`;
-        identityBadge.innerHTML = `
-                    <i class="fas ${status === 'verified' ? 'fa-check-circle' : status === 'pending' ? 'fa-clock' : status === 'rejected' ? 'fa-times-circle' : 'fa-times-circle'}"></i>
-                    <span>${status.charAt(0).toUpperCase() + status.slice(1)}</span>
-                `;
+        const info = statusMap[status] || statusMap.unverified;
+        banner.classList.add(info.class);
+        banner.querySelector('.kyc-status-icon i').className = `fas ${info.icon}`;
+        statusText.textContent = info.text;
 
+        // Update badges
+        const identityBadge = document.getElementById('identity-verification-badge');
+        const addressBadge = document.getElementById('address-verification-badge');
+        const facialBadge = document.getElementById('facial-verification-badge');
+
+        const updateBadge = (badge, isVerified) => {
+          badge.className = `verification-badge ${isVerified ? 'verified' : 'unverified'}`;
+          badge.innerHTML = isVerified ?
+            `<i class="fas fa-check-circle"></i> <span data-i18n="kyc.verified">Verified</span>` :
+            `<i class="fas fa-times-circle"></i> <span data-i18n="kyc.unverified">Unverified</span>`;
+        };
+
+        updateBadge(identityBadge, data.identityVerified || false);
+        updateBadge(addressBadge, data.addressVerified || false);
+        updateBadge(facialBadge, data.facialVerified || false);
+
+        // Enable/disable submit button
         const submitBtn = document.getElementById('submit-kyc-btn');
-        if (status === 'verified') {
-          submitBtn.disabled = true;
-          submitBtn.textContent = 'Already Verified';
-        } else if (status === 'pending') {
-          submitBtn.disabled = true;
-          submitBtn.textContent = 'Pending Review';
-        } else if (status === 'rejected') {
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Resubmit Application';
-          document.getElementById('resubmission-section').style.display = 'block';
-          document.getElementById('rejection-reason').textContent = data.rejectionReason || 'No reason provided.';
+        if (submitBtn) {
+          const allVerified = data.identityVerified && data.addressVerified && data.facialVerified;
+          submitBtn.disabled = !allVerified;
+        }
+
+        // Show resubmission section if rejected
+        const resubmitSection = document.getElementById('resubmission-section');
+        if (status === 'rejected') {
+          resubmitSection.style.display = 'block';
+          const reasonEl = document.getElementById('rejection-reason');
+          reasonEl.textContent = data.rejectionReason || 'No specific reason provided.';
         } else {
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Submit KYC Application';
-          document.getElementById('resubmission-section').style.display = 'none';
+          resubmitSection.style.display = 'none';
         }
 
       } catch (error) {
         console.error('Error loading KYC status:', error);
-        document.getElementById('kyc-status-text').textContent = 'Unable to load verification status.';
+        const userMessage = normalizeApiError(error, 'kyc_status');
+        document.getElementById('kyc-status-text').textContent = 'Unable to load KYC status. Please try again.';
       }
+    }
+
+    // =============================================
+    // WEBSOCKET INITIALIZATION - Using Socket.IO
+    // =============================================
+    function initSocketIO() {
+      const token = getAuthToken();
+      if (!token) {
+        console.warn('No auth token found for Socket.IO connection');
+        return;
+      }
+
+      SocketManager.connect(token);
+
+      // Add handlers for real-time updates
+      SocketManager.on('device_update', function(data) {
+        console.log('Socket.IO device_update received:', data);
+        loadDevices();
+      });
+
+      SocketManager.on('activity_update', function(data) {
+        console.log('Socket.IO activity_update received:', data);
+        loadActivities(true);
+      });
+
+      SocketManager.on('security_update', function(data) {
+        console.log('Socket.IO security_update received:', data);
+        loadSecurityOverview();
+        loadTwoFactorStatus();
+      });
+
+      SocketManager.on('kyc_update', function(data) {
+        console.log('Socket.IO kyc_update received:', data);
+        loadKYCStatus();
+      });
+
+      SocketManager.on('preferences_update', function(data) {
+        console.log('Socket.IO preferences_update received:', data);
+        loadUserPreferences();
+      });
+
+      // Handle connection status
+      SocketManager.onConnectionChange(function(connected) {
+        const statusEl = document.querySelector('.security-badge span');
+        if (statusEl) {
+          if (connected) {
+            statusEl.textContent = '🟢 Real-time connected';
+            statusEl.style.color = 'var(--success)';
+          } else {
+            statusEl.textContent = '🔴 Real-time disconnected';
+            statusEl.style.color = 'var(--error)';
+          }
+        }
+      });
     }
 
     // =============================================
@@ -10438,6 +10304,11 @@
 
         // KYC Submit button - opens the verification modal
         document.getElementById('submit-kyc-btn')?.addEventListener('click', function() {
+          openKycVerificationModal();
+        });
+
+        // Resubmit button
+        document.getElementById('resubmit-kyc-btn')?.addEventListener('click', function() {
           openKycVerificationModal();
         });
 
