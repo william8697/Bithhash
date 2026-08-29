@@ -2965,10 +2965,17 @@
       cursor: pointer;
       transition: var(--transition);
       background: var(--bg-base);
+      position: relative;
     }
 
     .document-upload:hover {
       border-color: var(--accent);
+      background: var(--bg-hover);
+    }
+
+    .document-upload.dragover {
+      border-color: var(--accent);
+      background: rgba(247, 166, 0, 0.05);
     }
 
     .document-upload i {
@@ -2986,6 +2993,16 @@
     .document-upload small {
       color: var(--text-muted);
       font-size: 0.7rem;
+    }
+
+    .document-upload.disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .document-upload.disabled:hover {
+      border-color: var(--border-default);
+      background: var(--bg-base);
     }
 
     /* ============================================= */
@@ -4328,7 +4345,10 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="disable-verify-back" data-i18n="common.back">Back</button>
-          <!-- REMOVED: Disable confirm button - auto-verification on 6 digits -->
+          <!-- ADDED: Missing Disable Confirm Button -->
+          <button class="btn btn-danger" id="disable-confirm-btn" disabled>
+            <i class="fas fa-trash"></i> Disable Authenticator
+          </button>
         </div>
       </div>
     </div>
@@ -4448,7 +4468,7 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="recovery-verify-back" data-i18n="common.back">Back</button>
-          <!-- REMOVED: Verify button - auto-verification on 6 digits -->
+          <button class="btn btn-primary" id="recovery-verify-btn" disabled data-i18n="authenticator.recovery.verify">Verify</button>
         </div>
       </div>
 
@@ -5715,8 +5735,7 @@
         }
 
         if (code && code.length === 6) {
-          // Populate cells
-          const digits = code.split('');
+          // Populate cells          const digits = code.split('');
           this.cells.forEach((cell, i) => {
             cell.value = digits[i] || '';
             cell.classList.add('filled');
@@ -7959,7 +7978,7 @@
     }
 
     // =============================================
-    // AUTHENTICATOR OTP CONTROLLER
+    // AUTHENTICATOR OTP CONTROLLER - FIXED AUTO-VERIFICATION
     // =============================================
     let authVerifyOTPController = null;
 
@@ -7973,25 +7992,47 @@
         statusContainerId: 'auth-otp-status',
         errorTextId: 'auth-otp-error-text',
         onComplete: function(code) {
+          // FIXED: Call verify with proper validation
           verifyAuthenticatorOTP(code);
         },
-        onPaste: function(text) {
-          // Custom paste handling if needed
-        },
         onError: function(message) {
-          // Custom error handling if needed
+          console.error('OTP Error:', message);
+          showNotification('error', 'Verification Error', message || 'Please try again.');
         },
         autoVerifyDelay: 300
       });
     }
 
+    // =============================================
+    // FIXED: verifyAuthenticatorOTP - Proper error handling and state management
+    // =============================================
     async function verifyAuthenticatorOTP(code) {
-      if (authVerifyOTPController.isSubmittingState()) return;
+      // Check if already submitting
+      if (authVerifyOTPController && authVerifyOTPController.isSubmittingState()) {
+        console.log('Already submitting, ignoring duplicate call');
+        return;
+      }
 
-      authVerifyOTPController.setSubmitting(true);
-      authVerifyOTPController.setLoading('Verifying...');
+      // Validate enrollment ID
+      if (!authEnrollmentId) {
+        console.error('Missing enrollment ID');
+        if (authVerifyOTPController) {
+          authVerifyOTPController.setError('Setup session expired. Please restart the process.');
+          authVerifyOTPController.setSubmitting(false);
+        }
+        showNotification('error', 'Verification Error', 'Setup session expired. Please restart the process.');
+        return;
+      }
+
+      // Show loading state
+      if (authVerifyOTPController) {
+        authVerifyOTPController.setSubmitting(true);
+        authVerifyOTPController.setLoading('Verifying...');
+      }
 
       try {
+        console.log('Verifying OTP for enrollment:', authEnrollmentId);
+
         const data = await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/verify`, {
           method: 'POST',
           body: JSON.stringify({
@@ -8000,9 +8041,12 @@
           })
         });
 
-        // RELOAD from backend - DON'T generate state locally
+        console.log('Verification response:', data);
+
+        // RELOAD from backend
         await loadTwoFactorStatus();
 
+        // Update recovery codes display
         const container = document.getElementById('auth-recovery-codes');
         container.innerHTML = '';
         authenticatorState.recoveryCodes = data.recoveryCodes || [];
@@ -8011,34 +8055,47 @@
           authenticatorState.recoveryCodes.forEach(code => {
             const div = document.createElement('div');
             div.className = 'recovery-code-item';
-            div.textContent = code;
+            div.textCode = code;
             container.appendChild(div);
           });
+        } else {
+          container.innerHTML = '<div style="text-align: center; padding: 10px; color: var(--text-muted);">No recovery codes available</div>';
         }
 
         setAuthenticatorStep(4);
 
+        // Enable finish button only when checkbox is checked
         document.getElementById('auth-confirm-saved').addEventListener('change', function() {
           document.getElementById('auth-step4-finish').disabled = !this.checked;
         });
 
         showNotification('success', 'Authenticator Enabled', 'Two-factor authentication has been enabled successfully.');
 
-        authVerifyOTPController.setSuccess('Verification successful!');
+        if (authVerifyOTPController) {
+          authVerifyOTPController.setSuccess('Verification successful!');
+        }
 
       } catch (error) {
         console.error('Error verifying OTP:', error);
-        const userMessage = normalizeApiError(error, 'authenticator_verify');
+        const userMessage = normalizeApiError(error, 'authenticator_verify') || 'Invalid verification code. Please try again.';
 
-        authVerifyOTPController.setError(userMessage || 'Invalid verification code. Please try again.');
+        if (authVerifyOTPController) {
+          authVerifyOTPController.setError(userMessage);
+          // Clear fields after error so user can retry
+          setTimeout(() => {
+            authVerifyOTPController.clear();
+            authVerifyOTPController.focusFirstEmpty();
+          }, 800);
+        }
 
-        // Clear fields after error
-        setTimeout(() => {
-          authVerifyOTPController.clear();
-        }, 800);
+        showNotification('error', 'Verification Failed', userMessage);
 
       } finally {
-        authVerifyOTPController.setSubmitting(false);
+        // FIXED: Always reset submitting state
+        if (authVerifyOTPController) {
+          authVerifyOTPController.setSubmitting(false);
+          authVerifyOTPController.setIdle();
+        }
       }
     }
 
@@ -8184,7 +8241,7 @@
           statusContainerId: 'disable-otp-status',
           errorTextId: 'disable-otp-error-text',
           onComplete: function(code) {
-            // Check if the confirm button exists before accessing its disabled property
+            // FIXED: Check if the confirm button exists before accessing its disabled property
             const confirmBtn = document.getElementById('disable-confirm-btn');
             if (confirmBtn && !confirmBtn.disabled) {
               verifyDisableCode();
@@ -8203,7 +8260,7 @@
           statusContainerId: 'disable-auth-status',
           errorTextId: 'disable-auth-error-text',
           onComplete: function(code) {
-            // Check if the confirm button exists before accessing its disabled property
+            // FIXED: Check if the confirm button exists before accessing its disabled property
             const confirmBtn = document.getElementById('disable-confirm-btn');
             if (confirmBtn && !confirmBtn.disabled) {
               verifyDisableCode();
@@ -8238,7 +8295,7 @@
         btn.classList.add('btn-outline');
       });
 
-      // Safely access the confirm button
+      // FIXED: Safely access the confirm button
       const confirmBtn = document.getElementById('disable-confirm-btn');
       if (confirmBtn) {
         confirmBtn.disabled = true;
@@ -8328,13 +8385,18 @@
       disableModalState.timer = setInterval(updateTimer, 1000);
     }
 
+    // =============================================
+    // FIXED: verifyDisableCode - With proper button handling
+    // =============================================
     async function verifyDisableCode() {
       if (disableModalState.isVerifying) return;
       disableModalState.isVerifying = true;
 
       const btn = document.getElementById('disable-confirm-btn');
       if (!btn) {
+        console.error('Disable confirm button not found');
         disableModalState.isVerifying = false;
+        showNotification('error', 'Error', 'Could not find confirm button. Please refresh the page.');
         return;
       }
 
@@ -8356,7 +8418,6 @@
           }
 
           body = {
-            method: 'otp',
             otp: disableOTPController.getCode(),
             challengeId: disableModalState.otpId
           };
@@ -8373,7 +8434,6 @@
           }
 
           body = {
-            method: 'authenticator',
             code: disableAuthController.getCode()
           };
         }
@@ -8399,6 +8459,7 @@
             disableOTPController.setError(userMessage);
             setTimeout(() => {
               disableOTPController.clear();
+              disableOTPController.focusFirstEmpty();
             }, 800);
           }
         } else {
@@ -8406,9 +8467,13 @@
             disableAuthController.setError(userMessage);
             setTimeout(() => {
               disableAuthController.clear();
+              disableAuthController.focusFirstEmpty();
             }, 800);
           }
         }
+
+        showNotification('error', 'Disable Failed', userMessage);
+
       } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
@@ -8431,7 +8496,7 @@
         disableModalState.method = 'otp';
         document.getElementById('disable-otp-section').classList.add('active');
         document.getElementById('disable-auth-section').classList.remove('active');
-        // Safely access the confirm button
+        // FIXED: Safely access the confirm button
         const confirmBtn = document.getElementById('disable-confirm-btn');
         if (confirmBtn) {
           confirmBtn.disabled = true;
@@ -8461,7 +8526,7 @@
         disableModalState.method = 'authenticator';
         document.getElementById('disable-auth-section').classList.add('active');
         document.getElementById('disable-otp-section').classList.remove('active');
-        // Safely access the confirm button
+        // FIXED: Safely access the confirm button
         const confirmBtn = document.getElementById('disable-confirm-btn');
         if (confirmBtn) {
           confirmBtn.disabled = true;
@@ -8518,7 +8583,7 @@
               disableOTPController.focusFirstEmpty();
             }, 100);
           }
-          // Safely access the confirm button
+          // FIXED: Safely access the confirm button
           const confirmBtn = document.getElementById('disable-confirm-btn');
           if (confirmBtn) {
             confirmBtn.disabled = true;
@@ -8559,7 +8624,7 @@
           statusContainerId: 'recovery-otp-status',
           errorTextId: 'recovery-otp-error-text',
           onComplete: function(code) {
-            // Check if the verify button exists before accessing its disabled property
+            // FIXED: Check if the verify button exists before accessing its disabled property
             const verifyBtn = document.getElementById('recovery-verify-btn');
             if (verifyBtn && !verifyBtn.disabled) {
               verifyRecoveryCode();
@@ -8577,7 +8642,7 @@
           statusContainerId: 'recovery-auth-status',
           errorTextId: 'recovery-auth-error-text',
           onComplete: function(code) {
-            // Check if the verify button exists before accessing its disabled property
+            // FIXED: Check if the verify button exists before accessing its disabled property
             const verifyBtn = document.getElementById('recovery-verify-btn');
             if (verifyBtn && !verifyBtn.disabled) {
               verifyRecoveryCode();
@@ -8613,7 +8678,7 @@
         btn.classList.add('btn-outline');
       });
 
-      // Safely access buttons
+      // FIXED: Safely access buttons
       const verifyBtn = document.getElementById('recovery-verify-btn');
       if (verifyBtn) {
         verifyBtn.disabled = true;
@@ -8707,6 +8772,9 @@
       recoveryModalState.timer = setInterval(updateTimer, 1000);
     }
 
+    // =============================================
+    // FIXED: verifyRecoveryCode - Proper error handling
+    // =============================================
     async function verifyRecoveryCode() {
       if (recoveryModalState.isSubmitting) return;
       recoveryModalState.isSubmitting = true;
@@ -8735,7 +8803,6 @@
           }
 
           body = {
-            method: 'otp',
             otp: recoveryOTPController.getCode(),
             challengeId: recoveryModalState.challengeId
           };
@@ -8752,7 +8819,6 @@
           }
 
           body = {
-            method: 'authenticator',
             code: recoveryAuthController.getCode()
           };
         }
@@ -8793,6 +8859,7 @@
             recoveryOTPController.setError(userMessage);
             setTimeout(() => {
               recoveryOTPController.clear();
+              recoveryOTPController.focusFirstEmpty();
             }, 800);
           }
         } else {
@@ -8800,9 +8867,13 @@
             recoveryAuthController.setError(userMessage);
             setTimeout(() => {
               recoveryAuthController.clear();
+              recoveryAuthController.focusFirstEmpty();
             }, 800);
           }
         }
+
+        showNotification('error', 'Verification Failed', userMessage);
+
       } finally {
         btn.disabled = false;
         btn.innerHTML = 'Verify';
@@ -8825,7 +8896,7 @@
         recoveryModalState.method = 'otp';
         document.getElementById('recovery-otp-section').classList.add('active');
         document.getElementById('recovery-auth-section').classList.remove('active');
-        // Safely access the verify button
+        // FIXED: Safely access the verify button
         const verifyBtn = document.getElementById('recovery-verify-btn');
         if (verifyBtn) {
           verifyBtn.disabled = true;
@@ -8855,7 +8926,7 @@
         recoveryModalState.method = 'authenticator';
         document.getElementById('recovery-auth-section').classList.add('active');
         document.getElementById('recovery-otp-section').classList.remove('active');
-        // Safely access the verify button
+        // FIXED: Safely access the verify button
         const verifyBtn = document.getElementById('recovery-verify-btn');
         if (verifyBtn) {
           verifyBtn.disabled = true;
@@ -8912,7 +8983,7 @@
               recoveryOTPController.focusFirstEmpty();
             }, 100);
           }
-          // Safely access the verify button
+          // FIXED: Safely access the verify button
           const verifyBtn = document.getElementById('recovery-verify-btn');
           if (verifyBtn) {
             verifyBtn.disabled = true;
@@ -10057,26 +10128,427 @@
     }
 
     // =============================================
-    // KYC FUNCTIONS (preserved from original)
+    // KYC FUNCTIONS - FIXED UPLOAD
+    // =============================================
+
+    // =============================================
+    // FIXED: KYC Document Upload Event Listeners
     // =============================================
     function initKYCDocumentUpload() {
-      // Placeholder for KYC document upload
+      // Document front upload
+      const frontUpload = document.getElementById('document-front-upload');
+      const frontFile = document.getElementById('document-front-file');
+      if (frontUpload && frontFile) {
+        frontUpload.addEventListener('click', function(e) {
+          e.preventDefault();
+          // Check if disabled
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          frontFile.click();
+        });
+
+        frontFile.addEventListener('change', function(e) {
+          if (this.files && this.files[0]) {
+            handleDocumentUpload(e, 'front');
+          }
+        });
+
+        // Drag and drop support
+        frontUpload.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          if (!this.classList.contains('disabled')) {
+            this.classList.add('dragover');
+          }
+        });
+
+        frontUpload.addEventListener('dragleave', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+        });
+
+        frontUpload.addEventListener('drop', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          const files = e.dataTransfer.files;
+          if (files && files.length > 0) {
+            frontFile.files = files;
+            const event = new Event('change');
+            frontFile.dispatchEvent(event);
+          }
+        });
+      }
+
+      // Document back upload
+      const backUpload = document.getElementById('document-back-upload');
+      const backFile = document.getElementById('document-back-file');
+      if (backUpload && backFile) {
+        backUpload.addEventListener('click', function(e) {
+          e.preventDefault();
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          backFile.click();
+        });
+
+        backFile.addEventListener('change', function(e) {
+          if (this.files && this.files[0]) {
+            handleDocumentUpload(e, 'back');
+          }
+        });
+
+        backUpload.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          if (!this.classList.contains('disabled')) {
+            this.classList.add('dragover');
+          }
+        });
+
+        backUpload.addEventListener('dragleave', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+        });
+
+        backUpload.addEventListener('drop', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          const files = e.dataTransfer.files;
+          if (files && files.length > 0) {
+            backFile.files = files;
+            const event = new Event('change');
+            backFile.dispatchEvent(event);
+          }
+        });
+      }
+
+      // Address document upload
+      const addressUpload = document.getElementById('address-document-upload');
+      const addressFile = document.getElementById('address-document-file');
+      if (addressUpload && addressFile) {
+        addressUpload.addEventListener('click', function(e) {
+          e.preventDefault();
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          addressFile.click();
+        });
+
+        addressFile.addEventListener('change', function(e) {
+          if (this.files && this.files[0]) {
+            handleAddressDocumentUpload(e);
+          }
+        });
+
+        addressUpload.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          if (!this.classList.contains('disabled')) {
+            this.classList.add('dragover');
+          }
+        });
+
+        addressUpload.addEventListener('dragleave', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+        });
+
+        addressUpload.addEventListener('drop', function(e) {
+          e.preventDefault();
+          this.classList.remove('dragover');
+          if (this.classList.contains('disabled')) {
+            showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+            return;
+          }
+          const files = e.dataTransfer.files;
+          if (files && files.length > 0) {
+            addressFile.files = files;
+            const event = new Event('change');
+            addressFile.dispatchEvent(event);
+          }
+        });
+      }
+    }
+
+    // =============================================
+    // FIXED: Handle Document Upload
+    // =============================================
+    function handleDocumentUpload(e, side) {
+      const fileInput = e.target;
+      const file = fileInput.files[0];
+
+      if (!file) {
+        showNotification('warning', 'No File', 'Please select a file to upload.');
+        return;
+      }
+
+      // Validate file size (max 5MB)
+      if (file.size > 5 * 1024 * 1024) {
+        showNotification('error', 'File Too Large', 'File size must be less than 5MB.');
+        fileInput.value = '';
+        return;
+      }
+
+      // Validate file type
+      const validTypes = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+      if (!validTypes.includes(file.type)) {
+        showNotification('error', 'Invalid Format', 'Please upload JPG, PNG, or PDF files only.');
+        fileInput.value = '';
+        return;
+      }
+
+      // Show preview
+      const previewContainer = document.getElementById(`document-${side}-preview`);
+      const previewImage = document.getElementById(`document-${side}-preview-image`);
+
+      if (previewContainer && previewImage && file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          previewImage.src = e.target.result;
+          previewContainer.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+      } else if (previewContainer) {
+        // For PDF or other files, show file name
+        previewContainer.innerHTML = `
+                    <div style="padding: 10px; background: var(--bg-hover); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
+                        <i class="fas fa-file-pdf" style="font-size: 1.5rem; color: var(--error);"></i>
+                        <div>
+                            <div style="font-weight: 500;">${file.name}</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">${(file.size / 1024).toFixed(0)} KB</div>
+                        </div>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="removeDocument('${side}')" style="margin-left: auto;">Remove</button>
+                    </div>
+                `;
+        previewContainer.style.display = 'block';
+      }
+
+      showNotification('success', 'File Uploaded', `${file.name} uploaded successfully.`);
+    }
+
+    // =============================================
+    // FIXED: Handle Address Document Upload
+    // =============================================
+    function handleAddressDocumentUpload(e) {
+      const fileInput = e.target;
+      const file = fileInput.files[0];
+
+      if (!file) {
+        showNotification('warning', 'No File', 'Please select a file to upload.');
+        return;
+      }
+
+      if (file.size > 5 * 1024 * 1024) {
+        showNotification('error', 'File Too Large', 'File size must be less than 5MB.');
+        fileInput.value = '';
+        return;
+      }
+
+      const validTypes = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
+      if (!validTypes.includes(file.type)) {
+        showNotification('error', 'Invalid Format', 'Please upload JPG, PNG, or PDF files only.');
+        fileInput.value = '';
+        return;
+      }
+
+      const previewContainer = document.getElementById('address-document-preview');
+      const previewImage = document.getElementById('address-document-preview-image');
+
+      if (previewContainer && previewImage && file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          previewImage.src = e.target.result;
+          previewContainer.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+      } else if (previewContainer) {
+        previewContainer.innerHTML = `
+                    <div style="padding: 10px; background: var(--bg-hover); border-radius: 8px; display: flex; align-items: center; gap: 12px;">
+                        <i class="fas fa-file-pdf" style="font-size: 1.5rem; color: var(--error);"></i>
+                        <div>
+                            <div style="font-weight: 500;">${file.name}</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">${(file.size / 1024).toFixed(0)} KB</div>
+                        </div>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="removeAddressDocument()" style="margin-left: auto;">Remove</button>
+                    </div>
+                `;
+        previewContainer.style.display = 'block';
+      }
+
+      showNotification('success', 'File Uploaded', `${file.name} uploaded successfully.`);
+    }
+
+    // =============================================
+    // FIXED: Remove Document
+    // =============================================
+    function removeDocument(side) {
+      const fileInput = document.getElementById(`document-${side}-file`);
+      const previewContainer = document.getElementById(`document-${side}-preview`);
+      const previewImage = document.getElementById(`document-${side}-preview-image`);
+
+      if (fileInput) fileInput.value = '';
+      if (previewContainer) previewContainer.style.display = 'none';
+      if (previewImage) previewImage.src = '';
+      showNotification('info', 'File Removed', 'File removed successfully.');
+    }
+
+    function removeAddressDocument() {
+      const fileInput = document.getElementById('address-document-file');
+      const previewContainer = document.getElementById('address-document-preview');
+      const previewImage = document.getElementById('address-document-preview-image');
+
+      if (fileInput) fileInput.value = '';
+      if (previewContainer) previewContainer.style.display = 'none';
+      if (previewImage) previewImage.src = '';
+      showNotification('info', 'File Removed', 'File removed successfully.');
+    }
+
+    // =============================================
+    // FIXED: Save Document to Backend
+    // =============================================
+    async function saveDocument() {
+      const documentType = document.getElementById('document-type').value;
+      const documentNumber = document.getElementById('document-number').value;
+      const documentExpiry = document.getElementById('document-expiry').value;
+      const frontFile = document.getElementById('document-front-file').files[0];
+      const backFile = document.getElementById('document-back-file').files[0];
+
+      if (!documentType) {
+        showNotification('warning', 'Missing Field', 'Please select a document type.');
+        return;
+      }
+
+      if (!documentNumber) {
+        showNotification('warning', 'Missing Field', 'Please enter the document number.');
+        return;
+      }
+
+      if (!documentExpiry) {
+        showNotification('warning', 'Missing Field', 'Please select the document expiry date.');
+        return;
+      }
+
+      if (!frontFile) {
+        showNotification('warning', 'Missing File', 'Please upload the front of your document.');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('documentType', documentType);
+      formData.append('documentNumber', documentNumber);
+      formData.append('documentExpiry', documentExpiry);
+      formData.append('front', frontFile);
+      if (backFile) {
+        formData.append('back', backFile);
+      }
+
+      const btn = document.getElementById('save-document-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Uploading...';
+
+      try {
+        const token = getAuthToken();
+        const response = await fetch(`${API_BASE_URL}/api/users/kyc/identity`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || 'Failed to upload identity document');
+        }
+
+        showNotification('success', 'Document Saved', 'Identity documents uploaded successfully.');
+        await loadKYCStatus();
+
+        // Reset upload area
+        document.getElementById('document-front-upload').style.display = 'block';
+        document.getElementById('document-back-upload').style.display = 'block';
+
+      } catch (error) {
+        console.error('Error saving document:', error);
+        showNotification('error', 'Upload Failed', error.message || 'Failed to upload documents.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Save Changes';
+      }
+    }
+
+    // =============================================
+    // FIXED: Save Address Document
+    // =============================================
+    async function saveAddressDocument() {
+      const documentType = document.getElementById('address-document-type').value;
+      const documentDate = document.getElementById('address-document-date').value;
+      const file = document.getElementById('address-document-file').files[0];
+
+      if (!documentType) {
+        showNotification('warning', 'Missing Field', 'Please select a document type.');
+        return;
+      }
+
+      if (!documentDate) {
+        showNotification('warning', 'Missing Field', 'Please select the document issue date.');
+        return;
+      }
+
+      if (!file) {
+        showNotification('warning', 'Missing File', 'Please upload your address proof.');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('documentType', documentType);
+      formData.append('documentDate', documentDate);
+      formData.append('document', file);
+
+      const btn = document.getElementById('save-address-document-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Uploading...';
+
+      try {
+        const token = getAuthToken();
+        const response = await fetch(`${API_BASE_URL}/api/users/kyc/address`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          },
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || 'Failed to upload address document');
+        }
+
+        showNotification('success', 'Document Saved', 'Address document uploaded successfully.');
+        await loadKYCStatus();
+
+      } catch (error) {
+        console.error('Error saving address document:', error);
+        showNotification('error', 'Upload Failed', error.message || 'Failed to upload address document.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Save Changes';
+      }
     }
 
     function initFacialVerification() {
       // Placeholder for facial verification
-    }
-
-    function handleDocumentUpload(e, side) {
-      showNotification('info', 'KYC Upload', 'KYC document upload is not fully implemented in this version.');
-    }
-
-    function removeDocument(side) {
-      // Placeholder
-    }
-
-    function removeAddressDocument() {
-      // Placeholder
     }
 
     // =============================================
@@ -10561,11 +11033,9 @@
         const el = document.getElementById(id);
         if (el) {
           if (disabled) {
-            el.style.opacity = '0.6';
-            el.style.pointerEvents = 'none';
+            el.classList.add('disabled');
           } else {
-            el.style.opacity = '1';
-            el.style.pointerEvents = 'auto';
+            el.classList.remove('disabled');
           }
         }
       });
@@ -10642,6 +11112,7 @@
           await loadAPIKeys();
           await loadKYCStatus();
 
+          // FIXED: Initialize KYC document upload with event listeners
           initKYCDocumentUpload();
           initFacialVerification();
 
@@ -10758,6 +11229,35 @@
               }
             }
           }
+        });
+
+        // Save Document button
+        document.getElementById('save-document-btn')?.addEventListener('click', saveDocument);
+
+        // Cancel Document button
+        document.getElementById('cancel-document-btn')?.addEventListener('click', function() {
+          document.getElementById('document-type').value = '';
+          document.getElementById('document-number').value = '';
+          document.getElementById('document-expiry').value = '';
+          removeDocument('front');
+          removeDocument('back');
+          showNotification('info', 'Cancelled', 'Document upload cancelled.');
+        });
+
+        // Save Address Document button
+        document.getElementById('save-address-document-btn')?.addEventListener('click', saveAddressDocument);
+
+        // Cancel Address Document button
+        document.getElementById('cancel-address-document-btn')?.addEventListener('click', function() {
+          document.getElementById('address-document-type').value = '';
+          document.getElementById('address-document-date').value = '';
+          removeAddressDocument();
+          showNotification('info', 'Cancelled', 'Address document upload cancelled.');
+        });
+
+        // Resubmit KYC button
+        document.getElementById('resubmit-kyc-btn')?.addEventListener('click', function() {
+          openKycVerificationModal();
         });
 
       }, 1000);
