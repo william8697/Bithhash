@@ -4116,14 +4116,6 @@
 
       <!-- Status message area for final result -->
       <div id="kyc-verification-result" style="display: none; margin-top: 16px; padding: 12px 16px; border-radius: 8px; text-align: center; font-weight: 500;"></div>
-
-      <!-- Verify button -->
-      <div class="two-step-buttons">
-        <button class="btn btn-outline" id="kyc-verify-cancel" type="button">Cancel</button>
-        <button class="btn btn-primary" id="kyc-verify-submit" type="button" disabled>
-          <i class="fas fa-check"></i> Verify & Submit
-        </button>
-      </div>
     </div>
   </div>
 
@@ -4949,7 +4941,7 @@
       </div>
 
       <!-- ============================================= -->
-      <!-- KYC VERIFICATION SECTION - FIXED -->
+      <!-- KYC VERIFICATION SECTION - FIXED: Users who haven't done KYC can now click -->
       <!-- ============================================= -->
       <div class="settings-section" id="kyc-section">
         <h2 class="settings-section-title">
@@ -4993,7 +4985,7 @@
             </div>
             <div class="form-group">
               <label class="form-label" data-i18n="kyc.documentNumber">Document Number</label>
-              <input type="text" class="form-control" id="document-number">
+              <input type="text" class="form-control" id="document-number" placeholder="Enter document number">
             </div>
           </div>
 
@@ -5339,8 +5331,8 @@
         this.errorTextId = config.errorTextId || null;
         this.onChange = config.onChange || null;
         this.onComplete = config.onComplete || null;
-        this.autoVerifyDelay = config.autoVerifyDelay || 0;
-        this.autoVerify = config.autoVerify !== undefined ? config.autoVerify : true;
+        this.autoVerifyDelay = config.autoVerifyDelay || 300;
+        this.autoVerifyEnabled = config.autoVerifyEnabled !== undefined ? config.autoVerifyEnabled : true;
 
         this.isSubmitting = false;
         this.isLoading = false;
@@ -5409,7 +5401,7 @@
           this.onChange(state);
         }
 
-        if (this.autoVerify && state.complete && !this.isSubmitting && !this.isLoading && this.onComplete) {
+        if (this.autoVerifyEnabled && state.complete && !this.isSubmitting && !this.isLoading) {
           this._scheduleAutoVerify();
         }
       }
@@ -5527,8 +5519,8 @@
 
         if (e.key === 'Enter') {
           e.preventDefault();
-          if (this.isComplete() && !this.isSubmitting && this.onComplete) {
-            this.onComplete(this.getCode());
+          if (this.isComplete() && !this.isSubmitting) {
+            this.onComplete && this.onComplete(this.getCode());
           }
           return;
         }
@@ -5840,7 +5832,7 @@
       _scheduleAutoVerify() {
         if (this._verifyTimeout) clearTimeout(this._verifyTimeout);
 
-        if (this.isComplete() && !this.isSubmitting && !this.isLoading && this.onComplete) {
+        if (this.autoVerifyEnabled && this.isComplete() && !this.isSubmitting && !this.isLoading && this.onComplete) {
           this._verifyTimeout = setTimeout(() => {
             if (this.isComplete() && !this.isSubmitting) {
               this.onComplete(this.getCode());
@@ -6111,7 +6103,7 @@
           "api.keyCreated": "API key created successfully",
           "api.keySaveImportant": "Save this key securely. It will not be shown again.",
           "otp.verifyTitle": "Verify KYC Submission",
-          "otp.verifyDescription": "For security, please verify your identity to finalize your KYC submission.",
+          "otp.verifyDescription": "We've sent a 6-digit verification code to your registered email address to finalize your KYC submission:",
           "otp.expiresIn": "Code expires in:",
           "otp.didntReceive": "Didn't receive the code?",
           "otp.resendIn": "Resend in",
@@ -7388,7 +7380,7 @@
           }
         },
         autoVerifyDelay: 300,
-        autoVerify: true
+        autoVerifyEnabled: true
       });
     }
 
@@ -7616,7 +7608,7 @@
             }
           },
           autoVerifyDelay: 300,
-          autoVerify: true
+          autoVerifyEnabled: true
         });
       }
 
@@ -7636,7 +7628,7 @@
             }
           },
           autoVerifyDelay: 300,
-          autoVerify: true
+          autoVerifyEnabled: true
         });
       }
     }
@@ -7925,7 +7917,7 @@
             }
           },
           autoVerifyDelay: 300,
-          autoVerify: true
+          autoVerifyEnabled: true
         });
       }
 
@@ -7945,7 +7937,7 @@
             }
           },
           autoVerifyDelay: 300,
-          autoVerify: true
+          autoVerifyEnabled: true
         });
       }
     }
@@ -9277,6 +9269,118 @@
     let uploadedBackFile = null;
     let uploadedAddressFile = null;
 
+    // KYC State - Fixed architecture
+    let kycState = {
+      applicationStatus: 'draft',
+      identity: { status: 'incomplete' },
+      address: { status: 'incomplete' },
+      facial: { status: 'incomplete' }
+    };
+
+    function isApplicationLocked() {
+      return kycState.applicationStatus === 'pending' || kycState.applicationStatus === 'verified';
+    }
+
+    function isFacialLocked() {
+      return isApplicationLocked() || kycState.facial.status === 'verified' || kycState.facial.status === 'pending';
+    }
+
+    function updateKYCBadge(elementId, status) {
+      const badge = document.getElementById(elementId);
+      if (!badge) return;
+
+      const statusMap = {
+        'verified': { class: 'verified', icon: 'fa-check-circle', label: 'Verified' },
+        'pending': { class: 'pending', icon: 'fa-clock', label: 'Pending' },
+        'rejected': { class: 'rejected', icon: 'fa-times-circle', label: 'Rejected' },
+        'incomplete': { class: 'unverified', icon: 'fa-times-circle', label: 'Unverified' },
+        'saved': { class: 'pending', icon: 'fa-clock', label: 'Saved' }
+      };
+
+      const s = statusMap[status] || statusMap['incomplete'];
+      badge.className = `verification-badge ${s.class}`;
+      badge.innerHTML = `<i class="fas ${s.icon}"></i> <span>${s.label}</span>`;
+    }
+
+    function updateSubmitKYCButton() {
+      const btn = document.getElementById('submit-kyc-btn');
+      if (!btn) return;
+
+      const identityComplete = kycState.identity.status === 'verified' || kycState.identity.status === 'saved';
+      const addressComplete = kycState.address.status === 'verified' || kycState.address.status === 'saved';
+      const facialComplete = kycState.facial.status === 'verified';
+
+      const allComplete = identityComplete && addressComplete && facialComplete;
+      const canSubmit = allComplete && kycState.applicationStatus === 'draft';
+
+      btn.disabled = !canSubmit || isApplicationLocked();
+
+      if (isApplicationLocked()) {
+        if (kycState.applicationStatus === 'pending') {
+          btn.textContent = 'Pending Review';
+        } else if (kycState.applicationStatus === 'verified') {
+          btn.textContent = 'Verified';
+        } else {
+          btn.textContent = 'Submit KYC Application';
+        }
+      } else if (!allComplete) {
+        btn.textContent = 'Complete All Steps First';
+        btn.disabled = true;
+      } else {
+        btn.textContent = 'Submit KYC Application';
+      }
+    }
+
+    function toggleKycFormDisabled(disabled) {
+      // Only disable if application is locked (pending or verified)
+      const shouldDisable = isApplicationLocked();
+
+      // Identity fields
+      const identityFields = ['document-type', 'document-number', 'document-expiry', 'document-front-file', 'document-back-file'];
+      identityFields.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = shouldDisable;
+      });
+
+      // Address fields
+      const addressFields = ['address-document-type', 'address-document-date', 'address-document-file'];
+      addressFields.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = shouldDisable;
+      });
+
+      // Facial button - only disable if application locked OR facial is verified/pending
+      const facialBtn = document.getElementById('start-facial-verification-btn');
+      if (facialBtn) {
+        facialBtn.disabled = shouldDisable || kycState.facial.status === 'verified' || kycState.facial.status === 'pending';
+        facialBtn.textContent = shouldDisable ? 'Locked' :
+          kycState.facial.status === 'verified' ? '✅ Verified' :
+          kycState.facial.status === 'pending' ? '⏳ Processing' :
+          '📷 Start Facial Verification';
+      }
+
+      // Upload containers
+      const uploads = ['document-front-upload', 'document-back-upload', 'address-document-upload'];
+      uploads.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          if (shouldDisable) el.classList.add('disabled');
+          else el.classList.remove('disabled');
+        }
+      });
+
+      // Action buttons
+      const actionButtons = [
+        'save-document-btn', 'save-address-document-btn',
+        'retake-photo-btn', 'submit-photo-btn',
+        'cancel-document-btn', 'cancel-address-document-btn'
+      ];
+      actionButtons.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = shouldDisable;
+      });
+    }
+
     function initKYCDocumentUpload() {
       // Front upload - label/input association handles click automatically
       const frontFile = document.getElementById('document-front-file');
@@ -9347,7 +9451,7 @@
         el.addEventListener('drop', function(e) {
           e.preventDefault();
           this.classList.remove('dragover');
-          if (this.classList.contains('disabled')) {
+          if (this.classList.contains('disabled') || isApplicationLocked()) {
             showNotification('warning', 'KYC Locked', 'KYC is already submitted or verified. You cannot modify documents.');
             return;
           }
@@ -9406,7 +9510,6 @@
         };
         reader.readAsDataURL(file);
       } else {
-        // Safe DOM creation for PDF files
         previewContainer.innerHTML = '';
         const div = document.createElement('div');
         div.style.cssText = 'padding: 10px; background: var(--bg-hover); border-radius: 8px; display: flex; align-items: center; gap: 12px;';
@@ -9518,421 +9621,146 @@
       showNotification('info', 'File Removed', 'File removed successfully.');
     }
 
-    // =============================================
-    // KYC STATE - Fixed architecture
-    // =============================================
-    let kycState = {
-      applicationStatus: 'draft',
-      identity: { status: 'unverified' },
-      address: { status: 'unverified' },
-      facial: { status: 'unverified' },
-      canSubmit: false,
-      loading: true,
-      error: null
-    };
-
-    function updateKycUI(backendData) {
-      // Update state from backend
-      if (backendData) {
-        kycState.applicationStatus = backendData.application?.status || backendData.status || 'draft';
-        kycState.identity.status = backendData.identity?.status || 'unverified';
-        kycState.address.status = backendData.address?.status || 'unverified';
-        kycState.facial.status = backendData.facial?.status || 'unverified';
-        kycState.canSubmit = backendData.canSubmit || false;
-        kycState.loading = false;
-        kycState.error = null;
-      }
-
-      // Update badges
-      const identityBadge = document.getElementById('identity-verification-badge');
-      const addressBadge = document.getElementById('address-verification-badge');
-      const facialBadge = document.getElementById('facial-verification-badge');
-
-      updateBadge(identityBadge, kycState.identity.status);
-      updateBadge(addressBadge, kycState.address.status);
-      updateBadge(facialBadge, kycState.facial.status);
-
-      // Update submit button
-      const submitBtn = document.getElementById('submit-kyc-btn');
-      const resubmitBtn = document.getElementById('resubmit-kyc-btn');
-
-      if (kycState.applicationStatus === 'pending') {
-        submitBtn.disabled = true;
-        submitBtn.textContent = I18N.t('kyc.status.pending');
-        if (resubmitBtn) resubmitBtn.style.display = 'none';
-      } else if (kycState.applicationStatus === 'verified') {
-        submitBtn.disabled = true;
-        submitBtn.textContent = I18N.t('kyc.status.verified');
-        if (resubmitBtn) resubmitBtn.style.display = 'none';
-      } else if (kycState.applicationStatus === 'rejected') {
-        submitBtn.disabled = false;
-        submitBtn.textContent = I18N.t('kyc.resubmit');
-        if (resubmitBtn) resubmitBtn.style.display = 'inline-flex';
-      } else {
-        // draft or ready
-        const allComplete = kycState.identity.status === 'verified' &&
-          kycState.address.status === 'verified' &&
-          kycState.facial.status === 'verified';
-
-        if (allComplete) {
-          submitBtn.disabled = false;
-          submitBtn.textContent = I18N.t('kyc.submitApplication');
-        } else {
-          submitBtn.disabled = true;
-          submitBtn.textContent = I18N.t('kyc.completeKyc');
-        }
-        if (resubmitBtn) resubmitBtn.style.display = 'none';
-      }
-
-      // Update form disabled state based on application status only
-      const isLocked = kycState.applicationStatus === 'pending' || kycState.applicationStatus === 'verified';
-      toggleKycFormDisabled(isLocked);
-
-      // Update banners
-      const banner = document.getElementById('kyc-status-banner');
-      const statusText = document.getElementById('kyc-status-text');
-
-      const statusMap = {
-        'draft': { class: '', text: 'Ready for submission' },
-        'pending': { class: 'pending', text: I18N.t('kyc.status.pending') },
-        'verified': { class: 'verified', text: I18N.t('kyc.status.verified') },
-        'rejected': { class: 'rejected', text: I18N.t('kyc.status.rejected') }
-      };
-
-      const statusInfo = statusMap[kycState.applicationStatus] || statusMap['draft'];
-      banner.className = `kyc-status-banner ${statusInfo.class}`;
-      statusText.textContent = statusInfo.text;
-
-      // Show/hide resubmission section
-      const resubmissionSection = document.getElementById('resubmission-section');
-      if (kycState.applicationStatus === 'rejected') {
-        resubmissionSection.style.display = 'block';
-      } else {
-        resubmissionSection.style.display = 'none';
-      }
-    }
-
-    function updateBadge(element, status) {
-      if (!element) return;
-
-      const statusMap = {
-        'verified': { class: 'verified', icon: 'fa-check-circle', label: I18N.t('kyc.status.verified') },
-        'pending': { class: 'pending', icon: 'fa-clock', label: I18N.t('kyc.status.pending') },
-        'rejected': { class: 'rejected', icon: 'fa-times-circle', label: I18N.t('kyc.status.rejected') },
-        'unverified': { class: 'unverified', icon: 'fa-times-circle', label: I18N.t('kyc.status.unverified') },
-        'incomplete': { class: 'unverified', icon: 'fa-times-circle', label: I18N.t('kyc.status.unverified') },
-        'saved': { class: 'unverified', icon: 'fa-times-circle', label: I18N.t('kyc.status.unverified') }
-      };
-
-      const info = statusMap[status] || statusMap['unverified'];
-      element.className = `verification-badge ${info.class}`;
-      element.innerHTML = `<i class="fas ${info.icon}"></i> <span>${info.label}</span>`;
-    }
-
-    function toggleKycFormDisabled(disabled) {
-      const elements = [
-        'document-type', 'document-number', 'document-expiry',
-        'document-front-file', 'document-back-file',
-        'address-document-type', 'address-document-date', 'address-document-file',
-        'start-facial-verification-btn'
-      ];
-
-      elements.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.disabled = disabled;
-      });
-
-      const uploads = ['document-front-upload', 'document-back-upload', 'address-document-upload'];
-      uploads.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-          if (disabled) el.classList.add('disabled');
-          else el.classList.remove('disabled');
-        }
-      });
-
-      const buttons = [
-        'save-document-btn', 'save-address-document-btn',
-        'retake-photo-btn', 'submit-photo-btn',
-        'cancel-document-btn', 'cancel-address-document-btn'
-      ];
-
-      buttons.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.disabled = disabled;
-      });
-    }
-
-    // =============================================
-    // KYC STATUS LOAD - Fixed to use separate states
-    // =============================================
-    async function loadKYCStatus() {
-      try {
-        const data = await apiCall(`${API_BASE_URL}/api/users/kyc/status`);
-
-        if (!data.data) {
-          throw new Error('KYC status missing from API response');
-        }
-
-        // Extract separate states from backend
-        // Backend should provide: identity.status, address.status, facial.status, application.status
-        const backendData = {
-          application: {
-            status: data.data.application?.status || data.data.status || 'draft'
-          },
-          identity: {
-            status: data.data.identity?.status || data.data.status || 'unverified'
-          },
-          address: {
-            status: data.data.address?.status || data.data.status || 'unverified'
-          },
-          facial: {
-            status: data.data.facial?.status || data.data.status || 'unverified'
-          },
-          canSubmit: data.data.canSubmit || false,
-          rejectionReason: data.data.rejectionReason || null
-        };
-
-        // Store rejection reason if present
-        if (backendData.rejectionReason) {
-          document.getElementById('rejection-reason').textContent = backendData.rejectionReason;
-        }
-
-        updateKycUI(backendData);
-
-      } catch (error) {
-        console.error('Error loading KYC status:', error);
-        kycState.loading = false;
-        kycState.error = error.message || I18N.t('kyc.status.loadError');
-        document.getElementById('kyc-status-text').textContent = I18N.t('kyc.status.loadError');
-        document.getElementById('kyc-status-banner').className = 'kyc-status-banner';
-        toggleKycFormDisabled(false);
-      }
-    }
-
-    // =============================================
-    // KYC OTP CONTROLLER - FIXED: No auto-verify
-    // =============================================
-    let kycOTPController = null;
-    let kycAuthOTPController = null;
-
-    function initKycOTPController() {
-      if (kycOTPController) return;
-
-      kycOTPController = new OTPController({
-        containerId: 'kyc-otp-component',
-        cellsSelector: '.otp-cell',
-        pasteButtonId: 'kyc-otp-paste-btn',
-        statusContainerId: 'kyc-otp-status',
-        errorTextId: 'kyc-otp-error-text',
-        onChange: function(state) {
-          const submitBtn = document.getElementById('kyc-verify-submit');
-          if (submitBtn) {
-            submitBtn.disabled = !state.complete || state.submitting;
-          }
-        },
-        onComplete: function(code) {
-          // Do NOT auto-verify - KYC OTP must be user-controlled
-          const submitBtn = document.getElementById('kyc-verify-submit');
-          if (submitBtn) {
-            submitBtn.disabled = false;
-          }
-        },
-        autoVerifyDelay: 0,
-        autoVerify: false
-      });
-    }
-
-    function initKycAuthOTPController() {
-      if (kycAuthOTPController) return;
-
-      kycAuthOTPController = new OTPController({
-        containerId: 'kyc-auth-otp-component',
-        cellsSelector: '.otp-cell',
-        pasteButtonId: 'kyc-auth-paste-btn',
-        statusContainerId: 'kyc-auth-status',
-        errorTextId: 'kyc-auth-error-text',
-        onChange: function(state) {
-          const submitBtn = document.getElementById('kyc-verify-submit');
-          if (submitBtn) {
-            submitBtn.disabled = !state.complete || state.submitting;
-          }
-        },
-        onComplete: function(code) {
-          // Do NOT auto-verify - KYC OTP must be user-controlled
-          const submitBtn = document.getElementById('kyc-verify-submit');
-          if (submitBtn) {
-            submitBtn.disabled = false;
-          }
-        },
-        autoVerifyDelay: 0,
-        autoVerify: false
-      });
-    }
-
-    // =============================================
-    // KYC VERIFICATION SUBMIT - User-triggered only
-    // =============================================
-    async function submitKycVerification() {
-      const method = kycSelectedMethod || 'email';
-      let code;
-
-      if (method === 'email' && kycOTPController) {
-        code = kycOTPController.getCode();
-        if (!kycOTPController.isComplete()) {
-          showNotification('warning', 'Incomplete Code', 'Please enter all 6 digits.');
-          return;
-        }
-        kycOTPController.setLoading('Verifying...');
-      } else if (method === 'authenticator' && kycAuthOTPController) {
-        code = kycAuthOTPController.getCode();
-        if (!kycAuthOTPController.isComplete()) {
-          showNotification('warning', 'Incomplete Code', 'Please enter all 6 digits.');
-          return;
-        }
-        kycAuthOTPController.setLoading('Verifying...');
-      } else {
-        showNotification('error', 'Error', 'No verification method selected or OTP controller not initialized.');
+    async function saveDocument() {
+      if (isApplicationLocked()) {
+        showNotification('warning', 'Locked', 'KYC is already submitted or verified. You cannot modify documents.');
         return;
       }
 
-      // Disable submit button
-      const submitBtn = document.getElementById('kyc-verify-submit');
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<span class="spinner"></span> Verifying...';
+      const documentType = document.getElementById('document-type').value;
+      const documentNumber = document.getElementById('document-number').value;
+      const documentExpiry = document.getElementById('document-expiry').value;
+
+      const frontFile = uploadedFrontFile;
+
+      if (!documentType) {
+        showNotification('warning', 'Missing Field', 'Please select a document type.');
+        return;
       }
+
+      if (!documentNumber) {
+        showNotification('warning', 'Missing Field', 'Please enter the document number.');
+        return;
+      }
+
+      if (!documentExpiry) {
+        showNotification('warning', 'Missing Field', 'Please select the document expiry date.');
+        return;
+      }
+
+      if (!frontFile) {
+        showNotification('warning', 'Missing File', 'Please upload the front of your document.');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('documentType', documentType);
+      formData.append('documentNumber', documentNumber);
+      formData.append('documentExpiry', documentExpiry);
+      formData.append('front', frontFile);
+      if (uploadedBackFile) formData.append('back', uploadedBackFile);
+
+      const btn = document.getElementById('save-document-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Uploading...';
 
       try {
         const token = getAuthToken();
-        if (!token) {
-          throw new Error('Authentication session is unavailable. Please log in again.');
-        }
-
-        let endpoint, body;
-
-        if (method === 'authenticator') {
-          endpoint = `${API_BASE_URL}/api/users/two-factor/authenticator/verify`;
-          body = JSON.stringify({ code, purpose: 'kyc_verification' });
-        } else {
-          const email = document.getElementById('email')?.value || '';
-          if (!email) {
-            throw new Error('Registered email is unavailable. Please refresh the page and try again.');
-          }
-          endpoint = `${API_BASE_URL}/api/users/kyc/submit`;
-          body = JSON.stringify({ otp: code, email });
-        }
-
-        const response = await fetch(endpoint, {
+        const response = await fetch(`${API_BASE_URL}/api/users/kyc/identity`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: body
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
         });
 
         const data = await response.json();
 
         if (!response.ok) {
-          throw new Error(data.message || 'Verification failed');
+          throw new Error(data.message || 'Failed to upload identity document');
         }
 
-        showNotification('success', 'Verification Successful', data.message || I18N.t('otp.submitSuccess'));
+        // Update only identity state, not global application
+        kycState.identity.status = 'saved';
+        updateKYCBadge('identity-verification-badge', 'saved');
+        updateSubmitKYCButton();
+        toggleKycFormDisabled(false);
 
-        // Close modal
-        document.getElementById('two-step-modal')?.classList.remove('active');
-        document.body.style.overflow = '';
+        showNotification('success', 'Document Saved', 'Identity documents uploaded successfully.');
 
-        // Reload KYC status
-        await loadKYCStatus();
-
-        // Reload security overview
-        await loadSecurityOverview();
+        document.getElementById('document-front-upload').style.display = 'block';
+        document.getElementById('document-back-upload').style.display = 'block';
 
       } catch (error) {
-        console.error('KYC verification error:', error);
-        const userMessage = error.message || I18N.t('otp.invalidCode');
-        showNotification('error', 'Verification Failed', userMessage);
-
-        if (method === 'email' && kycOTPController) {
-          kycOTPController.setError(userMessage);
-          setTimeout(() => kycOTPController.clear(), 800);
-        } else if (method === 'authenticator' && kycAuthOTPController) {
-          kycAuthOTPController.setError(userMessage);
-          setTimeout(() => kycAuthOTPController.clear(), 800);
-        }
-
-        // Re-enable submit button
-        if (submitBtn) {
-          submitBtn.disabled = false;
-          submitBtn.innerHTML = '<i class="fas fa-check"></i> Verify & Submit';
-        }
+        console.error('Error saving document:', error);
+        showNotification('error', 'Upload Failed', error.message || 'Failed to upload documents.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Save Changes';
       }
     }
 
-    // =============================================
-    // OPEN KYC VERIFICATION MODAL
-    // =============================================
-    async function openKycVerificationModal() {
-      const modal = document.getElementById('two-step-modal');
-      const email = document.getElementById('email')?.value || '';
-
-      document.getElementById('kyc-verification-result').style.display = 'none';
-      document.getElementById('otp-email-display').textContent = email || 'your registered email';
-
-      const has2FA = await checkUser2FAStatus();
-
-      const methodSelector = document.getElementById('kyc-2fa-method-selector');
-      const emailSection = document.getElementById('kyc-email-section');
-      const authSection = document.getElementById('kyc-auth-section');
-      const description = document.getElementById('kyc-verification-description');
-
-      if (has2FA) {
-        methodSelector.style.display = 'flex';
-        description.textContent = 'For security, please verify your identity using one of the methods below to finalize your KYC submission.';
-
-        kycSelectedMethod = 'email';
-        selectKycMethod('email');
-
-        document.getElementById('kyc-method-email').classList.add('active');
-        document.getElementById('kyc-method-auth').classList.remove('active');
-        emailSection.classList.add('active');
-        authSection.classList.remove('active');
-
-      } else {
-        methodSelector.style.display = 'none';
-        description.textContent = 'For security, we\'ve sent a 6-digit verification code to your registered email address to finalize your KYC submission:';
-        emailSection.classList.add('active');
-        authSection.classList.remove('active');
-        kycSelectedMethod = 'email';
+    async function saveAddressDocument() {
+      if (isApplicationLocked()) {
+        showNotification('warning', 'Locked', 'KYC is already submitted or verified. You cannot modify documents.');
+        return;
       }
 
-      initKycOTPController();
-      if (has2FA) initKycAuthOTPController();
+      const documentType = document.getElementById('address-document-type').value;
+      const documentDate = document.getElementById('address-document-date').value;
+      const file = uploadedAddressFile;
 
-      if (kycOTPController) kycOTPController.clear();
-      if (kycAuthOTPController) kycAuthOTPController.clear();
-
-      // Reset submit button
-      const submitBtn = document.getElementById('kyc-verify-submit');
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fas fa-check"></i> Verify & Submit';
+      if (!documentType) {
+        showNotification('warning', 'Missing Field', 'Please select a document type.');
+        return;
       }
 
-      startKycTimer();
+      if (!documentDate) {
+        showNotification('warning', 'Missing Field', 'Please select the document issue date.');
+        return;
+      }
 
-      modal.classList.add('active');
-      document.body.style.overflow = 'hidden';
+      if (!file) {
+        showNotification('warning', 'Missing File', 'Please upload your address proof.');
+        return;
+      }
 
-      setTimeout(() => {
-        if (kycSelectedMethod === 'email' && kycOTPController) {
-          kycOTPController.focusFirstEmpty();
-        } else if (kycSelectedMethod === 'authenticator' && kycAuthOTPController) {
-          kycAuthOTPController.focusFirstEmpty();
+      const formData = new FormData();
+      formData.append('documentType', documentType);
+      formData.append('documentDate', documentDate);
+      formData.append('document', file);
+
+      const btn = document.getElementById('save-address-document-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Uploading...';
+
+      try {
+        const token = getAuthToken();
+        const response = await fetch(`${API_BASE_URL}/api/users/kyc/address`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || 'Failed to upload address document');
         }
-      }, 300);
+
+        // Update only address state, not global application
+        kycState.address.status = 'saved';
+        updateKYCBadge('address-verification-badge', 'saved');
+        updateSubmitKYCButton();
+        toggleKycFormDisabled(false);
+
+        showNotification('success', 'Document Saved', 'Address document uploaded successfully.');
+
+      } catch (error) {
+        console.error('Error saving address document:', error);
+        showNotification('error', 'Upload Failed', error.message || 'Failed to upload address document.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Save Changes';
+      }
     }
 
     // =============================================
@@ -9976,13 +9804,287 @@
           if (firstInput) firstInput.focus();
         }, 100);
       }
+    }
 
-      // Reset submit button
-      const submitBtn = document.getElementById('kyc-verify-submit');
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fas fa-check"></i> Verify & Submit';
+    // =============================================
+    // KYC OTP CONTROLLER - Enhanced with 2FA support, NO auto-verify
+    // =============================================
+    let kycOTPController = null;
+    let kycAuthOTPController = null;
+
+    function initKycOTPController() {
+      if (kycOTPController) return;
+
+      kycOTPController = new OTPController({
+        containerId: 'kyc-otp-component',
+        cellsSelector: '.otp-cell',
+        pasteButtonId: 'kyc-otp-paste-btn',
+        statusContainerId: 'kyc-otp-status',
+        errorTextId: 'kyc-otp-error-text',
+        onChange: function(state) {
+          // Update verify button state if we had one
+          const verifyBtn = document.getElementById('kyc-email-verify-btn');
+          if (verifyBtn) {
+            verifyBtn.disabled = !state.complete || state.submitting || state.loading;
+          }
+        },
+        onComplete: function(code) {
+          // DO NOT auto-verify - user must click button
+          // Just update UI state
+          const verifyBtn = document.getElementById('kyc-email-verify-btn');
+          if (verifyBtn) {
+            verifyBtn.disabled = false;
+            verifyBtn.focus();
+          }
+        },
+        autoVerifyDelay: 300,
+        autoVerifyEnabled: false  // Explicitly disable auto-verify for KYC
+      });
+    }
+
+    function initKycAuthOTPController() {
+      if (kycAuthOTPController) return;
+
+      kycAuthOTPController = new OTPController({
+        containerId: 'kyc-auth-otp-component',
+        cellsSelector: '.otp-cell',
+        pasteButtonId: 'kyc-auth-paste-btn',
+        statusContainerId: 'kyc-auth-status',
+        errorTextId: 'kyc-auth-error-text',
+        onChange: function(state) {
+          const verifyBtn = document.getElementById('kyc-auth-verify-btn');
+          if (verifyBtn) {
+            verifyBtn.disabled = !state.complete || state.submitting || state.loading;
+          }
+        },
+        onComplete: function(code) {
+          const verifyBtn = document.getElementById('kyc-auth-verify-btn');
+          if (verifyBtn) {
+            verifyBtn.disabled = false;
+            verifyBtn.focus();
+          }
+        },
+        autoVerifyDelay: 300,
+        autoVerifyEnabled: false  // Explicitly disable auto-verify for KYC
+      });
+    }
+
+    // Add verify buttons dynamically for KYC OTP
+    function addKycVerifyButtons() {
+      const emailSection = document.getElementById('kyc-email-section');
+      if (emailSection && !document.getElementById('kyc-email-verify-btn')) {
+        const verifyBtn = document.createElement('button');
+        verifyBtn.id = 'kyc-email-verify-btn';
+        verifyBtn.className = 'btn btn-primary';
+        verifyBtn.textContent = 'Verify & Submit';
+        verifyBtn.disabled = true;
+        verifyBtn.style.marginTop = '8px';
+        verifyBtn.style.width = '100%';
+
+        verifyBtn.addEventListener('click', function() {
+          if (kycOTPController && kycOTPController.isComplete()) {
+            verifyKycOTP(kycOTPController.getCode(), 'email');
+          }
+        });
+
+        const container = document.querySelector('#kyc-email-section .otp-component');
+        if (container) {
+          const wrapper = document.createElement('div');
+          wrapper.style.display = 'flex';
+          wrapper.style.justifyContent = 'center';
+          wrapper.style.marginTop = '8px';
+          wrapper.appendChild(verifyBtn);
+          container.parentNode.insertBefore(wrapper, container.nextSibling);
+        }
       }
+
+      const authSection = document.getElementById('kyc-auth-section');
+      if (authSection && !document.getElementById('kyc-auth-verify-btn')) {
+        const verifyBtn = document.createElement('button');
+        verifyBtn.id = 'kyc-auth-verify-btn';
+        verifyBtn.className = 'btn btn-primary';
+        verifyBtn.textContent = 'Verify & Submit';
+        verifyBtn.disabled = true;
+        verifyBtn.style.marginTop = '8px';
+        verifyBtn.style.width = '100%';
+
+        verifyBtn.addEventListener('click', function() {
+          if (kycAuthOTPController && kycAuthOTPController.isComplete()) {
+            verifyKycOTP(kycAuthOTPController.getCode(), 'authenticator');
+          }
+        });
+
+        const container = document.querySelector('#kyc-auth-section .otp-component');
+        if (container) {
+          const wrapper = document.createElement('div');
+          wrapper.style.display = 'flex';
+          wrapper.style.justifyContent = 'center';
+          wrapper.style.marginTop = '8px';
+          wrapper.appendChild(verifyBtn);
+          container.parentNode.insertBefore(wrapper, container.nextSibling);
+        }
+      }
+    }
+
+    async function verifyKycOTP(code, method) {
+      const token = getAuthToken();
+
+      if (!token) {
+        showNotification('error', 'Error', 'Authentication session is unavailable. Please log in again.');
+        return;
+      }
+
+      if (method === 'email' && kycOTPController) {
+        kycOTPController.setLoading('Verifying...');
+        document.getElementById('kyc-email-verify-btn')?.setAttribute('disabled', 'true');
+      } else if (method === 'authenticator' && kycAuthOTPController) {
+        kycAuthOTPController.setLoading('Verifying...');
+        document.getElementById('kyc-auth-verify-btn')?.setAttribute('disabled', 'true');
+      }
+
+      try {
+        let endpoint, body;
+
+        if (method === 'authenticator') {
+          endpoint = `${API_BASE_URL}/api/users/two-factor/authenticator/verify`;
+          body = JSON.stringify({ code, purpose: 'kyc_verification' });
+        } else {
+          const email = document.getElementById('email')?.value || '';
+          if (!email) {
+            throw new Error('Registered email is unavailable. Please refresh the page and try again.');
+          }
+          endpoint = `${API_BASE_URL}/api/users/kyc/verify`;
+          body = JSON.stringify({ otp: code, email });
+        }
+
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: body
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || 'OTP verification failed');
+        }
+
+        // Update application status to pending - this is the final submission
+        kycState.applicationStatus = 'pending';
+        await loadKYCStatus();
+
+        showNotification('success', 'Verification Successful', data.message || I18N.t('otp.submitSuccess'));
+
+        document.getElementById('two-step-modal')?.classList.remove('active');
+        document.getElementById('kyc-verification-result').style.display = 'block';
+        document.getElementById('kyc-verification-result').innerHTML = `
+          <span style="color: var(--success);">✅ ${I18N.t('otp.submitSuccess')}</span>
+        `;
+
+        // Lock everything now
+        toggleKycFormDisabled(true);
+        updateSubmitKYCButton();
+
+      } catch (error) {
+        console.error('KYC OTP verification error:', error);
+        const userMessage = error.message || I18N.t('otp.invalidCode');
+        showNotification('error', 'Verification Failed', userMessage);
+
+        document.getElementById('kyc-verification-result').style.display = 'block';
+        document.getElementById('kyc-verification-result').innerHTML = `
+          <span style="color: var(--error);">❌ ${userMessage}</span>
+        `;
+
+        if (method === 'email' && kycOTPController) {
+          kycOTPController.setError(userMessage);
+          setTimeout(() => {
+            kycOTPController.clear();
+            document.getElementById('kyc-email-verify-btn')?.removeAttribute('disabled');
+          }, 800);
+        } else if (method === 'authenticator' && kycAuthOTPController) {
+          kycAuthOTPController.setError(userMessage);
+          setTimeout(() => {
+            kycAuthOTPController.clear();
+            document.getElementById('kyc-auth-verify-btn')?.removeAttribute('disabled');
+          }, 800);
+        }
+      }
+    }
+
+    // =============================================
+    // OPEN KYC VERIFICATION MODAL
+    // =============================================
+    async function openKycVerificationModal() {
+      if (isApplicationLocked()) {
+        showNotification('warning', 'Locked', 'KYC is already submitted or verified.');
+        return;
+      }
+
+      // Verify all steps are complete before allowing submission
+      const identityComplete = kycState.identity.status === 'verified' || kycState.identity.status === 'saved';
+      const addressComplete = kycState.address.status === 'verified' || kycState.address.status === 'saved';
+      const facialComplete = kycState.facial.status === 'verified';
+
+      if (!identityComplete || !addressComplete || !facialComplete) {
+        showNotification('warning', 'Incomplete', 'Please complete all KYC steps before submitting.');
+        return;
+      }
+
+      const modal = document.getElementById('two-step-modal');
+      const email = document.getElementById('email')?.value || '';
+
+      document.getElementById('kyc-verification-result').style.display = 'none';
+      document.getElementById('otp-email-display').textContent = email || 'your registered email';
+
+      const has2FA = await checkUser2FAStatus();
+
+      const methodSelector = document.getElementById('kyc-2fa-method-selector');
+      const emailSection = document.getElementById('kyc-email-section');
+      const authSection = document.getElementById('kyc-auth-section');
+      const description = document.getElementById('kyc-verification-description');
+
+      if (has2FA) {
+        methodSelector.style.display = 'flex';
+        description.textContent = 'For security, please verify your identity using one of the methods below to finalize your KYC submission.';
+
+        kycSelectedMethod = 'email';
+        selectKycMethod('email');
+
+        document.getElementById('kyc-method-email').classList.add('active');
+        document.getElementById('kyc-method-auth').classList.remove('active');
+        emailSection.classList.add('active');
+        authSection.classList.remove('active');
+
+      } else {
+        methodSelector.style.display = 'none';
+        description.textContent = 'For security, we\'ve sent a 6-digit verification code to your registered email address to finalize your KYC submission:';
+        emailSection.classList.add('active');
+        authSection.classList.remove('active');
+        kycSelectedMethod = 'email';
+      }
+
+      initKycOTPController();
+      if (has2FA) initKycAuthOTPController();
+      addKycVerifyButtons();
+
+      if (kycOTPController) kycOTPController.clear();
+      if (kycAuthOTPController) kycAuthOTPController.clear();
+
+      startKycTimer();
+
+      modal.classList.add('active');
+      document.body.style.overflow = 'hidden';
+
+      setTimeout(() => {
+        if (kycSelectedMethod === 'email' && kycOTPController) {
+          kycOTPController.focusFirstEmpty();
+        } else if (kycSelectedMethod === 'authenticator' && kycAuthOTPController) {
+          kycAuthOTPController.focusFirstEmpty();
+        }
+      }, 300);
     }
 
     // =============================================
@@ -10043,139 +10145,81 @@
     }
 
     // =============================================
-    // SAVE DOCUMENT - FIXED: No global lock
+    // KYC STATUS LOAD - Fixed: separates component states from application state
     // =============================================
-    async function saveDocument() {
-      const documentType = document.getElementById('document-type').value;
-      const documentNumber = document.getElementById('document-number').value;
-      const documentExpiry = document.getElementById('document-expiry').value;
-
-      const frontFile = uploadedFrontFile;
-      const backFile = uploadedBackFile;
-
-      if (!documentType) {
-        showNotification('warning', 'Missing Field', 'Please select a document type.');
-        return;
-      }
-
-      if (!documentNumber) {
-        showNotification('warning', 'Missing Field', 'Please enter the document number.');
-        return;
-      }
-
-      if (!documentExpiry) {
-        showNotification('warning', 'Missing Field', 'Please select the document expiry date.');
-        return;
-      }
-
-      if (!frontFile) {
-        showNotification('warning', 'Missing File', 'Please upload the front of your document.');
-        return;
-      }
-
-      const formData = new FormData();
-      formData.append('documentType', documentType);
-      formData.append('documentNumber', documentNumber);
-      formData.append('documentExpiry', documentExpiry);
-      formData.append('front', frontFile);
-      if (backFile) formData.append('back', backFile);
-
-      const btn = document.getElementById('save-document-btn');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Uploading...';
-
+    async function loadKYCStatus() {
       try {
-        const token = getAuthToken();
-        const response = await fetch(`${API_BASE_URL}/api/users/kyc/identity`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-          body: formData
-        });
+        const data = await apiCall(`${API_BASE_URL}/api/users/kyc/status`);
 
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.message || 'Failed to upload identity document');
+        if (!data.data) {
+          throw new Error('KYC status missing from API response');
         }
 
-        showNotification('success', 'Document Saved', 'Identity documents uploaded successfully.');
+        // Update application status
+        kycState.applicationStatus = data.data.application?.status || data.data.status || 'draft';
 
-        // Update identity status only - DO NOT lock the entire form
-        kycState.identity.status = 'saved';
-        updateBadge(document.getElementById('identity-verification-badge'), 'saved');
+        // Update identity status
+        kycState.identity.status = data.data.identity?.status || data.data.identityStatus || 'incomplete';
+        updateKYCBadge('identity-verification-badge', kycState.identity.status);
 
-        // Reload KYC status to get fresh state from server
-        await loadKYCStatus();
+        // Update address status
+        kycState.address.status = data.data.address?.status || data.data.addressStatus || 'incomplete';
+        updateKYCBadge('address-verification-badge', kycState.address.status);
 
-      } catch (error) {
-        console.error('Error saving document:', error);
-        showNotification('error', 'Upload Failed', error.message || 'Failed to upload documents.');
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = 'Save Changes';
-      }
-    }
+        // Update facial status
+        kycState.facial.status = data.data.facial?.status || data.data.facialStatus || 'incomplete';
+        updateKYCBadge('facial-verification-badge', kycState.facial.status);
 
-    // =============================================
-    // SAVE ADDRESS DOCUMENT - FIXED: No global lock
-    // =============================================
-    async function saveAddressDocument() {
-      const documentType = document.getElementById('address-document-type').value;
-      const documentDate = document.getElementById('address-document-date').value;
-      const file = uploadedAddressFile;
+        // Update status banner
+        const banner = document.getElementById('kyc-status-banner');
+        const statusText = document.getElementById('kyc-status-text');
 
-      if (!documentType) {
-        showNotification('warning', 'Missing Field', 'Please select a document type.');
-        return;
-      }
+        const appStatus = kycState.applicationStatus;
+        const statusClass = appStatus === 'verified' ? 'verified' :
+          appStatus === 'pending' ? 'pending' :
+          appStatus === 'rejected' ? 'rejected' : '';
 
-      if (!documentDate) {
-        showNotification('warning', 'Missing Field', 'Please select the document issue date.');
-        return;
-      }
+        banner.className = `kyc-status-banner ${statusClass}`;
 
-      if (!file) {
-        showNotification('warning', 'Missing File', 'Please upload your address proof.');
-        return;
-      }
-
-      const formData = new FormData();
-      formData.append('documentType', documentType);
-      formData.append('documentDate', documentDate);
-      formData.append('document', file);
-
-      const btn = document.getElementById('save-address-document-btn');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Uploading...';
-
-      try {
-        const token = getAuthToken();
-        const response = await fetch(`${API_BASE_URL}/api/users/kyc/address`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-          body: formData
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.message || 'Failed to upload address document');
+        if (appStatus === 'verified') {
+          statusText.textContent = I18N.t('kyc.status.verified');
+        } else if (appStatus === 'pending') {
+          statusText.textContent = I18N.t('kyc.status.pending');
+        } else if (appStatus === 'rejected') {
+          statusText.textContent = I18N.t('kyc.status.rejected');
+        } else {
+          statusText.textContent = I18N.t('kyc.status.unverified');
         }
 
-        showNotification('success', 'Document Saved', 'Address document uploaded successfully.');
+        // Update rejection reason
+        if (appStatus === 'rejected' && data.data.rejectionReason) {
+          document.getElementById('rejection-reason').textContent = data.data.rejectionReason;
+          document.getElementById('resubmission-section').style.display = 'block';
+        } else {
+          document.getElementById('resubmission-section').style.display = 'none';
+        }
 
-        // Update address status only - DO NOT lock the entire form
-        kycState.address.status = 'saved';
-        updateBadge(document.getElementById('address-verification-badge'), 'saved');
+        // Toggle form disabled based on application status only
+        toggleKycFormDisabled(isApplicationLocked());
+        updateSubmitKYCButton();
 
-        await loadKYCStatus();
+        // Update facial button state
+        const facialBtn = document.getElementById('start-facial-verification-btn');
+        if (facialBtn) {
+          if (isApplicationLocked() || kycState.facial.status === 'verified') {
+            facialBtn.disabled = true;
+            facialBtn.textContent = kycState.facial.status === 'verified' ? '✅ Verified' : 'Locked';
+          } else {
+            facialBtn.disabled = false;
+            facialBtn.textContent = '📷 Start Facial Verification';
+          }
+        }
 
       } catch (error) {
-        console.error('Error saving address document:', error);
-        showNotification('error', 'Upload Failed', error.message || 'Failed to upload address document.');
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = 'Save Changes';
+        console.error('Error loading KYC status:', error);
+        document.getElementById('kyc-status-text').textContent = I18N.t('kyc.status.loadError');
+        document.getElementById('kyc-status-banner').className = 'kyc-status-banner';
+        toggleKycFormDisabled(false);
       }
     }
 
@@ -10183,7 +10227,7 @@
     // FACIAL VERIFICATION - Production implementation
     // =============================================
     let facialState = {
-      status: 'idle',
+      status: 'idle', // idle | starting | camera_ready | capturing | captured | uploading | processing | verified | failed
       sessionId: null,
       captureBlob: null,
       stream: null,
@@ -10219,6 +10263,14 @@
 
     async function startFacialVerification() {
       if (facialState.processing) return;
+      if (isApplicationLocked()) {
+        showNotification('warning', 'Locked', 'KYC is already submitted or verified.');
+        return;
+      }
+      if (kycState.facial.status === 'verified') {
+        showNotification('info', 'Verified', 'Facial verification is already complete.');
+        return;
+      }
 
       facialState.status = 'starting';
       updateFacialUI();
@@ -10260,7 +10312,7 @@
         facialState.status = 'camera_ready';
         updateFacialUI();
 
-        showNotification('info', 'Camera Ready', 'Position your face in the frame and click Capture.');
+        showNotification('info', 'Camera Ready', 'Position your face in the frame and click Capture Photo.');
 
         // Add capture button dynamically
         const captureBtn = document.createElement('button');
@@ -10323,7 +10375,6 @@
           throw new Error('Video element not available');
         }
 
-        // Create canvas to capture frame
         if (!facialCanvasElement) {
           facialCanvasElement = document.createElement('canvas');
           facialCanvasElement.style.display = 'none';
@@ -10341,7 +10392,7 @@
         canvas.toBlob(function(blob) {
           if (blob) {
             facialState.captureBlob = blob;
-            facialState.status = 'captured';  // NOT 'processing' - this is the fix
+            facialState.status = 'captured';  // NOT processing - correct state
 
             // Show preview
             const previewContainer = document.getElementById('verification-photo-container');
@@ -10357,7 +10408,7 @@
             stopFacialCamera();
 
             updateFacialUI();
-            showNotification('info', 'Photo Captured', 'Photo captured successfully. Review and submit for verification.');
+            showNotification('info', 'Photo Captured', 'Photo captured. Review and submit for verification.');
           } else {
             throw new Error('Failed to capture image');
           }
@@ -10384,7 +10435,6 @@
       const retakeBtn = document.getElementById('retake-photo-btn');
       retakeBtn.style.display = 'none';
 
-      // Remove capture button
       const captureBtn = document.getElementById('facial-capture-btn');
       if (captureBtn) captureBtn.remove();
 
@@ -10402,6 +10452,10 @@
 
     async function submitFacialVerification() {
       if (facialState.processing || !facialState.captureBlob) return;
+      if (isApplicationLocked()) {
+        showNotification('warning', 'Locked', 'KYC is already submitted or verified.');
+        return;
+      }
 
       facialState.processing = true;
       facialState.status = 'uploading';
@@ -10430,7 +10484,6 @@
         }
 
         facialState.status = 'processing';
-        updateFacialUI();
 
         // Check status after submission
         const statusCheck = await apiCall(`${API_BASE_URL}/api/users/kyc/facial/status`);
@@ -10438,11 +10491,15 @@
         if (statusCheck.status === 'verified') {
           facialState.status = 'verified';
           kycState.facial.status = 'verified';
-          updateBadge(document.getElementById('facial-verification-badge'), 'verified');
+          updateKYCBadge('facial-verification-badge', 'verified');
+          updateSubmitKYCButton();
+
+          const badge = document.getElementById('facial-verification-badge');
+          badge.className = 'verification-badge verified';
+          badge.innerHTML = '<i class="fas fa-check-circle"></i> Verified';
 
           showNotification('success', 'Facial Verification Complete', 'Your facial verification has been approved.');
 
-          // Update KYC status
           await loadKYCStatus();
 
         } else if (statusCheck.status === 'failed') {
@@ -10452,9 +10509,10 @@
 
         } else {
           // pending
-          facialState.status = 'pending';
+          facialState.status = 'processing';
+          kycState.facial.status = 'pending';
+          updateKYCBadge('facial-verification-badge', 'pending');
           showNotification('info', 'Verification Pending', 'Your facial verification is being processed. Please wait.');
-          updateFacialUI();
         }
 
       } catch (error) {
@@ -10480,7 +10538,6 @@
         facialVideoElement.style.display = 'none';
       }
 
-      // Remove capture/cancel buttons
       const captureBtn = document.getElementById('facial-capture-btn');
       if (captureBtn) captureBtn.remove();
 
@@ -10494,6 +10551,8 @@
       const submitBtn = document.getElementById('submit-photo-btn');
       const previewContainer = document.getElementById('verification-photo-container');
 
+      if (!startBtn) return;
+
       // Hide all buttons initially
       startBtn.style.display = 'none';
       retakeBtn.style.display = 'none';
@@ -10501,9 +10560,19 @@
 
       switch (facialState.status) {
         case 'idle':
-          startBtn.style.display = 'inline-flex';
-          startBtn.textContent = '📷 Start Facial Verification';
-          startBtn.disabled = false;
+          if (kycState.facial.status === 'verified') {
+            startBtn.style.display = 'inline-flex';
+            startBtn.textContent = '✅ Verified';
+            startBtn.disabled = true;
+          } else if (isApplicationLocked()) {
+            startBtn.style.display = 'inline-flex';
+            startBtn.textContent = '🔒 Locked';
+            startBtn.disabled = true;
+          } else {
+            startBtn.style.display = 'inline-flex';
+            startBtn.textContent = '📷 Start Facial Verification';
+            startBtn.disabled = false;
+          }
           previewContainer.style.display = 'none';
           break;
 
@@ -10527,7 +10596,6 @@
           submitBtn.disabled = false;
           submitBtn.innerHTML = 'Submit Verification';
           retakeBtn.style.display = 'inline-flex';
-          retakeBtn.textContent = 'Retake Photo';
           previewContainer.style.display = 'block';
           break;
 
@@ -10541,34 +10609,24 @@
           submitBtn.style.display = 'inline-flex';
           submitBtn.disabled = true;
           submitBtn.innerHTML = '<span class="spinner"></span> Processing...';
-          break;
-
-        case 'verified':
-          submitBtn.style.display = 'none';
-          retakeBtn.style.display = 'none';
-          startBtn.textContent = '✅ Verified';
-          startBtn.style.display = 'inline-flex';
-          startBtn.disabled = true;
           previewContainer.style.display = 'block';
           break;
 
-        case 'pending':
+        case 'verified':
+          startBtn.style.display = 'inline-flex';
+          startBtn.textContent = '✅ Verified';
+          startBtn.disabled = true;
           submitBtn.style.display = 'none';
           retakeBtn.style.display = 'none';
-          startBtn.textContent = '⏳ Pending Review';
-          startBtn.style.display = 'inline-flex';
-          startBtn.disabled = true;
           previewContainer.style.display = 'block';
           break;
 
         case 'failed':
-          startBtn.textContent = '🔄 Retry Verification';
           startBtn.style.display = 'inline-flex';
+          startBtn.textContent = '🔄 Retry Verification';
           startBtn.disabled = false;
           retakeBtn.style.display = 'inline-flex';
-          retakeBtn.textContent = 'Retake Photo';
           submitBtn.style.display = 'none';
-          previewContainer.style.display = 'block';
           break;
 
         default:
@@ -10658,35 +10716,8 @@
       initKYCDocumentUpload();
       initKycOTPController();
       initKycAuthOTPController();
+      addKycVerifyButtons();
       initFacialVerification();
-
-      // KYC method selectors
-      document.getElementById('kyc-method-email')?.addEventListener('click', function() {
-        selectKycMethod('email');
-      });
-
-      document.getElementById('kyc-method-auth')?.addEventListener('click', function() {
-        selectKycMethod('authenticator');
-      });
-
-      // KYC verify submit button - explicit user action
-      document.getElementById('kyc-verify-submit')?.addEventListener('click', function() {
-        submitKycVerification();
-      });
-
-      // KYC verify cancel button
-      document.getElementById('kyc-verify-cancel')?.addEventListener('click', function() {
-        document.getElementById('two-step-modal')?.classList.remove('active');
-        document.body.style.overflow = '';
-        if (kycTimerInterval) {
-          clearInterval(kycTimerInterval);
-          kycTimerInterval = null;
-        }
-        if (kycResendTimerInterval) {
-          clearInterval(kycResendTimerInterval);
-          kycResendTimerInterval = null;
-        }
-      });
     }
 
     async function loadPageData() {
@@ -10782,21 +10813,6 @@
 
       // KYC Submit button - opens the verification modal
       document.getElementById('submit-kyc-btn')?.addEventListener('click', function() {
-        // Check if all steps are complete before opening
-        const allComplete = kycState.identity.status === 'verified' &&
-          kycState.address.status === 'verified' &&
-          kycState.facial.status === 'verified';
-
-        if (!allComplete && kycState.applicationStatus !== 'rejected') {
-          showNotification('warning', 'Incomplete KYC', 'Please complete all verification steps before submitting.');
-          return;
-        }
-
-        openKycVerificationModal();
-      });
-
-      // Resubmit KYC button
-      document.getElementById('resubmit-kyc-btn')?.addEventListener('click', function() {
         openKycVerificationModal();
       });
 
@@ -10844,6 +10860,20 @@
         document.getElementById('address-document-date').value = '';
         removeAddressDocument();
         showNotification('info', 'Cancelled', 'Address document upload cancelled.');
+      });
+
+      // Resubmit KYC button
+      document.getElementById('resubmit-kyc-btn')?.addEventListener('click', function() {
+        openKycVerificationModal();
+      });
+
+      // KYC method selectors
+      document.getElementById('kyc-method-email')?.addEventListener('click', function() {
+        selectKycMethod('email');
+      });
+
+      document.getElementById('kyc-method-auth')?.addEventListener('click', function() {
+        selectKycMethod('authenticator');
       });
 
       // Close KYC modal on backdrop click
