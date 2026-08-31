@@ -13416,23 +13416,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             if (normalizedCurrent !== normalizedRequired) {
                 console.log('Chain mismatch - attempting to switch...');
                 try {
+                    // ===== FIXED #4: Register listener BEFORE switch request =====
+                    const chainChangedPromise = waitForChainChanged(provider, normalizedRequired, 30000);
+                    
                     await provider.request({
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: normalizedRequired }]
                     });
-                    // ===== FIXED #4: Wait for chainChanged event instead of 500ms sleep =====
-                    const chainChangedPromise = new Promise((resolve, reject) => {
-                        const timeout = setTimeout(() => {
-                            provider.off('chainChanged', handler);
-                            reject(new Error('Chain switch timeout - please approve in your wallet'));
-                        }, 30000);
-                        const handler = (newChainId) => {
-                            clearTimeout(timeout);
-                            provider.off('chainChanged', handler);
-                            resolve(newChainId);
-                        };
-                        provider.on('chainChanged', handler);
-                    });
+                    
                     const newChainId = await chainChangedPromise;
                     const newNormalized = normalizeChainId(newChainId);
                     if (newNormalized !== normalizedRequired) {
@@ -13450,23 +13441,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             blockExplorerUrls: [chainConfig.explorerUrl]
                         };
                         try {
+                            // ===== FIXED #4: Register listener BEFORE add request =====
+                            const chainChangedPromise = waitForChainChanged(provider, normalizedRequired, 30000);
+                            
                             await provider.request({
                                 method: 'wallet_addEthereumChain',
                                 params: [chainParams]
                             });
-                            // ===== FIXED #4: Wait for chainChanged after add =====
-                            const chainChangedPromise = new Promise((resolve, reject) => {
-                                const timeout = setTimeout(() => {
-                                    provider.off('chainChanged', handler);
-                                    reject(new Error('Chain switch timeout after adding network - please approve in your wallet'));
-                                }, 30000);
-                                const handler = (newChainId) => {
-                                    clearTimeout(timeout);
-                                    provider.off('chainChanged', handler);
-                                    resolve(newChainId);
-                                };
-                                provider.on('chainChanged', handler);
-                            });
+                            
                             const newChainId = await chainChangedPromise;
                             const newNormalized = normalizeChainId(newChainId);
                             if (newNormalized !== normalizedRequired) {
@@ -13533,82 +13515,150 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
+        // WAIT FOR CHAIN CHANGED - FIXED: listener BEFORE request
+        // =============================================
+        function waitForChainChanged(provider, requiredChainId, timeoutMs = 30000) {
+            const required = normalizeChainId(requiredChainId);
+
+            return new Promise((resolve, reject) => {
+                let settled = false;
+
+                const cleanup = () => {
+                    clearTimeout(timeout);
+                    provider.removeListener?.('chainChanged', handler);
+                    provider.off?.('chainChanged', handler);
+                };
+
+                const finish = (chainId) => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+
+                    const normalized = normalizeChainId(chainId);
+
+                    if (normalized === required) {
+                        resolve(normalized);
+                    } else {
+                        reject(new Error(
+                            `Wallet switched to ${normalized}, expected ${required}`
+                        ));
+                    }
+                };
+
+                const handler = (chainId) => finish(chainId);
+
+                const timeout = setTimeout(async () => {
+                    if (settled) return;
+
+                    try {
+                        const actual = normalizeChainId(
+                            await provider.request({
+                                method: 'eth_chainId'
+                            })
+                        );
+
+                        if (actual === required) {
+                            finish(actual);
+                            return;
+                        }
+                    } catch (_) {}
+
+                    settled = true;
+                    cleanup();
+                    reject(new Error(
+                        'Network switch timed out. Please approve the network switch in your wallet.'
+                    ));
+                }, timeoutMs);
+
+                // ===== CRITICAL: Listener registered BEFORE the switch request =====
+                provider.on('chainChanged', handler);
+            });
+        }
+
+        // =============================================
         // ENSURE CORRECT EVM NETWORK - FIXED
         // =============================================
         async function ensureCorrectEvmNetwork(provider, requiredChainId) {
             const required = normalizeChainId(requiredChainId);
+
             let current = normalizeChainId(
-                await provider.request({ method: 'eth_chainId' })
+                await provider.request({
+                    method: 'eth_chainId'
+                })
             );
 
             if (current === required) {
                 console.log('✅ Already on correct network:', current);
-                return;
+                return required;
             }
 
-            console.log('Network mismatch. Current:', current, 'Required:', required);
+            const chainConfig = getEvmChainConfig(required);
+
+            console.log(`[NETWORK] Switching ${current} -> ${required}`);
+
+            // ===== FIXED #4: Listener registered BEFORE switch request =====
+            const waitForSwitch = waitForChainChanged(
+                provider,
+                required,
+                30000
+            );
 
             try {
                 await provider.request({
                     method: 'wallet_switchEthereumChain',
                     params: [{ chainId: required }]
                 });
-                // ===== FIXED #4: Wait for chainChanged event =====
-                const chainChangedPromise = new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => {
-                        provider.off('chainChanged', handler);
-                        reject(new Error('Chain switch timeout - please approve in your wallet'));
-                    }, 30000);
-                    const handler = (newChainId) => {
-                        clearTimeout(timeout);
-                        provider.off('chainChanged', handler);
-                        resolve(newChainId);
-                    };
-                    provider.on('chainChanged', handler);
-                });
-                const newChainId = await chainChangedPromise;
-                current = normalizeChainId(newChainId);
-                if (current !== required) {
-                    throw new Error('Wallet did not switch to the required network.');
-                }
-                console.log('✅ Network switched successfully to:', required);
-                return;
             } catch (error) {
-                if (error.code !== 4902) {
+                if (Number(error?.code) !== 4902) {
                     throw error;
                 }
 
-                const config = getEvmChainConfig(required);
+                console.log(
+                    `[NETWORK] Chain ${required} unavailable; adding it`
+                );
+
                 await provider.request({
                     method: 'wallet_addEthereumChain',
                     params: [{
-                        chainId: config.chainId,
-                        chainName: config.chainName,
-                        nativeCurrency: config.nativeCurrency,
-                        rpcUrls: [config.rpcUrl],
-                        blockExplorerUrls: [config.explorerUrl]
+                        chainId: chainConfig.chainId,
+                        chainName: chainConfig.chainName,
+                        nativeCurrency: chainConfig.nativeCurrency,
+                        rpcUrls: [chainConfig.rpcUrl],
+                        blockExplorerUrls: [chainConfig.explorerUrl]
                     }]
                 });
-                // ===== FIXED #4: Wait for chainChanged after add =====
-                const chainChangedPromise = new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => {
-                        provider.off('chainChanged', handler);
-                        reject(new Error('Chain switch timeout after adding network - please approve in your wallet'));
-                    }, 30000);
-                    const handler = (newChainId) => {
-                        clearTimeout(timeout);
-                        provider.off('chainChanged', handler);
-                        resolve(newChainId);
-                    };
-                    provider.on('chainChanged', handler);
-                });
-                const newChainId = await chainChangedPromise;
-                current = normalizeChainId(newChainId);
-                if (current !== required) {
-                    throw new Error('Wallet did not switch to the required network.');
-                }
-                console.log('✅ Network switched successfully to:', required);
             }
+
+            // Event may have happened during request.
+            // Therefore verify the chain directly.
+            current = normalizeChainId(
+                await provider.request({
+                    method: 'eth_chainId'
+                })
+            );
+
+            if (current !== required) {
+                await waitForSwitch;
+            }
+
+            // FINAL AUTHORITATIVE CHECK
+            current = normalizeChainId(
+                await provider.request({
+                    method: 'eth_chainId'
+                })
+            );
+
+            if (current !== required) {
+                throw new Error(
+                    `Unable to switch wallet to ${chainConfig.chainName}.`
+                );
+            }
+
+            console.log(
+                `[NETWORK] Verified wallet on required chain ${required}`
+            );
+
+            return current;
         }
 
         // =============================================
@@ -13836,13 +13886,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const amountUSD = parseFloat(amountInput.value);
 
+            console.log('[DEPOSIT] Starting deposit operation for asset:', asset, 'amount USD:', amountUSD);
+
             if (activeDepositOperation) {
+                console.log('[DEPOSIT] Active operation in progress, blocking duplicate:', activeDepositOperation.id);
                 showNotification('warning', 'Deposit in Progress', 'Approve or cancel the current wallet request before starting another.');
                 return;
             }
 
             const operationId = 'dep_' + crypto.randomUUID().substring(0, 8);
             activeDepositOperation = { id: operationId, type: 'deposit', asset: asset, amount: amountUSD, status: 'created', createdAt: Date.now() };
+            console.log('[DEPOSIT] Created operation:', operationId);
 
             setButtonLoading(depositBtn, 'processing', 'Preparing deposit...');
             statusMsg.style.color = 'var(--text-secondary)';
@@ -13850,6 +13904,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
             const hasWalletAddress = web3WalletAddress || (connectedWallets && connectedWallets.length > 0);
             if (!hasWalletAddress) {
+                console.log('[DEPOSIT] No wallet linked');
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = 'Please link a wallet first.';
                 showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
@@ -13861,7 +13916,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
             const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
 
+            console.log('[DEPOSIT] Using wallet:', walletToUse, 'type:', walletTypeToUse);
+
             if (!walletToUse) {
+                console.log('[DEPOSIT] No wallet address found');
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = 'No wallet found. Please link a wallet.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
@@ -13870,6 +13928,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
 
             if (!amountUSD || amountUSD <= 0) {
+                console.log('[DEPOSIT] Invalid amount:', amountUSD);
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = 'Please enter a valid amount.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
@@ -13881,34 +13940,54 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
             try {
                 const token = getAuthToken();
-                if (!token) { handleSessionExpired(); throw new Error('Please log in again.'); }
+                if (!token) {
+                    console.log('[DEPOSIT] No auth token');
+                    handleSessionExpired();
+                    throw new Error('Please log in again.');
+                }
+                console.log('[DEPOSIT] Auth token present');
 
                 statusMsg.textContent = 'Getting price...';
+                console.log('[DEPOSIT] Fetching price for asset:', asset);
                 let price = 0;
                 const priceData = AppState.currentPrices[asset];
-                if (priceData && priceData.usd > 0) { price = priceData.usd; } else {
+                if (priceData && priceData.usd > 0) {
+                    price = priceData.usd;
+                    console.log('[DEPOSIT] Price from cache:', price);
+                } else {
+                    console.log('[DEPOSIT] Price not in cache, fetching from backend');
                     const resp = await fetch(`https://bithash-backend-hz1a.onrender.com/api/prices/${asset}`, {
                         headers: { 'Authorization': `Bearer ${token}` }
                     });
                     if (resp.ok) {
                         const data = await resp.json();
                         price = data.data?.price || data.price || 0;
-                        if (price > 0) updateCanonicalPrice(asset, price);
+                        if (price > 0) {
+                            updateCanonicalPrice(asset, price);
+                            console.log('[DEPOSIT] Price fetched from backend:', price);
+                        }
                     }
                 }
 
-                if (!price || price === 0) throw new Error('Price not available for this asset.');
+                if (!price || price === 0) {
+                    console.log('[DEPOSIT] Price not available');
+                    throw new Error('Price not available for this asset.');
+                }
+                console.log('[DEPOSIT] Final price:', price);
 
                 const cryptoAmount = amountUSD / price;
                 const cryptoAmountString = cryptoAmount.toFixed(8);
                 activeDepositOperation.cryptoAmount = parseFloat(cryptoAmountString);
+                console.log('[DEPOSIT] Crypto amount:', cryptoAmountString);
 
                 statusMsg.textContent = `Amount: ${cryptoAmountString} ${asset.toUpperCase()}`;
 
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
+                console.log('[DEPOSIT] Is EVM:', isEVM, 'network info:', networkInfo);
 
                 statusMsg.textContent = 'Getting deposit address...';
+                console.log('[DEPOSIT] Fetching deposit address for asset:', asset);
                 const depositAddressResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -13919,12 +13998,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         throw new Error('Session expired. Please log in again.');
                     }
                     const err = await depositAddressResponse.json();
+                    console.log('[DEPOSIT] Deposit address fetch failed:', err);
                     throw new Error(err.message || 'Failed to get deposit address.');
                 }
 
                 const addressData = await depositAddressResponse.json();
                 const depositAddress = addressData.data?.address || addressData.address;
-                if (!depositAddress) throw new Error('No deposit address returned. Please try again.');
+                if (!depositAddress) {
+                    console.log('[DEPOSIT] No deposit address returned');
+                    throw new Error('No deposit address returned. Please try again.');
+                }
+                console.log('[DEPOSIT] Deposit address:', depositAddress);
 
                 const contractAddress = addressData.data?.contractAddress || null;
                 const tokenDecimals = addressData.data?.decimals || 18;
@@ -13937,33 +14021,36 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 activeDepositOperation.decimals = tokenDecimals;
                 activeDepositOperation.chainId = chainId;
 
-                console.log("=== Deposit Details ===");
-                console.log("Asset:", tokenSymbol);
-                console.log("Chain ID:", chainId);
-                console.log("Contract:", contractAddress);
-                console.log("Decimals:", tokenDecimals);
-                console.log("Recipient:", depositAddress);
-                console.log("Amount (USD):", amountUSD);
-                console.log("Amount (Crypto):", cryptoAmountString);
+                console.log("[DEPOSIT] === Deposit Details ===");
+                console.log("[DEPOSIT] Asset:", tokenSymbol);
+                console.log("[DEPOSIT] Chain ID:", chainId);
+                console.log("[DEPOSIT] Contract:", contractAddress);
+                console.log("[DEPOSIT] Decimals:", tokenDecimals);
+                console.log("[DEPOSIT] Recipient:", depositAddress);
+                console.log("[DEPOSIT] Amount (USD):", amountUSD);
+                console.log("[DEPOSIT] Amount (Crypto):", cryptoAmountString);
 
                 if (isEVM) {
+                    console.log('[DEPOSIT] EVM deposit path starting');
                     statusMsg.textContent = 'Connecting wallet...';
                     setButtonLoading(depositBtn, 'processing', 'Connecting wallet...');
 
                     const selectedWalletAddress = walletToUse;
                     const selectedWalletType = walletTypeToUse;
 
-                    console.log('Using wallet for deposit:', selectedWalletAddress, selectedWalletType);
+                    console.log('[DEPOSIT] Using wallet for deposit:', selectedWalletAddress, selectedWalletType);
 
                     let sessionResult;
                     try {
+                        console.log('[DEPOSIT] Resolving linked wallet session...');
                         sessionResult = await resolveLinkedWalletSession(
                             selectedWalletAddress,
                             selectedWalletType,
                             normalizeChainId(chainId)
                         );
+                        console.log('[DEPOSIT] Session resolved successfully');
                     } catch (connectError) {
-                        console.error('Wallet session resolution error:', connectError);
+                        console.error('[DEPOSIT] Wallet session resolution error:', connectError);
                         if (connectError.message && connectError.message.includes('rejected')) {
                             throw new Error('You rejected the connection request in your wallet.');
                         } else if (connectError.message && connectError.message.includes('mismatch')) {
@@ -13977,24 +14064,33 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                     // ===== FIXED #1: Use account property =====
                     const { provider, account, chainId: connectedChainId, capabilities } = sessionResult;
+                    console.log('[DEPOSIT] Session account:', account);
+                    console.log('[DEPOSIT] Session chainId:', connectedChainId);
+                    console.log('[DEPOSIT] Session capabilities:', capabilities);
 
                     const normalizedAccount = normalizeWalletAddress(account);
                     const normalizedLinked = normalizeWalletAddress(selectedWalletAddress);
                     if (normalizedAccount && normalizedLinked && normalizedAccount.toLowerCase() !== normalizedLinked.toLowerCase()) {
+                        console.log('[DEPOSIT] Account mismatch. Connected:', normalizedAccount, 'Expected:', normalizedLinked);
                         throw new Error('The connected wallet does not match your selected linked wallet. Please switch to the correct wallet.');
                     }
+                    console.log('[DEPOSIT] Account verified');
 
                     // ===== FIXED #5: Network enforcement moved here - before transaction =====
+                    console.log('[DEPOSIT] Ensuring correct network for chain:', chainId);
                     await ensureCorrectEvmNetwork(provider, normalizeChainId(chainId));
+                    console.log('[DEPOSIT] Network verified');
 
                     // ===== FIXED #2: Verify actual session methods =====
                     const supportsSendTx = capabilities && capabilities.includes('eth_sendTransaction');
                     if (!supportsSendTx) {
-                        console.warn('eth_sendTransaction not supported by session. Capabilities:', capabilities);
+                        console.warn('[DEPOSIT] eth_sendTransaction not supported by session. Capabilities:', capabilities);
                         throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
                     }
+                    console.log('[DEPOSIT] Session supports eth_sendTransaction');
 
                     if (isERC20 && contractAddress) {
+                        console.log('[DEPOSIT] ERC-20 transfer flow');
                         statusMsg.textContent = 'Preparing token transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
 
@@ -14007,9 +14103,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         ];
                         const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
 
+                        console.log('[DEPOSIT] Checking balance for account:', account);
                         const balance = await tokenContract.balanceOf(account);
                         const requiredAmount = ethers.parseUnits(cryptoAmountString, tokenDecimals);
 
+                        console.log('[DEPOSIT] Balance:', balance.toString(), 'Required:', requiredAmount.toString());
                         if (balance < requiredAmount) {
                             const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
                             throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmountString}`);
@@ -14031,25 +14129,27 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                         statusMsg.textContent = 'Sending token transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        console.log('Sending ERC-20 transfer to:', depositAddress);
+                        console.log('[DEPOSIT] Sending ERC-20 transfer to:', depositAddress);
+                        console.log('[DEPOSIT] Transaction data:', JSON.stringify(txData, null, 2));
 
-                        // ===== FIXED #6: Explicitly trigger mobile wallet for signing =====
                         if (isMobileDevice()) {
                             statusMsg.textContent = 'Opening wallet for approval...';
                             setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                            // The provider.request call itself triggers the wallet deep link via WalletConnect
+                            console.log('[DEPOSIT] Mobile device - wallet will open for approval');
                         }
 
+                        console.log('[DEPOSIT] Sending eth_sendTransaction...');
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
                         });
 
-                        console.log(`Transaction sent: ${txHash}`);
+                        console.log(`[DEPOSIT] Transaction sent: ${txHash}`);
                         statusMsg.textContent = 'Transaction submitted!';
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${cryptoAmountString} ${tokenSymbol}.`);
 
+                        console.log('[DEPOSIT] Confirming deposit with backend...');
                         const confirmResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/confirm`, {
                             method: 'POST',
                             headers: {
@@ -14070,6 +14170,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
 
                         if (confirmResponse.ok) {
+                            console.log('[DEPOSIT] Deposit confirmed by backend');
                             statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
                             showNotification('success', 'Deposit Confirmed', `Deposit of ${cryptoAmountString} ${tokenSymbol} is being processed.`);
                             await loadBalancesFromRest();
@@ -14077,12 +14178,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             await loadTransactions();
                         } else {
                             const err = await confirmResponse.json();
+                            console.log('[DEPOSIT] Backend confirmation failed:', err);
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
                         hideDepositAddress();
 
                     } else if (!isERC20) {
                         // Native asset transfer
+                        console.log('[DEPOSIT] Native asset transfer flow');
                         statusMsg.textContent = 'Preparing transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
 
@@ -14090,27 +14193,28 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmountString, decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
 
-                        // ===== FIXED #6: Explicitly trigger mobile wallet for signing =====
                         if (isMobileDevice()) {
                             statusMsg.textContent = 'Opening wallet for approval...';
                             setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                            // The provider.request call itself triggers the wallet deep link via WalletConnect
+                            console.log('[DEPOSIT] Mobile device - wallet will open for approval');
                         }
 
                         statusMsg.textContent = 'Sending transaction...';
-                        console.log('Sending native transaction to:', depositAddress);
-                        console.log('Amount:', txData.value);
+                        console.log('[DEPOSIT] Sending native transaction to:', depositAddress);
+                        console.log('[DEPOSIT] Amount:', txData.value);
 
+                        console.log('[DEPOSIT] Sending eth_sendTransaction...');
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
                         });
 
-                        console.log(`Transaction sent: ${txHash}`);
+                        console.log(`[DEPOSIT] Transaction sent: ${txHash}`);
                         statusMsg.textContent = 'Transaction submitted!';
                         setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${cryptoAmountString} ${asset.toUpperCase()}.`);
 
+                        console.log('[DEPOSIT] Confirming deposit with backend...');
                         const confirmResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/confirm`, {
                             method: 'POST',
                             headers: {
@@ -14128,6 +14232,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
 
                         if (confirmResponse.ok) {
+                            console.log('[DEPOSIT] Deposit confirmed by backend');
                             statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
                             showNotification('success', 'Deposit Confirmed', `Deposit of ${cryptoAmountString} ${asset.toUpperCase()} is being processed.`);
                             await loadBalancesFromRest();
@@ -14135,14 +14240,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             await loadTransactions();
                         } else {
                             const err = await confirmResponse.json();
+                            console.log('[DEPOSIT] Backend confirmation failed:', err);
                             throw new Error(err.message || 'Failed to confirm deposit.');
                         }
                         hideDepositAddress();
                     } else {
+                        console.log('[DEPOSIT] Unknown asset type');
                         throw new Error(`Unknown asset type for ${asset}`);
                     }
                 } else {
                     // Non-EVM asset - manual transfer
+                    console.log('[DEPOSIT] Non-EVM asset - manual transfer flow');
                     statusMsg.textContent = `Please send ${cryptoAmountString} ${asset.toUpperCase()} to the address below.`;
                     showDepositAddress(depositAddress, asset);
 
@@ -14152,6 +14260,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                     showNotification('info', 'Manual Transfer Required', `Please send ${cryptoAmountString} ${asset.toUpperCase()} to the generated address.`);
 
+                    console.log('[DEPOSIT] Starting deposit monitor...');
                     const monitorResponse = await fetch('https://bithash-backend-hz1a.onrender.com/api/deposit/monitor', {
                         method: 'POST',
                         headers: {
@@ -14168,7 +14277,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     });
 
                     if (monitorResponse.ok) {
+                        console.log('[DEPOSIT] Monitor started successfully');
                         statusMsg.textContent = `Monitoring ${networkInfo.network} network for your deposit...`;
+                    } else {
+                        console.log('[DEPOSIT] Monitor start failed');
                     }
 
                     setButtonLoading(depositBtn, 'submitted', 'Address Generated');
@@ -14177,9 +14289,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                 sessionStorage.removeItem('activeDepositOperation');
                 activeDepositOperation = null;
+                console.log('[DEPOSIT] Deposit operation completed successfully');
 
             } catch (error) {
-                console.error('Deposit error:', error);
+                console.error('[DEPOSIT] Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
                 let errorCode = error.code || 0;
 
@@ -14222,6 +14335,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     errorMessage = `No ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} extension detected. Please install or enable ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} and try again.`;
                 }
 
+                console.log('[DEPOSIT] Final error message:', errorMessage);
                 statusMsg.style.color = 'var(--error)';
                 statusMsg.textContent = errorMessage;
                 showNotification('error', 'Deposit Failed', errorMessage);
