@@ -13884,20 +13884,50 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const normalizedCurrent = normalizeChainId(connectedChainId);
                     const normalizedRequired = normalizeChainId(chainId);
                     if (normalizedCurrent !== normalizedRequired) {
-                        // ===== FIXED: Switch network instead of throwing =====
-                        console.log('Network mismatch. Current:', normalizedCurrent, 'Required:', normalizedRequired);
-                        await ensureCorrectEvmNetwork(provider, chainId);
-                        // Re-check chain after switch
-                        const newChainId = await provider.request({ method: 'eth_chainId' });
-                        if (normalizeChainId(newChainId) !== normalizedRequired) {
-                            throw new Error(`Failed to switch to required network ${normalizedRequired}.`);
-                        }
+                        // Network mismatch - this is the place to switch, but we need to ensure the transaction is paused
+                        throw new Error(`Wrong network. Please switch to ${normalizedRequired} in your wallet.`);
                     }
 
-                    const supportsSendTx = capabilities && capabilities.includes('eth_sendTransaction');
+                    // ===== FIXED: Get actual session methods - don't use fake capabilities =====
+                    let actualMethods = [];
+                    try {
+                        const session = provider.session;
+                        if (session && session.namespaces && session.namespaces.eip155) {
+                            actualMethods = session.namespaces.eip155.methods || [];
+                        }
+                    } catch (e) {
+                        console.warn('Could not read session methods:', e);
+                    }
+                    // If actual methods are empty, fallback to a minimal reasonable set
+                    if (actualMethods.length === 0) {
+                        actualMethods = ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign'];
+                    }
+                    const supportsSendTx = actualMethods.includes('eth_sendTransaction');
                     if (!supportsSendTx) {
-                        console.warn('eth_sendTransaction not supported by session. Capabilities:', capabilities);
+                        console.warn('eth_sendTransaction not supported by session. Actual methods:', actualMethods);
                         throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
+                    }
+
+                    // ===== FIXED: Network enforcement moved here - immediately before transaction =====
+                    await ensureCorrectEvmNetwork(provider, normalizeChainId(chainId));
+
+                    // ===== FIXED: Explicitly trigger mobile wallet for signing on mobile =====
+                    if (isMobileDevice()) {
+                        statusMsg.textContent = 'Opening wallet for approval...';
+                        // Use the existing session to trigger the wallet
+                        // For WalletConnect, the request itself will trigger the wallet if the session is valid
+                        // We also need to ensure the wallet is actually opened - the provider.request will trigger it
+                        // But we want to make sure the wallet deep link is triggered even for existing sessions
+                        if (provider._wc && provider._wc.connect) {
+                            // Force a connect request to ensure wallet opens
+                            try {
+                                await provider._wc.connect();
+                            } catch (e) {
+                                // Ignore - we just want to trigger the deep link
+                                console.log('Connect triggered for wallet opening');
+                            }
+                        }
+                        setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                     }
 
                     if (isERC20 && contractAddress) {
@@ -13938,23 +13968,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         statusMsg.textContent = 'Sending token transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                         console.log('Sending ERC-20 transfer to:', depositAddress);
-
-                        // ===== FIXED: Explicitly trigger mobile wallet for signing =====
-                        if (isMobileDevice()) {
-                            // Generate a fresh deep link for the signing request using the existing session
-                            const session = provider.session;
-                            if (session && session.topic) {
-                                const wcDeepLink = `https://walletconnect.org/wc?sessionTopic=${session.topic}`;
-                                console.log('Opening wallet for signing:', wcDeepLink);
-                                window.location.href = wcDeepLink;
-                            } else {
-                                // Fallback: open generic wallet app
-                                const appDeepLink = openDeepLink(selectedWalletType, '');
-                                if (appDeepLink) {
-                                    window.location.href = appDeepLink;
-                                }
-                            }
-                        }
 
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -14006,28 +14019,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmountString, decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
 
-                        if (isMobileDevice()) {
-                            // ===== FIXED: Explicitly trigger mobile wallet for signing =====
-                            const session = provider.session;
-                            if (session && session.topic) {
-                                const wcDeepLink = `https://walletconnect.org/wc?sessionTopic=${session.topic}`;
-                                console.log('Opening wallet for signing:', wcDeepLink);
-                                window.location.href = wcDeepLink;
-                            } else {
-                                const appDeepLink = openDeepLink(selectedWalletType, '');
-                                if (appDeepLink) {
-                                    window.location.href = appDeepLink;
-                                }
-                            }
-                            statusMsg.textContent = 'Opening wallet for approval...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        }
-
                         statusMsg.textContent = 'Sending transaction...';
                         console.log('Sending native transaction to:', depositAddress);
                         console.log('Amount (human):', cryptoAmountString, asset.toUpperCase());
-                        console.log('Amount (wei):', amountRaw.toString());
-                        console.log('RPC value:', txData.value);
+                        console.log('Amount (raw hex):', txData.value);
 
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -14110,13 +14105,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.error('Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
 
-                // ===== FIXED: Better error categorization =====
+                // ===== FIXED: Better error classification =====
                 if (error.code === 4001) {
                     errorMessage = 'Transaction was rejected in your wallet.';
-                } else if (error.code === 5000) {
-                    errorMessage = 'Wallet transaction request failed. Please reconnect your wallet and try again.';
                 } else if (error.code === 5201) {
-                    errorMessage = 'Your wallet does not support transaction signing. Please reconnect the wallet.';
+                    errorMessage = 'Your wallet does not support transaction signing. Please reconnect your wallet.';
+                } else if (error.code === 5000) {
+                    errorMessage = 'Wallet transaction failed. Please try again.';
                 } else if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
                 } else if (errorMessage.includes('user rejected')) {
