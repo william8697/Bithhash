@@ -13843,11 +13843,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.log("Amount (USD):", amountUSD);
                 console.log("Amount (Crypto):", cryptoAmountString);
 
-                // CRITICAL FIX: Ensure network is correct BEFORE transaction
-                // This moves network enforcement to before building the transaction
                 if (isEVM) {
-                    statusMsg.textContent = 'Checking wallet network...';
-                    setButtonLoading(depositBtn, 'processing', 'Checking network...');
+                    statusMsg.textContent = 'Connecting wallet...';
+                    setButtonLoading(depositBtn, 'processing', 'Connecting wallet...');
 
                     const selectedWalletAddress = walletToUse;
                     const selectedWalletType = walletTypeToUse;
@@ -13877,67 +13875,29 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     // ===== FIXED: Use account property =====
                     const { provider, account, chainId: connectedChainId, capabilities } = sessionResult;
 
-                    // ===== CRITICAL FIX: Extract actual session methods from the provider session =====
-                    let actualMethods = [];
-                    try {
-                        // Get the actual WC session namespaces
-                        const session = provider.session;
-                        if (session && session.namespaces && session.namespaces.eip155) {
-                            actualMethods = session.namespaces.eip155.methods || [];
-                            console.log('Actual session methods from namespace:', actualMethods);
-                        }
-                    } catch (e) {
-                        console.warn('Could not read session methods:', e);
-                    }
-
-                    // Use actual methods or fall back to declared capabilities
-                    const supportsSendTx = actualMethods.includes('eth_sendTransaction') || 
-                                          (capabilities && capabilities.includes('eth_sendTransaction'));
-
-                    if (!supportsSendTx) {
-                        console.warn('eth_sendTransaction not supported by session. Actual methods:', actualMethods);
-                        throw new Error('This wallet session cannot approve transactions. Please reconnect your wallet and approve all requested permissions.');
-                    }
-
-                    // ===== CRITICAL FIX: Ensure correct network BEFORE building transaction =====
-                    const normalizedCurrent = normalizeChainId(connectedChainId);
-                    const normalizedRequired = normalizeChainId(chainId);
-
-                    if (normalizedCurrent !== normalizedRequired) {
-                        statusMsg.textContent = `Switching to ${chainId === 56 ? 'BNB Smart Chain' : chainId === 137 ? 'Polygon' : chainId === 43114 ? 'Avalanche' : 'Ethereum'}...`;
-                        setButtonLoading(depositBtn, 'approving', 'Switching network...');
-                        console.log('Switching network from', normalizedCurrent, 'to', normalizedRequired);
-
-                        try {
-                            await ensureCorrectEvmNetwork(provider, chainId);
-                            // Re-verify after switch
-                            const afterSwitch = normalizeChainId(
-                                await provider.request({ method: 'eth_chainId' })
-                            );
-                            if (afterSwitch !== normalizedRequired) {
-                                throw new Error(`Network switch failed. Wallet is on ${afterSwitch}, required ${normalizedRequired}.`);
-                            }
-                            console.log('Network switch confirmed');
-                        } catch (switchError) {
-                            if (switchError.message && switchError.message.includes('rejected')) {
-                                throw new Error('You rejected the network switch. Please approve it in your wallet.');
-                            }
-                            throw new Error('Failed to switch network: ' + (switchError.message || 'Unknown error'));
-                        }
-                    }
-
-                    // Final verification before transaction
-                    const finalChain = normalizeChainId(
-                        await provider.request({ method: 'eth_chainId' })
-                    );
-                    if (finalChain !== normalizedRequired) {
-                        throw new Error(`Network mismatch. Wallet is on ${finalChain}, required ${normalizedRequired}.`);
-                    }
-
                     const normalizedAccount = normalizeWalletAddress(account);
                     const normalizedLinked = normalizeWalletAddress(selectedWalletAddress);
                     if (normalizedAccount && normalizedLinked && normalizedAccount.toLowerCase() !== normalizedLinked.toLowerCase()) {
                         throw new Error('The connected wallet does not match your selected linked wallet. Please switch to the correct wallet.');
+                    }
+
+                    const normalizedCurrent = normalizeChainId(connectedChainId);
+                    const normalizedRequired = normalizeChainId(chainId);
+                    if (normalizedCurrent !== normalizedRequired) {
+                        // ===== FIXED: Switch network instead of throwing =====
+                        console.log('Network mismatch. Current:', normalizedCurrent, 'Required:', normalizedRequired);
+                        await ensureCorrectEvmNetwork(provider, chainId);
+                        // Re-check chain after switch
+                        const newChainId = await provider.request({ method: 'eth_chainId' });
+                        if (normalizeChainId(newChainId) !== normalizedRequired) {
+                            throw new Error(`Failed to switch to required network ${normalizedRequired}.`);
+                        }
+                    }
+
+                    const supportsSendTx = capabilities && capabilities.includes('eth_sendTransaction');
+                    if (!supportsSendTx) {
+                        console.warn('eth_sendTransaction not supported by session. Capabilities:', capabilities);
+                        throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
                     }
 
                     if (isERC20 && contractAddress) {
@@ -13975,19 +13935,26 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             data: data
                         };
 
-                        // ===== CRITICAL FIX: Explicitly trigger wallet on mobile =====
-                        if (isMobileDevice()) {
-                            statusMsg.textContent = 'Opening wallet for approval...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                            
-                            // On mobile, we need to ensure the wallet is launched for the request
-                            // The eth_sendTransaction call will trigger the wallet via WalletConnect
-                            // But we need to make sure the session is properly set up
-                            console.log('Mobile: Sending token transfer request via WalletConnect');
-                        }
-
                         statusMsg.textContent = 'Sending token transfer...';
+                        setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                         console.log('Sending ERC-20 transfer to:', depositAddress);
+
+                        // ===== FIXED: Explicitly trigger mobile wallet for signing =====
+                        if (isMobileDevice()) {
+                            // Generate a fresh deep link for the signing request using the existing session
+                            const session = provider.session;
+                            if (session && session.topic) {
+                                const wcDeepLink = `https://walletconnect.org/wc?sessionTopic=${session.topic}`;
+                                console.log('Opening wallet for signing:', wcDeepLink);
+                                window.location.href = wcDeepLink;
+                            } else {
+                                // Fallback: open generic wallet app
+                                const appDeepLink = openDeepLink(selectedWalletType, '');
+                                if (appDeepLink) {
+                                    window.location.href = appDeepLink;
+                                }
+                            }
+                        }
 
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -14039,17 +14006,27 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmountString, decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
 
-                        // ===== CRITICAL FIX: Explicitly trigger wallet on mobile =====
                         if (isMobileDevice()) {
+                            // ===== FIXED: Explicitly trigger mobile wallet for signing =====
+                            const session = provider.session;
+                            if (session && session.topic) {
+                                const wcDeepLink = `https://walletconnect.org/wc?sessionTopic=${session.topic}`;
+                                console.log('Opening wallet for signing:', wcDeepLink);
+                                window.location.href = wcDeepLink;
+                            } else {
+                                const appDeepLink = openDeepLink(selectedWalletType, '');
+                                if (appDeepLink) {
+                                    window.location.href = appDeepLink;
+                                }
+                            }
                             statusMsg.textContent = 'Opening wallet for approval...';
                             setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                            console.log('Mobile: Sending native transaction request via WalletConnect');
                         }
 
                         statusMsg.textContent = 'Sending transaction...';
                         console.log('Sending native transaction to:', depositAddress);
                         console.log('Amount (human):', cryptoAmountString, asset.toUpperCase());
-                        console.log('Amount (raw wei):', amountRaw.toString());
+                        console.log('Amount (wei):', amountRaw.toString());
                         console.log('RPC value:', txData.value);
 
                         const txHash = await provider.request({
@@ -14136,41 +14113,41 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 // ===== FIXED: Better error categorization =====
                 if (error.code === 4001) {
                     errorMessage = 'Transaction was rejected in your wallet.';
-                } else if (error.code === 5201) {
-                    errorMessage = 'The wallet does not support the requested method. Please reconnect your wallet and ensure all permissions are approved.';
                 } else if (error.code === 5000) {
-                    errorMessage = 'Wallet transaction failed. Please check your wallet and try again.';
-                } else if (error.message && error.message.includes('insufficient funds')) {
+                    errorMessage = 'Wallet transaction request failed. Please reconnect your wallet and try again.';
+                } else if (error.code === 5201) {
+                    errorMessage = 'Your wallet does not support transaction signing. Please reconnect the wallet.';
+                } else if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
-                } else if (error.message && error.message.includes('user rejected')) {
+                } else if (errorMessage.includes('user rejected')) {
                     errorMessage = 'Transaction was rejected in your wallet.';
-                } else if (error.message && error.message.includes('network error')) {
+                } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
-                } else if (error.message && error.message.includes('Invalid RPC URL')) {
+                } else if (errorMessage.includes('Invalid RPC URL')) {
                     errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
-                } else if (error.message && error.message.includes('Contract validation')) {
+                } else if (errorMessage.includes('Contract validation')) {
                     errorMessage = `Token contract validation failed. Please ensure you're on the correct network.`;
-                } else if (error.message && error.message.includes('Balance check')) {
+                } else if (errorMessage.includes('Balance check')) {
                     errorMessage = `Insufficient token balance. Please check your wallet balance.`;
-                } else if (error.message && error.message.includes('Gas estimation')) {
+                } else if (errorMessage.includes('Gas estimation')) {
                     errorMessage = `Gas estimation failed. Please verify you have enough ${asset.toUpperCase()} for gas.`;
-                } else if (error.message && error.message.includes('Simulation')) {
+                } else if (errorMessage.includes('Simulation')) {
                     errorMessage = `Transaction simulation failed. Please verify the contract address and recipient.`;
-                } else if (error.message && error.message.includes('No wallet provider')) {
+                } else if (errorMessage.includes('No wallet provider')) {
                     errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
-                } else if (error.message && error.message.includes('Chain switch timeout')) {
+                } else if (errorMessage.includes('Chain switch timeout')) {
                     errorMessage = 'Network switch timed out. Please approve the network switch in your wallet and try again.';
-                } else if (error.message && error.message.includes('Session expired')) {
+                } else if (errorMessage.includes('Session expired')) {
                     errorMessage = 'Your session has expired. Please log in again.';
-                } else if (error.message && error.message.includes('rejected the connection')) {
+                } else if (errorMessage.includes('rejected the connection')) {
                     errorMessage = 'You declined the wallet connection request.';
-                } else if (error.message && error.message.includes('mismatch')) {
+                } else if (errorMessage.includes('mismatch')) {
                     errorMessage = 'Please connect the correct wallet that matches your linked wallet.';
-                } else if (error.message && error.message.includes('eth_sendTransaction')) {
+                } else if (errorMessage.includes('eth_sendTransaction')) {
                     errorMessage = 'Your wallet does not support transaction requests. Please reconnect your wallet and try again.';
-                } else if (error.message && error.message.includes('session')) {
+                } else if (errorMessage.includes('session')) {
                     errorMessage = 'Your wallet session is expired. Please reconnect your wallet.';
-                } else if (error.message && error.message.includes('extension detected')) {
+                } else if (errorMessage.includes('extension detected')) {
                     errorMessage = `No ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} extension detected. Please install or enable ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} and try again.`;
                 }
 
