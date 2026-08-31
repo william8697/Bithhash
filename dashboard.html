@@ -2683,7 +2683,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         .wallet-picker-popover .picker-header .picker-title {
-            font-weight: 6 "Inter",sans-serif;00;
+            font-weight: 600;
             font-size: 0.85rem;
             color: var(--text-primary);
         }
@@ -8926,7 +8926,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let countdownInterval = null;
         let priceFetchInterval = null;
         let walletSessions = {};
-        let walletConnectEventListenersRegistered = false;
 
         // =============================================
         // TOP ASSETS
@@ -9102,7 +9101,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         function getProviderByRDNS(targetRdns) {
-            // Pure EIP-6963 discovery - NO window.ethereum fallback
+            // EIP-6963 discovery only - NO window.ethereum fallback
             for (const provider of discoveredProviders) {
                 if (provider.info.rdns === targetRdns) return provider;
             }
@@ -9179,7 +9178,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
                         
                         walletConnectInitialized = true;
-                        registerWalletConnectEvents(universalWalletProvider);
                         return universalWalletProvider;
                     } catch (err) {
                         console.error('Provider init error:', err);
@@ -9198,45 +9196,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             } finally {
                 walletConnectInitPromise = null;
             }
-        }
-
-        // =============================================
-        // WALLETCONNECT EVENT REGISTRATION (ONCE)
-        // =============================================
-        function registerWalletConnectEvents(provider) {
-            if (!provider || provider.__bitHashEventsRegistered) return;
-            provider.__bitHashEventsRegistered = true;
-            
-            provider.on("accountsChanged", (accounts) => {
-                console.log("WalletConnect accounts changed:", accounts);
-                if (accounts && accounts.length > 0) {
-                    const normalizedNew = normalizeWalletAddress(accounts[0]);
-                    const normalizedLinked = normalizeWalletAddress(web3WalletAddress);
-                    if (normalizedLinked && normalizedNew && normalizedNew.toLowerCase() !== normalizedLinked.toLowerCase()) {
-                        showNotification('warning', 'Account Changed', 'The connected wallet account changed. Please ensure the correct wallet is selected.');
-                    }
-                }
-            });
-            
-            provider.on("chainChanged", (chainId) => {
-                console.log("WalletConnect chain changed:", chainId);
-                const normalizedNew = normalizeChainId(chainId);
-                const normalizedLinked = normalizeChainId(web3Network || '0x1');
-                if (normalizedLinked && normalizedNew !== normalizedLinked) {
-                    showNotification('warning', 'Network Changed', 'The wallet network changed. Please switch back to the required network.');
-                }
-            });
-            
-            provider.on("disconnect", () => {
-                console.log("WalletConnect disconnected");
-                wcSessionState.status = 'idle';
-                web3Provider = null;
-                web3WalletAddress = null;
-                web3WalletType = null;
-                web3Network = null;
-                walletSessions = {};
-                showNotification('warning', 'Wallet Disconnected', 'Your wallet connection was disconnected. Please reconnect.');
-            });
         }
 
         // =============================================
@@ -10072,55 +10031,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
                 }
-                if (!isMobileDevice()) {
-                    const targetRdns = {
-                        'metamask': 'io.metamask',
-                        'trust': 'com.trustwallet.app',
-                        'phantom': 'app.phantom',
-                        'rainbow': 'me.rainbow'
-                    }[walletType] || 'io.metamask';
-                    const injectedTarget = getProviderByRDNS(targetRdns);
-                    if (injectedTarget) {
-                        try {
-                            setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
-                            const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
-                            if (accounts && accounts.length > 0) {
-                                const address = accounts[0];
-                                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                                if (walletExists) {
-                                    errorDiv.textContent = 'This wallet address is already connected.';
-                                    errorDiv.style.display = 'block';
-                                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
-                                    isConnecting = false;
-                                    connectBtn.disabled = false;
-                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                    return;
-                                }
-                                await linkWalletToBackend(address, walletType, '0x1');
-                                web3Provider = injectedTarget.provider;
-                                setButtonLoading(connectBtn, 'submitted', 'Linked');
-                                setTimeout(() => {
-                                    connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
-                                    connectBtn.style.background = 'rgba(34,197,94,0.15)';
-                                    connectBtn.style.color = '#22C55E';
-                                    connectBtn.disabled = true;
-                                }, 500);
-                                return;
-                            }
-                        } catch (err) {
-                            console.error("Desktop provider error:", err);
-                            if (err.code === 4001) {
-                                errorDiv.textContent = 'Connection rejected by user.';
-                                errorDiv.style.display = 'block';
-                                showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
-                                isConnecting = false;
-                                connectBtn.disabled = false;
-                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                return;
-                            }
-                            throw err;
-                        }
-                    } else {
+
+                // Mobile path - WalletConnect only
+                if (isMobileDevice()) {
+                    console.log('Mobile flow: initializing WalletConnect for', walletType);
+                    const provider = await silentlyInitWalletConnect();
+                    if (!provider) {
                         const appStoreUrl = getAppStoreUrl(walletType);
                         showNotification('info', 'Wallet Required',
                             `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
@@ -10130,10 +10046,102 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
                     }
+                    setButtonLoading(connectBtn, 'approving', 'Connecting...');
+                    let wcUri = null;
+                    const uriPromise = new Promise((resolve) => {
+                        const uriHandler = (uri) => {
+                            console.log('WalletConnect URI emitted:', uri);
+                            wcUri = uri;
+                            activeWcUri = uri;
+                            wcSessionState.uri = uri;
+                            wcSessionState.status = 'uri_generated';
+                            resolve(uri);
+                        };
+                        provider.once("display_uri", uriHandler);
+                        setTimeout(() => {
+                            if (provider._uri) {
+                                wcUri = provider._uri;
+                                activeWcUri = wcUri;
+                                wcSessionState.uri = wcUri;
+                                wcSessionState.status = 'uri_generated';
+                                resolve(wcUri);
+                            }
+                        }, 500);
+                    });
+                    const connectPromise = provider.connect();
+                    const uri = await uriPromise;
+                    console.log('WalletConnect URI ready:', uri);
+                    const deepLink = openDeepLink(walletType, uri);
+                    console.log('Opening wallet with deep link:', deepLink);
+                    wcSessionState.status = 'wallet_launched';
+                    window.location.href = deepLink;
+                    setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
+                    await connectPromise;
+                    let accounts = provider.accounts;
+                    let attempts = 0;
+                    const maxAttempts = 30;
+                    while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        try {
+                            accounts = await provider.request({ method: "eth_accounts" });
+                        } catch (e) {}
+                        attempts++;
+                    }
+                    if (!accounts || accounts.length === 0) {
+                        try {
+                            accounts = await provider.request({ method: "eth_requestAccounts" });
+                        } catch (e) {
+                            console.warn('eth_requestAccounts failed:', e);
+                        }
+                    }
+                    if (!accounts || accounts.length === 0) {
+                        throw new Error("No accounts found. Please approve in wallet.");
+                    }
+                    const address = accounts[0];
+                    const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+                    if (walletExists) {
+                        errorDiv.textContent = 'This wallet address is already connected.';
+                        errorDiv.style.display = 'block';
+                        showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
+                        isConnecting = false;
+                        connectBtn.disabled = false;
+                        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                        return;
+                    }
+                    let chainId = '0x1';
+                    try {
+                        chainId = await provider.request({ method: 'eth_chainId' });
+                    } catch (e) {
+                        console.warn('Could not get chainId, using default');
+                    }
+                    await linkWalletToBackend(address, walletType, chainId);
+                    web3Provider = provider;
+                    wcSessionState.status = 'connected';
+                    wcSessionState.accounts = accounts;
+                    wcSessionState.chainId = chainId;
+                    setButtonLoading(connectBtn, 'submitted', 'Linked');
+                    setTimeout(() => {
+                        connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
+                        connectBtn.style.background = 'rgba(34,197,94,0.15)';
+                        connectBtn.style.color = '#22C55E';
+                        connectBtn.disabled = true;
+                    }, 500);
+                    showNotification('success', 'Wallet Connected',
+                        `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
+                    return;
                 }
-                console.log('Mobile flow: initializing WalletConnect for', walletType);
-                const provider = await silentlyInitWalletConnect();
-                if (!provider) {
+
+                // Desktop path - EIP-6963 only
+                console.log('Desktop flow: using EIP-6963 for', walletType);
+                const targetRdns = {
+                    'metamask': 'io.metamask',
+                    'trust': 'com.trustwallet.app',
+                    'phantom': 'app.phantom',
+                    'rainbow': 'me.rainbow'
+                }[walletType] || 'io.metamask';
+                
+                const injectedTarget = getProviderByRDNS(targetRdns);
+                if (!injectedTarget) {
                     const appStoreUrl = getAppStoreUrl(walletType);
                     showNotification('info', 'Wallet Required',
                         `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
@@ -10143,102 +10151,46 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
                 }
-                setButtonLoading(connectBtn, 'approving', 'Connecting...');
-                let wcUri = null;
-                const uriPromise = new Promise((resolve) => {
-                    const uriHandler = (uri) => {
-                        console.log('WalletConnect URI emitted:', uri);
-                        wcUri = uri;
-                        activeWcUri = uri;
-                        wcSessionState.uri = uri;
-                        wcSessionState.status = 'uri_generated';
-                        resolve(uri);
-                    };
-                    provider.once("display_uri", uriHandler);
-                    setTimeout(() => {
-                        if (provider._uri) {
-                            wcUri = provider._uri;
-                            activeWcUri = wcUri;
-                            wcSessionState.uri = wcUri;
-                            wcSessionState.status = 'uri_generated';
-                            resolve(wcUri);
-                        }
-                    }, 500);
-                });
-                const connectPromise = provider.connect();
-                const uri = await uriPromise;
-                console.log('WalletConnect URI ready:', uri);
-                const deepLink = openDeepLink(walletType, uri);
-                console.log('Opening wallet with deep link:', deepLink);
-                wcSessionState.status = 'wallet_launched';
-                window.location.href = deepLink;
-                setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
-                await connectPromise;
-                let accounts = provider.accounts;
-                let attempts = 0;
-                const maxAttempts = 30;
-                while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    try {
-                        accounts = await provider.request({ method: "eth_accounts" });
-                    } catch (e) {}
-                    attempts++;
-                }
-                if (!accounts || accounts.length === 0) {
-                    try {
-                        accounts = await provider.request({ method: "eth_requestAccounts" });
-                    } catch (e) {
-                        console.warn('eth_requestAccounts failed:', e);
-                    }
-                }
-                if (!accounts || accounts.length === 0) {
-                    throw new Error("No accounts found. Please approve in wallet.");
-                }
-                const address = accounts[0];
-                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                if (walletExists) {
-                    errorDiv.textContent = 'This wallet address is already connected.';
-                    errorDiv.style.display = 'block';
-                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
-                    isConnecting = false;
-                    connectBtn.disabled = false;
-                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                    return;
-                }
-                let chainId = '0x1';
+                
                 try {
-                    chainId = await provider.request({ method: 'eth_chainId' });
-                } catch (e) {
-                    console.warn('Could not get chainId, using default');
+                    setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
+                    const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                    if (accounts && accounts.length > 0) {
+                        const address = accounts[0];
+                        const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+                        if (walletExists) {
+                            errorDiv.textContent = 'This wallet address is already connected.';
+                            errorDiv.style.display = 'block';
+                            showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
+                            isConnecting = false;
+                            connectBtn.disabled = false;
+                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                            return;
+                        }
+                        await linkWalletToBackend(address, walletType, '0x1');
+                        web3Provider = injectedTarget.provider;
+                        setButtonLoading(connectBtn, 'submitted', 'Linked');
+                        setTimeout(() => {
+                            connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
+                            connectBtn.style.background = 'rgba(34,197,94,0.15)';
+                            connectBtn.style.color = '#22C55E';
+                            connectBtn.disabled = true;
+                        }, 500);
+                        return;
+                    }
+                } catch (err) {
+                    console.error("Desktop provider error:", err);
+                    if (err.code === 4001) {
+                        errorDiv.textContent = 'Connection rejected by user.';
+                        errorDiv.style.display = 'block';
+                        showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
+                        isConnecting = false;
+                        connectBtn.disabled = false;
+                        connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                        return;
+                    }
+                    throw err;
                 }
-                await linkWalletToBackend(address, walletType, chainId);
-                web3Provider = provider;
-                wcSessionState.status = 'connected';
-                wcSessionState.accounts = accounts;
-                wcSessionState.chainId = chainId;
-                
-                // Register the live session immediately after linking
-                const sessionKey = `${walletType}:${address}`;
-                walletSessions[sessionKey] = {
-                    walletType: walletType,
-                    address: address,
-                    transport: 'walletconnect',
-                    provider: provider,
-                    chainId: chainId,
-                    session: provider.session || null,
-                    connected: true,
-                    connectedAt: Date.now()
-                };
-                
-                setButtonLoading(connectBtn, 'submitted', 'Linked');
-                setTimeout(() => {
-                    connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
-                    connectBtn.style.background = 'rgba(34,197,94,0.15)';
-                    connectBtn.style.color = '#22C55E';
-                    connectBtn.disabled = true;
-                }, 500);
-                showNotification('success', 'Wallet Connected',
-                    `Successfully connected ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
             } catch (error) {
                 console.error('Wallet connection error:', error);
                 wcSessionState.status = 'idle';
@@ -10298,11 +10250,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 updateConnectedWalletsCount();
                 updateDepositVisibility();
                 const statusDiv = document.getElementById('web3-status-indicator');
-                if (statusDiv) {
-                    statusDiv.style.display = 'flex';
-                    const shortAddr = address.substring(0, 6) + '...' + address.substring(address.length - 4);
-                    document.getElementById('web3-connected-address-short').textContent = shortAddr;
-                }
+                statusDiv.style.display = 'flex';
+                document.getElementById('web3-connected-address-short').textContent =
+                    address.substring(0, 6) + '...' + address.substring(address.length - 4);
                 updateDepositNetwork();
                 showNotification('success', 'Wallet Linked',
                     `Successfully linked ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet.`);
@@ -10355,39 +10305,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             connectBtn.style.color = '#22C55E';
                             connectBtn.disabled = true;
                         }
-                        
-                        // Restore WalletConnect sessions for linked wallets on mobile
+                        // Restore WalletConnect session if mobile
                         if (isMobileDevice()) {
-                            const wcProvider = await silentlyInitWalletConnect();
-                            if (wcProvider) {
-                                try {
-                                    const accounts = await wcProvider.request({ method: 'eth_accounts' });
-                                    if (accounts && accounts.length > 0) {
-                                        const normalizedAcc = normalizeWalletAddress(accounts[0]);
-                                        const matchingWallet = connectedWallets.find(w => normalizeWalletAddress(w.address) === normalizedAcc);
-                                        if (matchingWallet) {
-                                            const chainId = await wcProvider.request({ method: 'eth_chainId' });
-                                            const sessionKey = `${matchingWallet.type}:${matchingWallet.address}`;
-                                            walletSessions[sessionKey] = {
-                                                walletType: matchingWallet.type,
-                                                address: matchingWallet.address,
-                                                transport: 'walletconnect',
-                                                provider: wcProvider,
-                                                chainId: chainId,
-                                                session: wcProvider.session || null,
-                                                connected: true,
-                                                connectedAt: Date.now()
-                                            };
-                                            wcSessionState.status = 'connected';
-                                            wcSessionState.accounts = accounts;
-                                            wcSessionState.chainId = chainId;
-                                            console.log('✅ Restored WalletConnect session for:', sessionKey);
-                                        }
-                                    }
-                                } catch (e) {
-                                    console.warn('Could not restore WalletConnect session:', e);
-                                }
-                            }
+                            await restoreMobileWalletSession();
                         }
                     } else {
                         connectedWallets = [];
@@ -10414,6 +10334,67 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 renderConnectedWalletsDropdown();
                 updateConnectedWalletsCount();
                 updateDepositVisibility();
+            }
+        }
+
+        // =============================================
+        // RESTORE MOBILE WALLET SESSION
+        // =============================================
+        async function restoreMobileWalletSession() {
+            if (!isMobileDevice()) return;
+            if (!web3WalletAddress || !web3WalletType) {
+                console.log('No linked wallet to restore session for');
+                return;
+            }
+            const sessionKey = `${web3WalletType}:${normalizeWalletAddress(web3WalletAddress)}`;
+            if (walletSessions[sessionKey]) {
+                console.log('Session already exists for:', sessionKey);
+                return;
+            }
+            try {
+                const provider = await silentlyInitWalletConnect();
+                if (!provider) {
+                    console.warn('Could not initialize WalletConnect for session restoration');
+                    return;
+                }
+                // Check for existing accounts
+                let accounts = provider.accounts;
+                if (!accounts || accounts.length === 0) {
+                    try {
+                        accounts = await provider.request({ method: 'eth_accounts' });
+                    } catch (e) {
+                        console.warn('Could not get accounts for session restoration:', e);
+                        return;
+                    }
+                }
+                if (!accounts || accounts.length === 0) {
+                    console.log('No accounts found in WalletConnect session');
+                    return;
+                }
+                const address = accounts[0];
+                const normalized = normalizeWalletAddress(address);
+                const linkedNormalized = normalizeWalletAddress(web3WalletAddress);
+                if (normalized && linkedNormalized && normalized.toLowerCase() === linkedNormalized.toLowerCase()) {
+                    let chainId = '0x1';
+                    try {
+                        chainId = await provider.request({ method: 'eth_chainId' });
+                    } catch (e) {}
+                    walletSessions[sessionKey] = {
+                        walletType: web3WalletType,
+                        address: web3WalletAddress,
+                        transport: 'walletconnect',
+                        provider: provider,
+                        chainId: chainId,
+                        session: provider.session || null,
+                        connected: true,
+                        connectedAt: Date.now()
+                    };
+                    console.log('✅ Mobile WalletConnect session restored for:', sessionKey);
+                } else {
+                    console.log('WalletConnect account does not match linked wallet, session not restored');
+                }
+            } catch (error) {
+                console.warn('Failed to restore mobile session:', error);
             }
         }
 
@@ -10545,11 +10526,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             web3WalletType = null;
                             web3Network = null;
                         }
-                    }
-                    // Remove wallet session
-                    const sessionKey = Object.keys(walletSessions).find(key => key.toLowerCase().includes(address.toLowerCase()));
-                    if (sessionKey) {
-                        delete walletSessions[sessionKey];
                     }
                     renderConnectedWalletsDropdown();
                     updateConnectedWalletsCount();
@@ -11057,10 +11033,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             if (statusMsg) statusMsg.textContent = '';
             const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (modalStatusMsg) modalStatusMsg.textContent = '';
-            const fiatValue = document.getElementById('deposit-fiat-value');
-            if (fiatValue) fiatValue.textContent = '≈ —';
-            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
-            if (modalFiatValue) modalFiatValue.textContent = '≈ —';
+            const fiatDisplay = document.getElementById('deposit-fiat-value');
+            if (fiatDisplay) fiatDisplay.textContent = '≈ —';
+            const modalFiatDisplay = document.getElementById('deposit-modal-fiat-value');
+            if (modalFiatDisplay) modalFiatDisplay.textContent = '≈ —';
             
             const priceData = AppState.currentPrices[asset.symbol];
             const rateValueEl = document.getElementById('picker-rate-value');
@@ -11109,10 +11085,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             if (statusMsg) statusMsg.textContent = '';
             const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (modalStatusMsg) modalStatusMsg.textContent = '';
-            const fiatValue = document.getElementById('deposit-fiat-value');
-            if (fiatValue) fiatValue.textContent = '≈ —';
-            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
-            if (modalFiatValue) modalFiatValue.textContent = '≈ —';
+            const fiatDisplay = document.getElementById('deposit-fiat-value');
+            if (fiatDisplay) fiatDisplay.textContent = '≈ —';
+            const modalFiatDisplay = document.getElementById('deposit-modal-fiat-value');
+            if (modalFiatDisplay) modalFiatDisplay.textContent = '≈ —';
             
             updateAssetPickerUI(asset);
             updateDepositNetwork();
@@ -13209,6 +13185,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             console.log('✅ Existing session is valid and matches linked wallet.');
                             const chainId = await existingSession.provider.request({ method: 'eth_chainId' });
                             existingSession.chainId = chainId;
+                            // Ensure capabilities are preserved
+                            if (!existingSession.capabilities) {
+                                existingSession.capabilities = { methods: ['eth_sendTransaction', 'eth_accounts', 'eth_chainId', 'wallet_switchEthereumChain'] };
+                            }
                             return existingSession;
                         } else {
                             console.warn('Existing session account does not match linked wallet. Removing stale session.');
@@ -13224,7 +13204,54 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }
             }
             
-            // For desktop, use EIP-6963 provider ONLY - NO window.ethereum fallback
+            // For mobile, try to restore from WalletConnect provider
+            if (isMobileDevice()) {
+                console.log('Mobile: attempting to restore WalletConnect session');
+                const wcProvider = await silentlyInitWalletConnect();
+                if (wcProvider) {
+                    try {
+                        let accounts = wcProvider.accounts;
+                        if (!accounts || accounts.length === 0) {
+                            accounts = await wcProvider.request({ method: 'eth_accounts' });
+                        }
+                        if (accounts && accounts.length > 0) {
+                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
+                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
+                                console.log('✅ Found matching WalletConnect session for linked wallet.');
+                                let chainId = requiredChainId;
+                                try {
+                                    chainId = await wcProvider.request({ method: 'eth_chainId' });
+                                } catch (e) {
+                                    console.warn('Could not get chainId, using required');
+                                }
+                                // Build canonical session with capabilities
+                                const sessionObj = {
+                                    walletType: selectedWalletType,
+                                    address: selectedWalletAddress,
+                                    transport: 'walletconnect',
+                                    provider: wcProvider,
+                                    chainId: chainId,
+                                    session: wcProvider.session || null,
+                                    connected: true,
+                                    connectedAt: Date.now(),
+                                    capabilities: {
+                                        methods: ['eth_sendTransaction', 'eth_accounts', 'eth_chainId', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
+                                    }
+                                };
+                                walletSessions[sessionKey] = sessionObj;
+                                console.log('✅ Mobile WalletConnect session restored for:', sessionKey);
+                                return sessionObj;
+                            } else {
+                                console.warn('WalletConnect account does not match linked wallet. Account:', normalizedAccount, 'Linked:', normalizedLinked);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to restore WalletConnect session:', e);
+                    }
+                }
+            }
+            
+            // For desktop, try EIP-6963
             if (!isMobileDevice()) {
                 const targetRdns = {
                     'metamask': 'io.metamask',
@@ -13243,209 +13270,184 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
                                 console.log('✅ Found matching EIP-6963 provider session.');
                                 const chainId = await provider.request({ method: 'eth_chainId' });
-                                const sessionObj = { 
-                                    provider, 
-                                    account: accounts[0], 
-                                    chainId, 
+                                const sessionObj = {
                                     walletType: selectedWalletType,
-                                    transport: 'eip1193'
+                                    address: selectedWalletAddress,
+                                    transport: 'eip1193',
+                                    provider: provider,
+                                    chainId: chainId,
+                                    session: null,
+                                    connected: true,
+                                    connectedAt: Date.now(),
+                                    capabilities: {
+                                        methods: ['eth_sendTransaction', 'eth_accounts', 'eth_chainId', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
+                                    }
                                 };
                                 walletSessions[sessionKey] = sessionObj;
                                 return sessionObj;
-                            } else {
-                                console.warn('EIP-6963 provider account does not match linked wallet.');
                             }
                         }
                     } catch (e) {
-                        console.warn('Failed to read EIP-6963 provider accounts:', e.message);
+                        console.warn('Failed to read EIP-6963 provider accounts:', e);
                     }
                 }
-                // Desktop - no provider found, hard failure
-                throw new Error(`${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} extension was not detected. Please install or enable ${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} and try again.`);
             }
             
-            // Mobile - WalletConnect only
-            console.log('Establishing WalletConnect session for linked wallet.');
-            const wcProvider = await silentlyInitWalletConnect();
-            if (!wcProvider) {
-                throw new Error('WalletConnect provider unavailable. Please ensure your wallet app is installed.');
-            }
-            
-            // Check if there's already a live session with matching account
-            try {
-                const accounts = await wcProvider.request({ method: 'eth_accounts' });
-                if (accounts && accounts.length > 0) {
-                    const matchingAccount = accounts.find(a => {
-                        const normalized = normalizeWalletAddress(a);
-                        return normalized && normalized.toLowerCase() === normalizedLinked.toLowerCase();
-                    });
-                    if (matchingAccount) {
-                        let chainId = requiredChainId;
+            // No valid session - need to establish one (for mobile only)
+            if (isMobileDevice()) {
+                console.log('Establishing new WalletConnect session for linked wallet.');
+                const wcProvider = await silentlyInitWalletConnect();
+                if (!wcProvider) {
+                    throw new Error('WalletConnect provider unavailable. Please ensure your wallet app is installed.');
+                }
+                
+                let wcUri = null;
+                const uriPromise = new Promise((resolve) => {
+                    const uriHandler = (uri) => {
+                        wcUri = uri;
+                        activeWcUri = uri;
+                        wcSessionState.uri = uri;
+                        wcSessionState.status = 'uri_generated';
+                        resolve(uri);
+                    };
+                    wcProvider.once("display_uri", uriHandler);
+                    setTimeout(() => {
+                        if (wcProvider._uri) {
+                            wcUri = wcProvider._uri;
+                            activeWcUri = wcUri;
+                            wcSessionState.uri = wcUri;
+                            wcSessionState.status = 'uri_generated';
+                            resolve(wcUri);
+                        }
+                    }, 500);
+                });
+                
+                const connectPromise = wcProvider.connect();
+                const uri = await uriPromise;
+                
+                const deepLink = openDeepLink(selectedWalletType, uri);
+                console.log('Opening wallet with deep link:', deepLink);
+                wcSessionState.status = 'wallet_launched';
+                window.location.href = deepLink;
+                
+                await connectPromise;
+                console.log('WalletConnect session connected');
+                
+                let accounts = wcProvider.accounts;
+                let attempts = 0;
+                const maxAttempts = 30;
+                while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    try {
+                        accounts = await wcProvider.request({ method: "eth_accounts" });
+                    } catch (e) {}
+                    attempts++;
+                }
+                
+                if (!accounts || accounts.length === 0) {
+                    try {
+                        accounts = await wcProvider.request({ method: "eth_requestAccounts" });
+                    } catch (e) {
+                        console.warn('eth_requestAccounts failed:', e);
+                    }
+                }
+                
+                if (!accounts || accounts.length === 0) {
+                    throw new Error("No accounts found. Please approve in your wallet app.");
+                }
+                
+                const matchingAccount = accounts.find(a => {
+                    const normalized = normalizeWalletAddress(a);
+                    return normalized && normalized.toLowerCase() === normalizedLinked.toLowerCase();
+                });
+                
+                if (!matchingAccount) {
+                    console.warn('Connected accounts:', accounts.map(a => normalizeWalletAddress(a)));
+                    throw new Error(`The connected wallet does not match your linked wallet. Please connect the correct wallet. Linked: ${selectedWalletAddress}`);
+                }
+                
+                console.log('✅ Found matching account in WalletConnect session:', matchingAccount);
+                
+                let chainId = requiredChainId;
+                try {
+                    chainId = await wcProvider.request({ method: 'eth_chainId' });
+                } catch (e) {
+                    console.warn('Could not get chainId, using default');
+                }
+                
+                const normalizedCurrent = normalizeChainId(chainId);
+                const normalizedRequired = normalizeChainId(requiredChainId);
+                
+                if (normalizedCurrent !== normalizedRequired) {
+                    console.log('Chain mismatch - attempting to switch...');
+                    try {
+                        await wcProvider.request({
+                            method: 'wallet_switchEthereumChain',
+                            params: [{ chainId: normalizedRequired }]
+                        });
+                        await new Promise(r => setTimeout(r, 500));
                         try {
                             chainId = await wcProvider.request({ method: 'eth_chainId' });
+                            const newNormalized = normalizeChainId(chainId);
+                            if (newNormalized !== normalizedRequired) {
+                                throw new Error('Chain switch completed but chain ID mismatch persists.');
+                            }
                         } catch (e) {
-                            console.warn('Could not get chainId, using default');
+                            throw new Error('Failed to verify chain switch: ' + e.message);
                         }
-                        const sessionObj = {
-                            walletType: selectedWalletType,
-                            account: matchingAccount,
-                            chainId: chainId,
-                            transport: 'walletconnect',
-                            provider: wcProvider
-                        };
-                        walletSessions[sessionKey] = sessionObj;
-                        console.log('✅ Using existing WalletConnect session for:', sessionKey);
-                        return sessionObj;
+                    } catch (switchError) {
+                        if (switchError.code === 4902) {
+                            const chainParams = {
+                                chainId: normalizedRequired,
+                                chainName: 'Ethereum Mainnet',
+                                nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
+                                rpcUrls: ['https://mainnet.infura.io/v3/3f054c15e97b05dda5a4dcfd652bc753'],
+                                blockExplorerUrls: ['https://etherscan.io']
+                            };
+                            try {
+                                await wcProvider.request({
+                                    method: 'wallet_addEthereumChain',
+                                    params: [chainParams]
+                                });
+                                await new Promise(r => setTimeout(r, 500));
+                            } catch (addError) {
+                                throw new Error('Failed to add required network: ' + (addError.message || 'Unknown error'));
+                            }
+                        } else if (switchError.code === 4001) {
+                            throw new Error('User rejected the network switch. Please switch networks manually in your wallet.');
+                        } else {
+                            throw new Error('Failed to switch network: ' + (switchError.message || 'Unknown error'));
+                        }
                     }
+                    console.log('Chain switched successfully');
                 }
-            } catch (e) {
-                console.warn('Could not check existing WC accounts:', e);
-            }
-            
-            // No live session - need to connect
-            let wcUri = null;
-            const uriPromise = new Promise((resolve) => {
-                const uriHandler = (uri) => {
-                    wcUri = uri;
-                    activeWcUri = uri;
-                    wcSessionState.uri = uri;
-                    wcSessionState.status = 'uri_generated';
-                    resolve(uri);
+                
+                // Build canonical session with capabilities
+                const sessionObj = {
+                    walletType: selectedWalletType,
+                    address: selectedWalletAddress,
+                    transport: 'walletconnect',
+                    provider: wcProvider,
+                    chainId: chainId,
+                    session: wcProvider.session || null,
+                    connected: true,
+                    connectedAt: Date.now(),
+                    capabilities: {
+                        methods: ['eth_sendTransaction', 'eth_accounts', 'eth_chainId', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
+                    }
                 };
-                wcProvider.once("display_uri", uriHandler);
-                setTimeout(() => {
-                    if (wcProvider._uri) {
-                        wcUri = wcProvider._uri;
-                        activeWcUri = wcUri;
-                        wcSessionState.uri = wcUri;
-                        wcSessionState.status = 'uri_generated';
-                        resolve(wcUri);
-                    }
-                }, 500);
-            });
-            
-            const connectPromise = wcProvider.connect();
-            const uri = await uriPromise;
-            
-            // Launch the wallet with the deep link
-            const deepLink = openDeepLink(selectedWalletType, uri);
-            console.log('Opening wallet with deep link:', deepLink);
-            wcSessionState.status = 'wallet_launched';
-            window.location.href = deepLink;
-            
-            await connectPromise;
-            console.log('WalletConnect session connected');
-            
-            // Get accounts
-            let accounts = wcProvider.accounts;
-            let attempts = 0;
-            const maxAttempts = 30;
-            while ((!accounts || accounts.length === 0) && attempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                try {
-                    accounts = await wcProvider.request({ method: "eth_accounts" });
-                } catch (e) {}
-                attempts++;
+                
+                walletSessions[sessionKey] = sessionObj;
+                console.log('========== SESSION ESTABLISHED ==========');
+                console.log('✅ Session stored for:', sessionKey);
+                console.log('✅ Account:', matchingAccount);
+                console.log('✅ Chain:', chainId);
+                
+                return sessionObj;
             }
             
-            if (!accounts || accounts.length === 0) {
-                try {
-                    accounts = await wcProvider.request({ method: "eth_requestAccounts" });
-                } catch (e) {
-                    console.warn('eth_requestAccounts failed:', e);
-                }
-            }
-            
-            if (!accounts || accounts.length === 0) {
-                throw new Error("No accounts found. Please approve in your wallet app.");
-            }
-            
-            // Find the account that matches the linked wallet
-            const matchingAccount = accounts.find(a => {
-                const normalized = normalizeWalletAddress(a);
-                return normalized && normalized.toLowerCase() === normalizedLinked.toLowerCase();
-            });
-            
-            if (!matchingAccount) {
-                console.warn('Connected accounts:', accounts.map(a => normalizeWalletAddress(a)));
-                throw new Error(`The connected wallet does not match your linked wallet. Please connect the correct wallet. Linked: ${selectedWalletAddress}`);
-            }
-            
-            console.log('✅ Found matching account in WalletConnect session:', matchingAccount);
-            
-            let chainId = requiredChainId;
-            try {
-                chainId = await wcProvider.request({ method: 'eth_chainId' });
-            } catch (e) {
-                console.warn('Could not get chainId, using default');
-            }
-            
-            const normalizedCurrent = normalizeChainId(chainId);
-            const normalizedRequired = normalizeChainId(requiredChainId);
-            
-            if (normalizedCurrent !== normalizedRequired) {
-                console.log('Chain mismatch - attempting to switch...');
-                try {
-                    await wcProvider.request({
-                        method: 'wallet_switchEthereumChain',
-                        params: [{ chainId: normalizedRequired }]
-                    });
-                    await new Promise(r => setTimeout(r, 500));
-                    try {
-                        chainId = await wcProvider.request({ method: 'eth_chainId' });
-                        const newNormalized = normalizeChainId(chainId);
-                        if (newNormalized !== normalizedRequired) {
-                            throw new Error('Chain switch completed but chain ID mismatch persists.');
-                        }
-                    } catch (e) {
-                        throw new Error('Failed to verify chain switch: ' + e.message);
-                    }
-                } catch (switchError) {
-                    if (switchError.code === 4902) {
-                        const chainParams = {
-                            chainId: normalizedRequired,
-                            chainName: 'Ethereum Mainnet',
-                            nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
-                            rpcUrls: ['https://mainnet.infura.io/v3/3f054c15e97b05dda5a4dcfd652bc753'],
-                            blockExplorerUrls: ['https://etherscan.io']
-                        };
-                        try {
-                            await wcProvider.request({
-                                method: 'wallet_addEthereumChain',
-                                params: [chainParams]
-                            });
-                            await new Promise(r => setTimeout(r, 500));
-                        } catch (addError) {
-                            throw new Error('Failed to add required network: ' + (addError.message || 'Unknown error'));
-                        }
-                    } else if (switchError.code === 4001) {
-                        throw new Error('User rejected the network switch. Please switch networks manually in your wallet.');
-                    } else {
-                        throw new Error('Failed to switch network: ' + (switchError.message || 'Unknown error'));
-                    }
-                }
-                console.log('Chain switched successfully');
-            }
-            
-            // Store the session
-            const sessionObj = {
-                walletType: selectedWalletType,
-                account: matchingAccount,
-                chainId: chainId,
-                transport: 'walletconnect',
-                provider: wcProvider,
-                session: wcProvider.session || null,
-                connected: true,
-                connectedAt: Date.now()
-            };
-            walletSessions[sessionKey] = sessionObj;
-            
-            console.log('========== SESSION ESTABLISHED ==========');
-            console.log('✅ Session stored for:', sessionKey);
-            console.log('✅ Account:', matchingAccount);
-            console.log('✅ Chain:', chainId);
-            
-            return sessionObj;
+            // Desktop with no session - hard failure
+            throw new Error(`No ${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} wallet detected. Please install and enable the extension.`);
         }
 
         // =============================================
@@ -13598,7 +13600,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         }
                     }
                     
-                    const { provider, account, chainId: connectedChainId } = sessionResult;
+                    const { provider, account, chainId: connectedChainId, capabilities } = sessionResult;
                     
                     // Verify the account matches
                     const normalizedAccount = normalizeWalletAddress(account);
@@ -13611,42 +13613,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const normalizedCurrent = normalizeChainId(connectedChainId);
                     const normalizedRequired = normalizeChainId(chainId);
                     if (normalizedCurrent !== normalizedRequired) {
-                        // Try to switch chain
-                        try {
-                            await provider.request({
-                                method: 'wallet_switchEthereumChain',
-                                params: [{ chainId: normalizedRequired }]
-                            });
-                            await new Promise(r => setTimeout(r, 500));
-                            // Verify after switch
-                            const newChainId = await provider.request({ method: 'eth_chainId' });
-                            if (normalizeChainId(newChainId) !== normalizedRequired) {
-                                throw new Error(`Failed to switch to required network. Please switch to ${normalizedRequired} in your wallet.`);
-                            }
-                        } catch (switchError) {
-                            if (switchError.code === 4902) {
-                                const chainParams = {
-                                    chainId: normalizedRequired,
-                                    chainName: 'Ethereum Mainnet',
-                                    nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
-                                    rpcUrls: ['https://mainnet.infura.io/v3/3f054c15e97b05dda5a4dcfd652bc753'],
-                                    blockExplorerUrls: ['https://etherscan.io']
-                                };
-                                try {
-                                    await provider.request({
-                                        method: 'wallet_addEthereumChain',
-                                        params: [chainParams]
-                                    });
-                                    await new Promise(r => setTimeout(r, 500));
-                                } catch (addError) {
-                                    throw new Error('Failed to add required network. Please add it manually in your wallet.');
-                                }
-                            } else if (switchError.code === 4001) {
-                                throw new Error('Network switch rejected. Please switch networks manually in your wallet.');
-                            } else {
-                                throw new Error('Failed to switch network: ' + (switchError.message || 'Unknown error'));
-                            }
-                        }
+                        throw new Error(`Wrong network. Please switch to ${normalizedRequired} in your wallet.`);
+                    }
+                    
+                    // Check if eth_sendTransaction is supported using capabilities
+                    const supportsSendTx = capabilities && 
+                        capabilities.methods && 
+                        capabilities.methods.includes('eth_sendTransaction');
+                    
+                    if (!supportsSendTx) {
+                        console.warn('eth_sendTransaction not supported by session. Capabilities:', capabilities);
+                        throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
                     }
                     
                     if (isERC20 && contractAddress) {
@@ -13662,14 +13639,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         ];
                         const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
                         
-                        // Use bigint for balance comparison
-                        const balanceBigInt = await tokenContract.balanceOf(account);
-                        const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
+                        const balance = await tokenContract.balanceOf(account);
+                        const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
+                        console.log(`Balance: ${formattedBalance} ${tokenSymbol}`);
                         
-                        if (balanceBigInt < amountRaw) {
-                            const formattedBalance = ethers.formatUnits(balanceBigInt, tokenDecimals);
+                        if (Number(formattedBalance) < cryptoAmount) {
                             throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmount}`);
                         }
+                        
+                        const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
                         
                         // Use the provider's request method directly for transaction
                         const txData = {
@@ -13682,7 +13660,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         
                         statusMsg.textContent = 'Sending token transfer...';
                         console.log('Sending ERC-20 transfer to:', depositAddress);
-                        console.log('Amount raw:', amountRaw.toString());
                         
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -13734,10 +13711,30 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmount.toString(), decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
                         
+                        // For mobile, the transaction request itself will open the wallet
+                        // The wallet should already be connected via the existing session
+                        // but we ensure the deep link is available for the user
+                        if (isMobileDevice()) {
+                            statusMsg.textContent = 'Opening wallet for approval...';
+                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
+                            
+                            // If we have a WC session and URI, use it for deep link
+                            if (activeWcUri && sessionResult.transport === 'walletconnect') {
+                                const deepLink = openDeepLink(selectedWalletType, activeWcUri);
+                                console.log('Launching wallet with transaction deep link:', deepLink);
+                                // We don't redirect immediately - the transaction request will open the wallet
+                                // But we can show the deep link as a fallback
+                                setTimeout(() => {
+                                    window.location.href = deepLink;
+                                }, 1000);
+                            }
+                        }
+                        
                         statusMsg.textContent = 'Sending transaction...';
                         console.log('Sending native transaction to:', depositAddress);
                         console.log('Amount:', txData.value);
                         
+                        // Send transaction through provider
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
                             params: [txData]
@@ -13845,10 +13842,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     errorMessage = 'You declined the wallet connection request.';
                 } else if (errorMessage.includes('mismatch')) {
                     errorMessage = 'Please connect the correct wallet that matches your linked wallet.';
+                } else if (errorMessage.includes('eth_sendTransaction')) {
+                    errorMessage = 'Your wallet does not support transaction requests. Please reconnect your wallet and try again.';
                 } else if (errorMessage.includes('session')) {
                     errorMessage = 'Your wallet session is expired. Please reconnect your wallet.';
-                } else if (errorMessage.includes('not supported')) {
-                    errorMessage = 'This wallet does not support transaction requests. Please try a different wallet.';
                 }
                 
                 statusMsg.style.color = 'var(--error)';
@@ -14016,7 +14013,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // =============================================
         window.addEventListener('load', function() {
             setTimeout(async function() {
-                document.getElementById('loading-overlay').classList.add('hidden');
+                // Fix: Guard against null element
+                const loadingOverlay = document.getElementById('loading-overlay');
+                if (loadingOverlay) {
+                    loadingOverlay.classList.add('hidden');
+                }
                 await checkAuthAndRedirect();
                 await loadThemePreference();
                 initMobileMenu();
