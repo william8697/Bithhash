@@ -2683,7 +2683,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         .wallet-picker-popover .picker-header .picker-title {
-            font-weight: 600;
+            font-weight: 6 "Inter",sans-serif;00;
             font-size: 0.85rem;
             color: var(--text-primary);
         }
@@ -8926,6 +8926,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let countdownInterval = null;
         let priceFetchInterval = null;
         let walletSessions = {};
+        let walletConnectEventListenersRegistered = false;
 
         // =============================================
         // TOP ASSETS
@@ -9100,13 +9101,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             return desktopStores[walletType] || 'https://walletconnect.org/';
         }
 
-        // ===== FIX: getProviderByRDNS - NO window.ethereum fallback =====
         function getProviderByRDNS(targetRdns) {
-            // EIP-6963 discovery ONLY - no window.ethereum fallback
+            // Pure EIP-6963 discovery - NO window.ethereum fallback
             for (const provider of discoveredProviders) {
                 if (provider.info.rdns === targetRdns) return provider;
             }
-            // Do NOT fall back to window.ethereum - per spec requirement #4
             return null;
         }
 
@@ -9129,10 +9128,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // WALLETCONNECT INIT - Idempotent, single lifecycle
+        // WALLETCONNECT INIT
         // =============================================
-        let wcEventListenersRegistered = false;
-
         async function silentlyInitWalletConnect() {
             if (universalWalletProvider) {
                 return universalWalletProvider;
@@ -9180,14 +9177,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 mobileLinks: []
                             }
                         });
-
-                        // Register event listeners ONCE
-                        if (!wcEventListenersRegistered && universalWalletProvider) {
-                            registerWalletConnectEvents(universalWalletProvider);
-                            wcEventListenersRegistered = true;
-                        }
-
+                        
                         walletConnectInitialized = true;
+                        registerWalletConnectEvents(universalWalletProvider);
                         return universalWalletProvider;
                     } catch (err) {
                         console.error('Provider init error:', err);
@@ -9208,93 +9200,42 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
+        // =============================================
+        // WALLETCONNECT EVENT REGISTRATION (ONCE)
+        // =============================================
         function registerWalletConnectEvents(provider) {
-            if (!provider) return;
-            
-            // Use a flag on the provider to prevent duplicate registration
-            if (provider.__bitHashEventsRegistered) return;
+            if (!provider || provider.__bitHashEventsRegistered) return;
             provider.__bitHashEventsRegistered = true;
-
+            
             provider.on("accountsChanged", (accounts) => {
-                console.log('WalletConnect accounts changed:', accounts);
+                console.log("WalletConnect accounts changed:", accounts);
                 if (accounts && accounts.length > 0) {
-                    // Check if the changed account matches any linked wallet
-                    const newAddress = accounts[0];
-                    const normalizedNew = normalizeWalletAddress(newAddress);
-                    let foundMatch = false;
-                    for (const wallet of connectedWallets) {
-                        const normalizedWallet = normalizeWalletAddress(wallet.address || wallet.walletAddress);
-                        if (normalizedWallet && normalizedNew && normalizedWallet.toLowerCase() === normalizedNew.toLowerCase()) {
-                            foundMatch = true;
-                            break;
-                        }
+                    const normalizedNew = normalizeWalletAddress(accounts[0]);
+                    const normalizedLinked = normalizeWalletAddress(web3WalletAddress);
+                    if (normalizedLinked && normalizedNew && normalizedNew.toLowerCase() !== normalizedLinked.toLowerCase()) {
+                        showNotification('warning', 'Account Changed', 'The connected wallet account changed. Please ensure the correct wallet is selected.');
                     }
-                    if (!foundMatch) {
-                        console.warn('Account changed to non-linked wallet:', newAddress);
-                        showNotification('warning', 'Account Changed', 
-                            'The connected wallet account changed. Please reconnect the linked wallet.');
-                        wcSessionState.status = 'idle';
-                        wcSessionState.accounts = [];
-                        // Clear stale sessions
-                        for (const key of Object.keys(walletSessions)) {
-                            delete walletSessions[key];
-                        }
-                    } else {
-                        wcSessionState.accounts = accounts;
-                        wcSessionState.status = 'connected';
-                    }
-                } else {
-                    wcSessionState.status = 'idle';
-                    wcSessionState.accounts = [];
                 }
             });
-
+            
             provider.on("chainChanged", (chainId) => {
-                console.log('WalletConnect chain changed:', chainId);
-                const normalized = normalizeChainId(chainId);
-                wcSessionState.chainId = normalized;
-                // Update session chain for all stored sessions
-                for (const key of Object.keys(walletSessions)) {
-                    if (walletSessions[key].provider === provider) {
-                        walletSessions[key].chainId = normalized;
-                    }
+                console.log("WalletConnect chain changed:", chainId);
+                const normalizedNew = normalizeChainId(chainId);
+                const normalizedLinked = normalizeChainId(web3Network || '0x1');
+                if (normalizedLinked && normalizedNew !== normalizedLinked) {
+                    showNotification('warning', 'Network Changed', 'The wallet network changed. Please switch back to the required network.');
                 }
             });
-
+            
             provider.on("disconnect", () => {
-                console.log('WalletConnect disconnected');
+                console.log("WalletConnect disconnected");
                 wcSessionState.status = 'idle';
-                wcSessionState.accounts = [];
-                wcSessionState.session = null;
-                // Clear all stored sessions for this provider
-                for (const key of Object.keys(walletSessions)) {
-                    if (walletSessions[key].provider === provider) {
-                        delete walletSessions[key];
-                    }
-                }
-                showNotification('warning', 'Wallet Disconnected', 
-                    'Your wallet connection was lost. Please reconnect.');
-            });
-
-            provider.on("session_event", (data) => {
-                console.log('WalletConnect session event:', data);
-                if (data.params?.event?.data?.chainId) {
-                    const normalized = normalizeChainId(data.params.event.data.chainId);
-                    wcSessionState.chainId = normalized;
-                }
-                if (data.params?.event?.data?.accounts) {
-                    wcSessionState.accounts = data.params.event.data.accounts;
-                }
-            });
-
-            provider.on("session_update", (data) => {
-                console.log('WalletConnect session update:', data);
-                if (data.params?.chainId) {
-                    wcSessionState.chainId = normalizeChainId(data.params.chainId);
-                }
-                if (data.params?.accounts) {
-                    wcSessionState.accounts = data.params.accounts;
-                }
+                web3Provider = null;
+                web3WalletAddress = null;
+                web3WalletType = null;
+                web3Network = null;
+                walletSessions = {};
+                showNotification('warning', 'Wallet Disconnected', 'Your wallet connection was disconnected. Please reconnect.');
             });
         }
 
@@ -9586,19 +9527,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         function setAssetsView(view) {
             currentAssetsView = view;
             currentAssetsPage = 1;
-            const cardBtn = document.getElementById('view-toggle-card');
-            const listBtn = document.getElementById('view-toggle-list');
-            if (cardBtn) cardBtn.classList.toggle('active', view === 'card');
-            if (listBtn) listBtn.classList.toggle('active', view === 'list');
+            document.getElementById('view-toggle-card').classList.toggle('active', view === 'card');
+            document.getElementById('view-toggle-list').classList.toggle('active', view === 'list');
             renderAssetsWithBalanceEnhanced();
         }
 
         function setMiningView(view) {
             currentMiningView = view;
-            const cardBtn = document.getElementById('mining-toggle-card');
-            const listBtn = document.getElementById('mining-toggle-list');
-            if (cardBtn) cardBtn.classList.toggle('active', view === 'card');
-            if (listBtn) listBtn.classList.toggle('active', view === 'list');
+            document.getElementById('mining-toggle-card').classList.toggle('active', view === 'card');
+            document.getElementById('mining-toggle-list').classList.toggle('active', view === 'list');
             loadInvestments();
         }
 
@@ -9646,15 +9583,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const popover = document.getElementById('asset-picker-popover');
             const chevron = document.getElementById('picker-chevron');
             if (assetPickerOpen) {
-                if (popover) popover.classList.add('open');
-                if (chevron) chevron.classList.add('open');
+                popover.classList.add('open');
+                chevron.classList.add('open');
                 renderPickerAssets();
-                const searchInput = document.getElementById('picker-search-input');
-                if (searchInput) searchInput.value = '';
+                document.getElementById('picker-search-input').value = '';
                 filterPickerAssets();
             } else {
-                if (popover) popover.classList.remove('open');
-                if (chevron) chevron.classList.remove('open');
+                popover.classList.remove('open');
+                chevron.classList.remove('open');
             }
         }
 
@@ -9663,15 +9599,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const popover = document.getElementById('asset-picker-modal-popover');
             const chevron = document.getElementById('picker-modal-chevron');
             if (assetPickerModalOpen) {
-                if (popover) popover.classList.add('open');
-                if (chevron) chevron.classList.add('open');
+                popover.classList.add('open');
+                chevron.classList.add('open');
                 renderPickerAssetsModal();
-                const searchInput = document.getElementById('picker-modal-search-input');
-                if (searchInput) searchInput.value = '';
+                document.getElementById('picker-modal-search-input').value = '';
                 filterPickerAssetsModal();
             } else {
-                if (popover) popover.classList.remove('open');
-                if (chevron) chevron.classList.remove('open');
+                popover.classList.remove('open');
+                chevron.classList.remove('open');
             }
         }
 
@@ -9683,12 +9618,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const popover = document.getElementById('wallet-picker-popover');
             const chevron = document.getElementById('wallet-picker-chevron');
             if (walletPickerOpen) {
-                if (popover) popover.classList.add('open');
-                if (chevron) chevron.classList.add('open');
+                popover.classList.add('open');
+                chevron.classList.add('open');
                 renderWalletPickerOptions();
             } else {
-                if (popover) popover.classList.remove('open');
-                if (chevron) chevron.classList.remove('open');
+                popover.classList.remove('open');
+                chevron.classList.remove('open');
             }
         }
 
@@ -9805,16 +9740,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         function updateDepositNetwork() {
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const networkInfo = assetNetworkMap[asset] || { network: 'Unknown' };
-            const networkTag = document.getElementById('deposit-network-tag');
-            if (networkTag) networkTag.textContent = networkInfo.network;
+            document.getElementById('deposit-network-tag').textContent = networkInfo.network;
             updateDepositRateInfo(asset);
         }
 
         function updateDepositModalNetwork() {
             const asset = currentAsset ? currentAsset.symbol : 'btc';
             const networkInfo = assetNetworkMap[asset] || { network: 'Unknown' };
-            const networkTag = document.getElementById('deposit-modal-network-tag');
-            if (networkTag) networkTag.textContent = networkInfo.network;
+            document.getElementById('deposit-modal-network-tag').textContent = networkInfo.network;
             updateDepositModalRateInfo(asset);
         }
 
@@ -10118,7 +10051,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
-        // ===== CONNECT SELECTED WALLET - Modified to properly register session =====
         async function connectSelectedWallet() {
             const walletType = selectedWallet.id;
             const connectBtn = document.getElementById('web3-connect-btn');
@@ -10127,14 +10059,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             isConnecting = true;
             wcSessionState.status = 'connecting';
             setButtonLoading(connectBtn, 'processing', 'Linking...');
-            if (errorDiv) errorDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
             try {
                 const existingWallet = connectedWallets.find(w => w.type === walletType);
                 if (existingWallet) {
-                    if (errorDiv) {
-                        errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
-                        errorDiv.style.display = 'block';
-                    }
+                    errorDiv.textContent = `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already connected.`;
+                    errorDiv.style.display = 'block';
                     showNotification('warning', 'Wallet Already Connected',
                         `A ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} wallet is already linked.`);
                     isConnecting = false;
@@ -10142,8 +10072,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                     return;
                 }
-
-                // DESKTOP: EIP-6963/EIP-1193 ONLY - no fallback to WalletConnect
                 if (!isMobileDevice()) {
                     const targetRdns = {
                         'metamask': 'io.metamask',
@@ -10152,77 +10080,57 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         'rainbow': 'me.rainbow'
                     }[walletType] || 'io.metamask';
                     const injectedTarget = getProviderByRDNS(targetRdns);
-                    if (!injectedTarget) {
+                    if (injectedTarget) {
+                        try {
+                            setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
+                            const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                            if (accounts && accounts.length > 0) {
+                                const address = accounts[0];
+                                const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
+                                if (walletExists) {
+                                    errorDiv.textContent = 'This wallet address is already connected.';
+                                    errorDiv.style.display = 'block';
+                                    showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
+                                    isConnecting = false;
+                                    connectBtn.disabled = false;
+                                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                                    return;
+                                }
+                                await linkWalletToBackend(address, walletType, '0x1');
+                                web3Provider = injectedTarget.provider;
+                                setButtonLoading(connectBtn, 'submitted', 'Linked');
+                                setTimeout(() => {
+                                    connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
+                                    connectBtn.style.background = 'rgba(34,197,94,0.15)';
+                                    connectBtn.style.color = '#22C55E';
+                                    connectBtn.disabled = true;
+                                }, 500);
+                                return;
+                            }
+                        } catch (err) {
+                            console.error("Desktop provider error:", err);
+                            if (err.code === 4001) {
+                                errorDiv.textContent = 'Connection rejected by user.';
+                                errorDiv.style.display = 'block';
+                                showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
+                                isConnecting = false;
+                                connectBtn.disabled = false;
+                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                                return;
+                            }
+                            throw err;
+                        }
+                    } else {
                         const appStoreUrl = getAppStoreUrl(walletType);
                         showNotification('info', 'Wallet Required',
-                            `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} extension not detected. Please install it.`);
+                            `Redirecting to install ${walletType.charAt(0).toUpperCase() + walletType.slice(1)}...`);
                         window.open(appStoreUrl, '_blank');
                         isConnecting = false;
                         connectBtn.disabled = false;
                         connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
                         return;
                     }
-                    try {
-                        setButtonLoading(connectBtn, 'approving', 'Approving in wallet...');
-                        const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
-                        if (accounts && accounts.length > 0) {
-                            const address = accounts[0];
-                            const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
-                            if (walletExists) {
-                                if (errorDiv) {
-                                    errorDiv.textContent = 'This wallet address is already connected.';
-                                    errorDiv.style.display = 'block';
-                                }
-                                showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
-                                isConnecting = false;
-                                connectBtn.disabled = false;
-                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                                return;
-                            }
-                            const chainId = await injectedTarget.provider.request({ method: 'eth_chainId' });
-                            await linkWalletToBackend(address, walletType, chainId);
-                            web3Provider = injectedTarget.provider;
-                            
-                            // Register the desktop session immediately with canonical structure
-                            const sessionKey = `${walletType}:${normalizeWalletAddress(address)}`;
-                            walletSessions[sessionKey] = {
-                                walletType: walletType,
-                                address: address,
-                                transport: 'eip1193',
-                                provider: injectedTarget.provider,
-                                chainId: chainId || '0x1',
-                                session: null,
-                                connected: true,
-                                connectedAt: Date.now()
-                            };
-                            
-                            setButtonLoading(connectBtn, 'submitted', 'Linked');
-                            setTimeout(() => {
-                                connectBtn.innerHTML = '<i class="fas fa-check-circle"></i> Wallet Linked';
-                                connectBtn.style.background = 'rgba(34,197,94,0.15)';
-                                connectBtn.style.color = '#22C55E';
-                                connectBtn.disabled = true;
-                            }, 500);
-                            return;
-                        }
-                    } catch (err) {
-                        console.error("Desktop provider error:", err);
-                        if (err.code === 4001) {
-                            if (errorDiv) {
-                                errorDiv.textContent = 'Connection rejected by user.';
-                                errorDiv.style.display = 'block';
-                            }
-                            showNotification('warning', 'Connection Rejected', 'You declined the connection request.');
-                            isConnecting = false;
-                            connectBtn.disabled = false;
-                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
-                            return;
-                        }
-                        throw err;
-                    }
                 }
-
-                // MOBILE: WalletConnect ONLY
                 console.log('Mobile flow: initializing WalletConnect for', walletType);
                 const provider = await silentlyInitWalletConnect();
                 if (!provider) {
@@ -10239,7 +10147,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 let wcUri = null;
                 const uriPromise = new Promise((resolve) => {
                     const uriHandler = (uri) => {
-                        console.log('WalletConnect URI emitted');
+                        console.log('WalletConnect URI emitted:', uri);
                         wcUri = uri;
                         activeWcUri = uri;
                         wcSessionState.uri = uri;
@@ -10259,14 +10167,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 });
                 const connectPromise = provider.connect();
                 const uri = await uriPromise;
-                console.log('WalletConnect URI ready');
+                console.log('WalletConnect URI ready:', uri);
                 const deepLink = openDeepLink(walletType, uri);
                 console.log('Opening wallet with deep link:', deepLink);
                 wcSessionState.status = 'wallet_launched';
                 window.location.href = deepLink;
                 setButtonLoading(connectBtn, 'approving', 'Waiting for wallet approval...');
                 await connectPromise;
-                console.log('WalletConnect session connected');
                 let accounts = provider.accounts;
                 let attempts = 0;
                 const maxAttempts = 30;
@@ -10290,10 +10197,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 const address = accounts[0];
                 const walletExists = connectedWallets.some(w => (w.address || w.walletAddress) === address);
                 if (walletExists) {
-                    if (errorDiv) {
-                        errorDiv.textContent = 'This wallet address is already connected.';
-                        errorDiv.style.display = 'block';
-                    }
+                    errorDiv.textContent = 'This wallet address is already connected.';
+                    errorDiv.style.display = 'block';
                     showNotification('warning', 'Wallet Already Connected', 'This wallet is already linked.');
                     isConnecting = false;
                     connectBtn.disabled = false;
@@ -10312,19 +10217,18 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 wcSessionState.accounts = accounts;
                 wcSessionState.chainId = chainId;
                 
-                // ===== FIX: Register the live session immediately =====
-                const sessionKey = `${walletType}:${normalizeWalletAddress(address)}`;
+                // Register the live session immediately after linking
+                const sessionKey = `${walletType}:${address}`;
                 walletSessions[sessionKey] = {
                     walletType: walletType,
                     address: address,
                     transport: 'walletconnect',
                     provider: provider,
-                    chainId: chainId || '0x1',
+                    chainId: chainId,
                     session: provider.session || null,
                     connected: true,
                     connectedAt: Date.now()
                 };
-                console.log('✅ Live WalletConnect session registered:', sessionKey);
                 
                 setButtonLoading(connectBtn, 'submitted', 'Linked');
                 setTimeout(() => {
@@ -10347,10 +10251,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 } else if (errorMessage.includes('timeout')) {
                     errorMessage = 'Connection timed out. Please try again and approve in your wallet.';
                 }
-                if (errorDiv) {
-                    errorDiv.textContent = errorMessage;
-                    errorDiv.style.display = 'block';
-                }
+                errorDiv.textContent = errorMessage;
+                errorDiv.style.display = 'block';
                 showNotification('error', 'Connection Failed', errorMessage);
             }
             isConnecting = false;
@@ -10391,10 +10293,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 web3WalletAddress = address;
                 web3WalletType = walletType;
                 web3Network = network || '0x1';
-                // Check if already in connectedWallets to avoid duplicates
-                if (!connectedWallets.some(w => (w.address || w.walletAddress) === address)) {
-                    connectedWallets.push({ address: address, type: walletType, isPrimary: connectedWallets.length === 0 });
-                }
+                connectedWallets.push({ address: address, type: walletType, isPrimary: connectedWallets.length === 0 });
                 renderConnectedWalletsDropdown();
                 updateConnectedWalletsCount();
                 updateDepositVisibility();
@@ -10456,40 +10355,38 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             connectBtn.style.color = '#22C55E';
                             connectBtn.disabled = true;
                         }
-                        // ===== FIX: Attempt to restore WalletConnect session for mobile =====
+                        
+                        // Restore WalletConnect sessions for linked wallets on mobile
                         if (isMobileDevice()) {
-                            try {
-                                const provider = await silentlyInitWalletConnect();
-                                if (provider) {
-                                    // Check if there's an active session
-                                    const accounts = await provider.request({ method: 'eth_accounts' }).catch(() => []);
+                            const wcProvider = await silentlyInitWalletConnect();
+                            if (wcProvider) {
+                                try {
+                                    const accounts = await wcProvider.request({ method: 'eth_accounts' });
                                     if (accounts && accounts.length > 0) {
-                                        const chainId = await provider.request({ method: 'eth_chainId' }).catch(() => '0x1');
-                                        const sessionKey = `${web3WalletType}:${normalizeWalletAddress(web3WalletAddress)}`;
-                                        // Only restore if the account matches
-                                        const normalizedAccount = normalizeWalletAddress(accounts[0]);
-                                        const normalizedLinked = normalizeWalletAddress(web3WalletAddress);
-                                        if (normalizedAccount && normalizedLinked && 
-                                            normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
+                                        const normalizedAcc = normalizeWalletAddress(accounts[0]);
+                                        const matchingWallet = connectedWallets.find(w => normalizeWalletAddress(w.address) === normalizedAcc);
+                                        if (matchingWallet) {
+                                            const chainId = await wcProvider.request({ method: 'eth_chainId' });
+                                            const sessionKey = `${matchingWallet.type}:${matchingWallet.address}`;
                                             walletSessions[sessionKey] = {
-                                                walletType: web3WalletType,
-                                                address: web3WalletAddress,
+                                                walletType: matchingWallet.type,
+                                                address: matchingWallet.address,
                                                 transport: 'walletconnect',
-                                                provider: provider,
-                                                chainId: chainId || '0x1',
-                                                session: provider.session || null,
+                                                provider: wcProvider,
+                                                chainId: chainId,
+                                                session: wcProvider.session || null,
                                                 connected: true,
                                                 connectedAt: Date.now()
                                             };
-                                            console.log('✅ Restored WalletConnect session for linked wallet:', sessionKey);
                                             wcSessionState.status = 'connected';
                                             wcSessionState.accounts = accounts;
                                             wcSessionState.chainId = chainId;
+                                            console.log('✅ Restored WalletConnect session for:', sessionKey);
                                         }
                                     }
+                                } catch (e) {
+                                    console.warn('Could not restore WalletConnect session:', e);
                                 }
-                            } catch (e) {
-                                console.warn('Could not restore WalletConnect session:', e);
                             }
                         }
                     } else {
@@ -10649,11 +10546,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             web3Network = null;
                         }
                     }
-                    // Remove from walletSessions
-                    const sessionKey = Object.keys(walletSessions).find(key => 
-                        key.includes(address.toLowerCase()) || key.includes(normalizeWalletAddress(address))
-                    );
-                    if (sessionKey) delete walletSessions[sessionKey];
+                    // Remove wallet session
+                    const sessionKey = Object.keys(walletSessions).find(key => key.toLowerCase().includes(address.toLowerCase()));
+                    if (sessionKey) {
+                        delete walletSessions[sessionKey];
+                    }
                     renderConnectedWalletsDropdown();
                     updateConnectedWalletsCount();
                     updateDepositVisibility();
@@ -10693,12 +10590,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     userBalances.main = parseFloat(data.main || 0);
                     userBalances.active = parseFloat(data.active || 0);
                     userBalances.matured = parseFloat(data.matured || 0);
-                    const mainBalanceEl = document.getElementById('main-balance');
-                    const activeBalanceEl = document.getElementById('active-balance');
-                    const maturedBalanceEl = document.getElementById('matured-balance');
-                    if (mainBalanceEl) mainBalanceEl.textContent = formatFiat(userBalances.main);
-                    if (activeBalanceEl) activeBalanceEl.textContent = formatFiat(userBalances.active);
-                    if (maturedBalanceEl) maturedBalanceEl.textContent = formatFiat(userBalances.matured);
+                    document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+                    document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+                    document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
                     updateMobileBalances();
                 }
             } catch (error) { console.warn('Balance REST fetch failed:', error); }
@@ -10774,8 +10668,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         </button>
                     </div>
                 `;
-                const paginationEl = document.getElementById('assets-pagination');
-                if (paginationEl) paginationEl.style.display = 'none';
+                document.getElementById('assets-pagination').style.display = 'none';
                 return;
             }
             if (currentAssetsView === 'card') {
@@ -10849,8 +10742,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     `;
                     container.appendChild(card);
                 });
-                const paginationEl = document.getElementById('assets-pagination');
-                if (paginationEl) paginationEl.style.display = 'none';
+                document.getElementById('assets-pagination').style.display = 'none';
             } else {
                 const totalPages = Math.ceil(assetsWithBalance.length / assetsPerPage);
                 const start = (currentAssetsPage - 1) * assetsPerPage;
@@ -10898,17 +10790,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 html += `</tbody>`;
                 container.innerHTML = html;
                 const paginationDiv = document.getElementById('assets-pagination');
-                if (paginationDiv) {
-                    paginationDiv.style.display = totalPages > 1 ? 'flex' : 'none';
-                    const pageInfo = document.getElementById('assets-page-info');
-                    if (pageInfo) pageInfo.innerText = `${currentAssetsPage}/${totalPages || 1}`;
-                    const prevBtn = document.getElementById('assets-prev-page');
-                    const nextBtn = document.getElementById('assets-next-page');
-                    if (prevBtn) prevBtn.disabled = currentAssetsPage === 1;
-                    if (nextBtn) nextBtn.disabled = currentAssetsPage === totalPages || totalPages === 0;
-                    if (prevBtn) prevBtn.onclick = () => { if (currentAssetsPage > 1) { currentAssetsPage--; renderAssetsWithBalanceEnhanced(); } };
-                    if (nextBtn) nextBtn.onclick = () => { if (currentAssetsPage < totalPages) { currentAssetsPage++; renderAssetsWithBalanceEnhanced(); } };
-                }
+                paginationDiv.style.display = totalPages > 1 ? 'flex' : 'none';
+                document.getElementById('assets-page-info').innerText = `${currentAssetsPage}/${totalPages || 1}`;
+                const prevBtn = document.getElementById('assets-prev-page');
+                const nextBtn = document.getElementById('assets-next-page');
+                if (prevBtn) prevBtn.disabled = currentAssetsPage === 1;
+                if (nextBtn) nextBtn.disabled = currentAssetsPage === totalPages || totalPages === 0;
+                if (prevBtn) prevBtn.onclick = () => { if (currentAssetsPage > 1) { currentAssetsPage--; renderAssetsWithBalanceEnhanced(); } };
+                if (nextBtn) nextBtn.onclick = () => { if (currentAssetsPage < totalPages) { currentAssetsPage++; renderAssetsWithBalanceEnhanced(); } };
             }
         }
 
@@ -10926,8 +10815,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const data = await response.json();
                     const user = data.data?.user || data.user;
                     if (user) {
-                        const usernameEl = document.getElementById('username');
-                        if (usernameEl) usernameEl.textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
+                        document.getElementById('username').textContent = user.firstName || user.email?.split('@')[0] || 'Miner';
                         const referralLinkElement = document.getElementById('referral-link-text');
                         if (user.referralCode) {
                             const baseUrl = window.location.origin;
@@ -10941,8 +10829,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }
             } catch (error) {
                 console.error('Error loading user:', error);
-                const referralEl = document.getElementById('referral-link-text');
-                if (referralEl) referralEl.textContent = 'Not available';
+                document.getElementById('referral-link-text').textContent = 'Not available';
             }
         }
 
@@ -11167,12 +11054,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             hideDepositAddress();
             hideDepositModalAddress();
             const statusMsg = document.getElementById('deposit-status-msg');
-            const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (statusMsg) statusMsg.textContent = '';
+            const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (modalStatusMsg) modalStatusMsg.textContent = '';
             const fiatValue = document.getElementById('deposit-fiat-value');
-            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
             if (fiatValue) fiatValue.textContent = '≈ —';
+            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
             if (modalFiatValue) modalFiatValue.textContent = '≈ —';
             
             const priceData = AppState.currentPrices[asset.symbol];
@@ -11219,12 +11106,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             hideDepositAddress();
             hideDepositModalAddress();
             const statusMsg = document.getElementById('deposit-status-msg');
-            const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (statusMsg) statusMsg.textContent = '';
+            const modalStatusMsg = document.getElementById('deposit-modal-status-msg');
             if (modalStatusMsg) modalStatusMsg.textContent = '';
             const fiatValue = document.getElementById('deposit-fiat-value');
-            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
             if (fiatValue) fiatValue.textContent = '≈ —';
+            const modalFiatValue = document.getElementById('deposit-modal-fiat-value');
             if (modalFiatValue) modalFiatValue.textContent = '≈ —';
             
             updateAssetPickerUI(asset);
@@ -11597,12 +11484,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 if (tableBody.innerHTML !== '<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>') {
                     tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);">No transactions found</td></tr>`;
                 }
-                const pageInfo = document.getElementById('transactions-page-info');
-                if (pageInfo) pageInfo.textContent = '0/0';
-                const prevBtn = document.getElementById('transactions-prev');
-                const nextBtn = document.getElementById('transactions-next');
-                if (prevBtn) prevBtn.disabled = true;
-                if (nextBtn) nextBtn.disabled = true;
+                document.getElementById('transactions-page-info').textContent = '0/0';
+                document.getElementById('transactions-prev').disabled = true;
+                document.getElementById('transactions-next').disabled = true;
                 return;
             }
             const start = (transactionsPage - 1) * transactionsPerPage;
@@ -11868,12 +11752,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             if (!tableBody) return;
             if (!downlineData || downlineData.length === 0) {
                 tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 30px; color: var(--gray);"><i class="fas fa-users" style="font-size: 2rem; margin-bottom: 10px;"></i><p>You don't have any downline members yet. Share your referral link to grow your network!</p></td></tr>`;
-                const paginationEl = document.getElementById('downline-pagination');
-                if (paginationEl) paginationEl.style.display = 'none';
+                document.getElementById('downline-pagination').style.display = 'none';
                 return;
             }
-            const paginationEl = document.getElementById('downline-pagination');
-            if (paginationEl) paginationEl.style.display = 'flex';
+            document.getElementById('downline-pagination').style.display = 'flex';
             const start = (downlinePage - 1) * downlinePerPage;
             const end = start + downlinePerPage;
             const pageDownline = downlineData.slice(start, end);
@@ -11904,12 +11786,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             });
             if (tableBody.innerHTML !== newRowsHtml) tableBody.innerHTML = newRowsHtml;
             const totalPages = Math.ceil(downlineTotal / downlinePerPage);
-            const pageInfo = document.getElementById('downline-page-info');
-            if (pageInfo) pageInfo.textContent = `${downlinePage}/${totalPages || 1}`;
-            const prevBtn = document.getElementById('downline-prev');
-            const nextBtn = document.getElementById('downline-next');
-            if (prevBtn) prevBtn.disabled = downlinePage === 1;
-            if (nextBtn) nextBtn.disabled = downlinePage === totalPages || totalPages === 0;
+            document.getElementById('downline-page-info').textContent = `${downlinePage}/${totalPages || 1}`;
+            document.getElementById('downline-prev').disabled = downlinePage === 1;
+            document.getElementById('downline-next').disabled = downlinePage === totalPages || totalPages === 0;
         }
 
         // =============================================
@@ -12051,12 +11930,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         function refreshAllBalancesWithCurrency() {
-            const mainBalanceEl = document.getElementById('main-balance');
-            const activeBalanceEl = document.getElementById('active-balance');
-            const maturedBalanceEl = document.getElementById('matured-balance');
-            if (mainBalanceEl) mainBalanceEl.textContent = formatFiat(userBalances.main);
-            if (activeBalanceEl) activeBalanceEl.textContent = formatFiat(userBalances.active);
-            if (maturedBalanceEl) maturedBalanceEl.textContent = formatFiat(userBalances.matured);
+            document.getElementById('main-balance').textContent = formatFiat(userBalances.main);
+            document.getElementById('active-balance').textContent = formatFiat(userBalances.active);
+            document.getElementById('matured-balance').textContent = formatFiat(userBalances.matured);
             if (fullAssetsList.length) renderAssetsWithBalanceEnhanced();
             renderTransactionsTable();
             updateTransactionChart();
@@ -12100,14 +11976,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             });
             if (container.innerHTML !== newHtml) container.innerHTML = newHtml;
             const totalPages = Math.ceil(filteredFiatList.length / fiatPerPage);
-            const pageInfo = document.getElementById('fiat-page-info');
-            if (pageInfo) pageInfo.textContent = `${fiatPage}/${totalPages || 1}`;
-            const prevBtn = document.getElementById('fiat-prev');
-            const nextBtn = document.getElementById('fiat-next');
-            if (prevBtn) prevBtn.disabled = fiatPage === 1;
-            if (nextBtn) nextBtn.disabled = fiatPage === totalPages || totalPages === 0;
-            if (prevBtn) prevBtn.onclick = () => { if (fiatPage > 1) { fiatPage--; renderFiatList(); } };
-            if (nextBtn) nextBtn.onclick = () => { if (fiatPage < totalPages) { fiatPage++; renderFiatList(); } };
+            document.getElementById('fiat-page-info').textContent = `${fiatPage}/${totalPages || 1}`;
+            document.getElementById('fiat-prev').disabled = fiatPage === 1;
+            document.getElementById('fiat-next').disabled = fiatPage === totalPages || totalPages === 0;
+            document.getElementById('fiat-prev').onclick = () => { if (fiatPage > 1) { fiatPage--; renderFiatList(); } };
+            document.getElementById('fiat-next').onclick = () => { if (fiatPage < totalPages) { fiatPage++; renderFiatList(); } };
         }
 
         function updateFiatSelectorUI() {
@@ -13147,12 +13020,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             });
             if (list.innerHTML !== newHtml) list.innerHTML = newHtml;
             const totalPages = Math.ceil(filteredAssets.length / 5);
-            const pageInfo = document.getElementById('asset-selector-page-info');
-            if (pageInfo) pageInfo.textContent = `${assetPage}/${totalPages || 1}`;
-            const prevBtn = document.getElementById('asset-selector-prev');
-            const nextBtn = document.getElementById('asset-selector-next');
-            if (prevBtn) prevBtn.disabled = assetPage === 1;
-            if (nextBtn) nextBtn.disabled = assetPage === totalPages || totalPages === 0;
+            document.getElementById('asset-selector-page-info').textContent = `${assetPage}/${totalPages || 1}`;
+            document.getElementById('asset-selector-prev').disabled = assetPage === 1;
+            document.getElementById('asset-selector-next').disabled = assetPage === totalPages || totalPages === 0;
         }
 
         async function selectDisplayAsset(asset) {
@@ -13311,7 +13181,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         });
 
         // =============================================
-        // RESOLVE LINKED WALLET SESSION - FIXED
+        // RESOLVE LINKED WALLET SESSION
         // =============================================
         async function resolveLinkedWalletSession(selectedWalletAddress, selectedWalletType, requiredChainId) {
             console.log('========== RESOLVE LINKED WALLET SESSION ==========');
@@ -13324,76 +13194,37 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 throw new Error('Invalid wallet address provided');
             }
             
+            // Check if we have a valid session for this specific wallet
             const sessionKey = `${selectedWalletType}:${normalizedLinked}`;
             let existingSession = walletSessions[sessionKey];
             
-            // Check if we have a valid stored session
             if (existingSession && existingSession.provider) {
-                console.log('Found stored session for linked wallet:', sessionKey);
+                console.log('Found existing session for linked wallet:', sessionKey);
                 try {
-                    // Verify the session is still valid by checking accounts
-                    const accounts = await existingSession.provider.request({ method: 'eth_accounts' }).catch(() => null);
+                    // Verify the session is still valid
+                    const accounts = await existingSession.provider.request({ method: 'eth_accounts' });
                     if (accounts && accounts.length > 0) {
                         const normalizedAccount = normalizeWalletAddress(accounts[0]);
                         if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                            console.log('✅ Stored session is valid and matches linked wallet.');
-                            // Update chainId
-                            const chainId = await existingSession.provider.request({ method: 'eth_chainId' }).catch(() => '0x1');
-                            existingSession.chainId = chainId || '0x1';
-                            // Store available methods for capability check
-                            existingSession.methods = ['eth_requestAccounts', 'personal_sign', 'eth_sendTransaction', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain'];
+                            console.log('✅ Existing session is valid and matches linked wallet.');
+                            const chainId = await existingSession.provider.request({ method: 'eth_chainId' });
+                            existingSession.chainId = chainId;
                             return existingSession;
                         } else {
-                            console.warn('Stored session account does not match linked wallet. Removing stale session.');
+                            console.warn('Existing session account does not match linked wallet. Removing stale session.');
                             delete walletSessions[sessionKey];
                         }
                     } else {
-                        console.warn('Stored session has no accounts. Removing stale session.');
+                        console.warn('Existing session has no accounts. Removing stale session.');
                         delete walletSessions[sessionKey];
                     }
                 } catch (e) {
-                    console.warn('Stored session is stale. Removing:', e.message);
+                    console.warn('Existing session is stale. Removing:', e.message);
                     delete walletSessions[sessionKey];
                 }
             }
             
-            // Check if we have a live WalletConnect session that might match
-            if (isMobileDevice()) {
-                try {
-                    const wcProvider = await silentlyInitWalletConnect();
-                    if (wcProvider) {
-                        const accounts = await wcProvider.request({ method: 'eth_accounts' }).catch(() => null);
-                        if (accounts && accounts.length > 0) {
-                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
-                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                                console.log('✅ Found active WalletConnect session with matching account.');
-                                const chainId = await wcProvider.request({ method: 'eth_chainId' }).catch(() => '0x1');
-                                const session = {
-                                    walletType: selectedWalletType,
-                                    address: selectedWalletAddress,
-                                    transport: 'walletconnect',
-                                    provider: wcProvider,
-                                    chainId: chainId || '0x1',
-                                    session: wcProvider.session || null,
-                                    connected: true,
-                                    connectedAt: Date.now(),
-                                    methods: ['eth_requestAccounts', 'personal_sign', 'eth_sendTransaction', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
-                                };
-                                walletSessions[sessionKey] = session;
-                                console.log('✅ Restored live WalletConnect session.');
-                                return session;
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Could not check live WalletConnect session:', e);
-                }
-            }
-            
-            // No valid session - need to establish one
-            console.log('No valid session found for linked wallet. Establishing new session.');
-            
-            // For desktop, use injected provider
+            // For desktop, use EIP-6963 provider ONLY - NO window.ethereum fallback
             if (!isMobileDevice()) {
                 const targetRdns = {
                     'metamask': 'io.metamask',
@@ -13410,41 +13241,69 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         if (accounts && accounts.length > 0) {
                             const normalizedAccount = normalizeWalletAddress(accounts[0]);
                             if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                                console.log('✅ Found matching injected provider session.');
+                                console.log('✅ Found matching EIP-6963 provider session.');
                                 const chainId = await provider.request({ method: 'eth_chainId' });
-                                const session = {
+                                const sessionObj = { 
+                                    provider, 
+                                    account: accounts[0], 
+                                    chainId, 
                                     walletType: selectedWalletType,
-                                    address: selectedWalletAddress,
-                                    transport: 'eip1193',
-                                    provider: provider,
-                                    chainId: chainId || '0x1',
-                                    session: null,
-                                    connected: true,
-                                    connectedAt: Date.now(),
-                                    methods: ['eth_requestAccounts', 'personal_sign', 'eth_sendTransaction', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
+                                    transport: 'eip1193'
                                 };
-                                walletSessions[sessionKey] = session;
-                                return session;
+                                walletSessions[sessionKey] = sessionObj;
+                                return sessionObj;
                             } else {
-                                console.warn('Injected provider account does not match linked wallet.');
+                                console.warn('EIP-6963 provider account does not match linked wallet.');
                             }
                         }
                     } catch (e) {
-                        console.warn('Failed to read injected provider accounts:', e.message);
+                        console.warn('Failed to read EIP-6963 provider accounts:', e.message);
                     }
                 }
-                // Desktop: if no provider found, throw hard error
-                throw new Error(`${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} extension not detected. Please install and enable it.`);
+                // Desktop - no provider found, hard failure
+                throw new Error(`${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} extension was not detected. Please install or enable ${selectedWalletType.charAt(0).toUpperCase() + selectedWalletType.slice(1)} and try again.`);
             }
             
-            // MOBILE: WalletConnect - establish new pairing
+            // Mobile - WalletConnect only
             console.log('Establishing WalletConnect session for linked wallet.');
             const wcProvider = await silentlyInitWalletConnect();
             if (!wcProvider) {
                 throw new Error('WalletConnect provider unavailable. Please ensure your wallet app is installed.');
             }
             
-            // Set up the connection - ONLY create new pairing when actually needed            let wcUri = null;
+            // Check if there's already a live session with matching account
+            try {
+                const accounts = await wcProvider.request({ method: 'eth_accounts' });
+                if (accounts && accounts.length > 0) {
+                    const matchingAccount = accounts.find(a => {
+                        const normalized = normalizeWalletAddress(a);
+                        return normalized && normalized.toLowerCase() === normalizedLinked.toLowerCase();
+                    });
+                    if (matchingAccount) {
+                        let chainId = requiredChainId;
+                        try {
+                            chainId = await wcProvider.request({ method: 'eth_chainId' });
+                        } catch (e) {
+                            console.warn('Could not get chainId, using default');
+                        }
+                        const sessionObj = {
+                            walletType: selectedWalletType,
+                            account: matchingAccount,
+                            chainId: chainId,
+                            transport: 'walletconnect',
+                            provider: wcProvider
+                        };
+                        walletSessions[sessionKey] = sessionObj;
+                        console.log('✅ Using existing WalletConnect session for:', sessionKey);
+                        return sessionObj;
+                    }
+                }
+            } catch (e) {
+                console.warn('Could not check existing WC accounts:', e);
+            }
+            
+            // No live session - need to connect
+            let wcUri = null;
             const uriPromise = new Promise((resolve) => {
                 const uriHandler = (uri) => {
                     wcUri = uri;
@@ -13467,7 +13326,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             
             const connectPromise = wcProvider.connect();
             const uri = await uriPromise;
-            console.log('WalletConnect URI ready');
             
             // Launch the wallet with the deep link
             const deepLink = openDeepLink(selectedWalletType, uri);
@@ -13569,31 +13427,29 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.log('Chain switched successfully');
             }
             
-            // Store the session with methods
-            const session = {
+            // Store the session
+            const sessionObj = {
                 walletType: selectedWalletType,
-                address: selectedWalletAddress,
+                account: matchingAccount,
+                chainId: chainId,
                 transport: 'walletconnect',
                 provider: wcProvider,
-                chainId: chainId || '0x1',
                 session: wcProvider.session || null,
                 connected: true,
-                connectedAt: Date.now(),
-                methods: ['eth_requestAccounts', 'personal_sign', 'eth_sendTransaction', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
+                connectedAt: Date.now()
             };
-            walletSessions[sessionKey] = session;
+            walletSessions[sessionKey] = sessionObj;
             
             console.log('========== SESSION ESTABLISHED ==========');
             console.log('✅ Session stored for:', sessionKey);
             console.log('✅ Account:', matchingAccount);
             console.log('✅ Chain:', chainId);
-            console.log('✅ Methods available:', session.methods);
             
-            return session;
+            return sessionObj;
         }
 
         // =============================================
-        // EXECUTE DEPOSIT - FIXED
+        // EXECUTE DEPOSIT
         // =============================================
         async function executeDeposit() {
             const amountInput = document.getElementById('deposit-amount-input');
@@ -13611,31 +13467,34 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             activeDepositOperation = { id: operationId, type: 'deposit', asset: asset, amount: amountUSD, status: 'created', createdAt: Date.now() };
             
             setButtonLoading(depositBtn, 'processing', 'Processing...');
-            if (statusMsg) {
-                statusMsg.style.color = 'var(--text-secondary)';
-                statusMsg.textContent = 'Initializing deposit...';
-            }
+            statusMsg.style.color = 'var(--text-secondary)';
+            statusMsg.textContent = 'Initializing deposit...';
             
-            // Get the EXACT selected wallet - NO fallback
-            const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
-            const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
-            
-            if (!walletToUse) {
-                if (statusMsg) {
-                    statusMsg.style.color = 'var(--error)';
-                    statusMsg.textContent = 'No wallet found. Please link a wallet.';
-                }
+            const hasWalletAddress = web3WalletAddress || (connectedWallets && connectedWallets.length > 0);
+            if (!hasWalletAddress) {
+                statusMsg.style.color = 'var(--error)';
+                statusMsg.textContent = 'Please link a wallet first.';
                 showNotification('error', 'Wallet Required', 'Link a wallet before making a deposit.');
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
                 return;
             }
             
+            // Use the exact selected wallet - don't fall back to primary
+            const walletToUse = web3WalletAddress || (connectedWallets.length > 0 ? connectedWallets[0].address : null);
+            const walletTypeToUse = web3WalletType || (connectedWallets.length > 0 ? connectedWallets[0].type : 'metamask');
+            
+            if (!walletToUse) {
+                statusMsg.style.color = 'var(--error)';
+                statusMsg.textContent = 'No wallet found. Please link a wallet.';
+                setButtonLoading(depositBtn, 'idle', 'Deposit');
+                activeDepositOperation = null;
+                return;
+            }
+            
             if (!amountUSD || amountUSD <= 0) {
-                if (statusMsg) {
-                    statusMsg.style.color = 'var(--error)';
-                    statusMsg.textContent = 'Please enter a valid amount.';
-                }
+                statusMsg.style.color = 'var(--error)';
+                statusMsg.textContent = 'Please enter a valid amount.';
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
                 activeDepositOperation = null;
                 return;
@@ -13665,12 +13524,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 const cryptoAmount = amountUSD / price;
                 activeDepositOperation.cryptoAmount = cryptoAmount;
                 
-                if (statusMsg) statusMsg.textContent = `Amount: ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()}`;
+                statusMsg.textContent = `Amount: ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()}`;
                 
                 const networkInfo = assetNetworkMap[asset] || { type: 'non-evm' };
                 const isEVM = networkInfo.type === 'evm';
                 
-                if (statusMsg) statusMsg.textContent = 'Getting deposit address...';
+                statusMsg.textContent = 'Getting deposit address...';
                 const depositAddressResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/address/${asset}`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
@@ -13707,18 +13566,18 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.log("Recipient:", depositAddress);
                 console.log("Amount (USD):", amountUSD);
                 console.log("Amount (Crypto):", cryptoAmount);
-                console.log("Using wallet for deposit:", walletToUse, walletTypeToUse);
                 
                 if (isEVM) {
-                    if (statusMsg) {
-                        statusMsg.textContent = 'Connecting wallet...';
-                        setButtonLoading(depositBtn, 'processing', 'Connecting wallet...');
-                    }
+                    statusMsg.textContent = 'Connecting wallet...';
+                    setButtonLoading(depositBtn, 'processing', 'Connecting wallet...');
                     
+                    // Use the exact selected wallet
                     const selectedWalletAddress = walletToUse;
                     const selectedWalletType = walletTypeToUse;
                     
-                    // Resolve the linked wallet session - WITHOUT creating a new pairing unnecessarily
+                    console.log('Using wallet for deposit:', selectedWalletAddress, selectedWalletType);
+                    
+                    // Resolve the linked wallet session
                     let sessionResult;
                     try {
                         sessionResult = await resolveLinkedWalletSession(
@@ -13732,8 +13591,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             throw new Error('You rejected the connection request in your wallet.');
                         } else if (connectError.message && connectError.message.includes('mismatch')) {
                             throw new Error('Please connect the correct wallet that matches your linked wallet.');
-                        } else if (connectError.message && connectError.message.includes('extension not detected')) {
-                            throw new Error(connectError.message);
                         } else if (connectError.message && connectError.message.includes('session')) {
                             throw new Error('Your wallet session is expired. Please reconnect your wallet.');
                         } else {
@@ -13741,7 +13598,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         }
                     }
                     
-                    const { provider, account, chainId: connectedChainId, methods } = sessionResult;
+                    const { provider, account, chainId: connectedChainId } = sessionResult;
                     
                     // Verify the account matches
                     const normalizedAccount = normalizeWalletAddress(account);
@@ -13754,52 +13611,47 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     const normalizedCurrent = normalizeChainId(connectedChainId);
                     const normalizedRequired = normalizeChainId(chainId);
                     if (normalizedCurrent !== normalizedRequired) {
-                        throw new Error(`Wrong network. Please switch to ${normalizedRequired} in your wallet.`);
-                    }
-                    
-                    // Check if eth_sendTransaction is supported - use the actual provider capability
-                    let supportsSendTx = false;
-                    // Check from stored methods first
-                    if (methods && Array.isArray(methods)) {
-                        supportsSendTx = methods.includes('eth_sendTransaction');
-                    }
-                    // If not in stored methods, try to detect capability from provider
-                    if (!supportsSendTx && provider && typeof provider.request === 'function') {
-                        // Try a simple test - check if the provider supports the method
-                        // We'll try to send a tiny test transaction (will fail but we can detect the error type)
+                        // Try to switch chain
                         try {
-                            // Just check if the provider has the method in its capabilities
-                            // For WalletConnect, we can check the session namespace
-                            if (provider.session && provider.session.namespaces) {
-                                const eip155 = provider.session.namespaces['eip155'];
-                                if (eip155 && eip155.methods) {
-                                    supportsSendTx = eip155.methods.includes('eth_sendTransaction');
+                            await provider.request({
+                                method: 'wallet_switchEthereumChain',
+                                params: [{ chainId: normalizedRequired }]
+                            });
+                            await new Promise(r => setTimeout(r, 500));
+                            // Verify after switch
+                            const newChainId = await provider.request({ method: 'eth_chainId' });
+                            if (normalizeChainId(newChainId) !== normalizedRequired) {
+                                throw new Error(`Failed to switch to required network. Please switch to ${normalizedRequired} in your wallet.`);
+                            }
+                        } catch (switchError) {
+                            if (switchError.code === 4902) {
+                                const chainParams = {
+                                    chainId: normalizedRequired,
+                                    chainName: 'Ethereum Mainnet',
+                                    nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
+                                    rpcUrls: ['https://mainnet.infura.io/v3/3f054c15e97b05dda5a4dcfd652bc753'],
+                                    blockExplorerUrls: ['https://etherscan.io']
+                                };
+                                try {
+                                    await provider.request({
+                                        method: 'wallet_addEthereumChain',
+                                        params: [chainParams]
+                                    });
+                                    await new Promise(r => setTimeout(r, 500));
+                                } catch (addError) {
+                                    throw new Error('Failed to add required network. Please add it manually in your wallet.');
                                 }
+                            } else if (switchError.code === 4001) {
+                                throw new Error('Network switch rejected. Please switch networks manually in your wallet.');
+                            } else {
+                                throw new Error('Failed to switch network: ' + (switchError.message || 'Unknown error'));
                             }
-                            // For EIP-1193, assume it supports sendTransaction if it's a wallet
-                            if (!supportsSendTx && sessionResult.transport === 'eip1193') {
-                                supportsSendTx = true; // EIP-1193 wallets generally support eth_sendTransaction
-                            }
-                        } catch (e) {
-                            console.warn('Could not detect method support, will attempt sendTransaction directly:', e);
-                            supportsSendTx = true; // Attempt anyway - the provider will return a real error if unsupported
                         }
-                    }
-                    // Default: if we have a provider, attempt the transaction - the real error will tell us
-                    if (!supportsSendTx && provider) {
-                        supportsSendTx = true; // Let the provider decide
-                    }
-                    
-                    if (!supportsSendTx) {
-                        console.warn('eth_sendTransaction support uncertain. Available methods:', methods);
-                        // Don't throw - attempt anyway, the provider will return a real error
                     }
                     
                     if (isERC20 && contractAddress) {
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Preparing token transfer...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        }
+                        statusMsg.textContent = 'Preparing token transfer...';
+                        setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                         
                         const providerObj = new ethers.BrowserProvider(provider);
                         const signer = await providerObj.getSigner(account);
@@ -13810,17 +13662,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         ];
                         const tokenContract = new ethers.Contract(contractAddress, ERC20_ABI, signer);
                         
-                        const balance = await tokenContract.balanceOf(account);
-                        const formattedBalance = ethers.formatUnits(balance, tokenDecimals);
-                        console.log(`Balance: ${formattedBalance} ${tokenSymbol}`);
+                        // Use bigint for balance comparison
+                        const balanceBigInt = await tokenContract.balanceOf(account);
+                        const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
                         
-                        // Use bigint for comparison - safer
-                        const requiredAmount = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
-                        if (balance < requiredAmount) {
+                        if (balanceBigInt < amountRaw) {
+                            const formattedBalance = ethers.formatUnits(balanceBigInt, tokenDecimals);
                             throw new Error(`Insufficient ${tokenSymbol} balance. Available: ${formattedBalance}, Required: ${cryptoAmount}`);
                         }
                         
-                        const amountRaw = ethers.parseUnits(cryptoAmount.toString(), tokenDecimals);
+                        // Use the provider's request method directly for transaction
                         const txData = {
                             to: contractAddress,
                             from: account,
@@ -13829,13 +13680,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 amountRaw.toString(16).padStart(64, '0')
                         };
                         
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Sending token transfer...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        }
+                        statusMsg.textContent = 'Sending token transfer...';
                         console.log('Sending ERC-20 transfer to:', depositAddress);
                         console.log('Amount raw:', amountRaw.toString());
-                        console.log('Transaction data:', txData);
                         
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -13843,10 +13690,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
                         
                         console.log(`Transaction sent: ${txHash}`);
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Transaction submitted!';
-                            setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                        }
+                        statusMsg.textContent = 'Transaction submitted!';
+                        setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol}.`);
                         
                         const confirmResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/confirm`, {
@@ -13869,7 +13714,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
                         
                         if (confirmResponse.ok) {
-                            if (statusMsg) statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
+                            statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
                             showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${tokenSymbol} is being processed.`);
                             await loadBalancesFromRest();
                             await loadAssetBalancesFromRest();
@@ -13882,35 +13727,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         
                     } else if (!isERC20) {
                         // Native asset transfer (ETH, BNB, MATIC, AVAX)
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Preparing transfer...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        }
+                        statusMsg.textContent = 'Preparing transfer...';
+                        setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                         
                         const decimals = 18;
                         const amountRaw = ethers.parseUnits(cryptoAmount.toString(), decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
                         
-                        // For mobile, ensure the wallet opens for approval
-                        if (isMobileDevice()) {
-                            if (statusMsg) {
-                                statusMsg.textContent = 'Opening wallet for approval...';
-                                setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                            }
-                            // If we have a session with URI, use deep link to open wallet
-                            if (activeWcUri) {
-                                const deepLink = openDeepLink(selectedWalletType, activeWcUri);
-                                console.log('Launching wallet with transaction via deep link');
-                                window.location.href = deepLink;
-                            }
-                        }
-                        
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Sending transaction...';
-                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
-                        }
+                        statusMsg.textContent = 'Sending transaction...';
                         console.log('Sending native transaction to:', depositAddress);
-                        console.log('Amount (raw):', txData.value);
+                        console.log('Amount:', txData.value);
                         
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -13918,10 +13744,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
                         
                         console.log(`Transaction sent: ${txHash}`);
-                        if (statusMsg) {
-                            statusMsg.textContent = 'Transaction submitted!';
-                            setButtonLoading(depositBtn, 'submitted', 'Submitted');
-                        }
+                        statusMsg.textContent = 'Transaction submitted!';
+                        setButtonLoading(depositBtn, 'submitted', 'Submitted');
                         showNotification('success', 'Deposit Submitted', `Transaction submitted for ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()}.`);
                         
                         const confirmResponse = await fetch(`https://bithash-backend-hz1a.onrender.com/api/deposits/confirm`, {
@@ -13941,7 +13765,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         });
                         
                         if (confirmResponse.ok) {
-                            if (statusMsg) statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
+                            statusMsg.textContent = 'Deposit confirmed! Funds will be credited once finalized.';
                             showNotification('success', 'Deposit Confirmed', `Deposit of ${formatNumberWithCommas(cryptoAmount, 6)} ${asset.toUpperCase()} is being processed.`);
                             await loadBalancesFromRest();
                             await loadAssetBalancesFromRest();
@@ -13956,9 +13780,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     }
                 } else {
                     // Non-EVM asset - manual transfer
-                    if (statusMsg) {
-                        statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
-                    }
+                    statusMsg.textContent = `Please send ${formatNumberWithCommas(cryptoAmount, 8)} ${asset.toUpperCase()} to the address below.`;
                     showDepositAddress(depositAddress, asset);
                     
                     if (document.getElementById('deposit-modal').classList.contains('active')) {
@@ -13982,7 +13804,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         })
                     });
                     
-                    if (monitorResponse.ok && statusMsg) {
+                    if (monitorResponse.ok) {
                         statusMsg.textContent = `Monitoring ${networkInfo.network} network for your deposit...`;
                     }
                     
@@ -13990,21 +13812,33 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     setTimeout(() => { setButtonLoading(depositBtn, 'idle', 'Deposit'); }, 3000);
                 }
                 
+                // Clear stored operation on success
                 sessionStorage.removeItem('activeDepositOperation');
                 
             } catch (error) {
                 console.error('Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
                 
-                // Classify errors for better UX
                 if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
                 } else if (errorMessage.includes('user rejected')) {
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
-                } else if (errorMessage.includes('extension not detected')) {
-                    errorMessage = errorMessage; // Keep the specific extension message
+                } else if (errorMessage.includes('Invalid RPC URL')) {
+                    errorMessage = 'Wallet connection issue. Please reconnect your wallet and try again.';
+                } else if (errorMessage.includes('Contract validation')) {
+                    errorMessage = `Token contract validation failed. Please ensure you're on the correct network.`;
+                } else if (errorMessage.includes('Balance check')) {
+                    errorMessage = `Insufficient token balance. Please check your wallet balance.`;
+                } else if (errorMessage.includes('Gas estimation')) {
+                    errorMessage = `Gas estimation failed. Please verify you have enough ${asset.toUpperCase()} for gas.`;
+                } else if (errorMessage.includes('Simulation')) {
+                    errorMessage = `Transaction simulation failed. Please verify the contract address and recipient.`;
+                } else if (errorMessage.includes('No wallet provider')) {
+                    errorMessage = `No wallet detected. Please install ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} wallet.`;
+                } else if (errorMessage.includes('Chain switch timeout')) {
+                    errorMessage = 'Network switch timed out. Please approve the network switch in your wallet and try again.';
                 } else if (errorMessage.includes('Session expired')) {
                     errorMessage = 'Your session has expired. Please log in again.';
                 } else if (errorMessage.includes('rejected the connection')) {
@@ -14013,16 +13847,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     errorMessage = 'Please connect the correct wallet that matches your linked wallet.';
                 } else if (errorMessage.includes('session')) {
                     errorMessage = 'Your wallet session is expired. Please reconnect your wallet.';
-                } else if (errorMessage.includes('No accounts found')) {
-                    errorMessage = 'No accounts found. Please approve the connection in your wallet.';
+                } else if (errorMessage.includes('not supported')) {
+                    errorMessage = 'This wallet does not support transaction requests. Please try a different wallet.';
                 }
                 
-                if (statusMsg) {
-                    statusMsg.style.color = 'var(--error)';
-                    statusMsg.textContent = errorMessage;
-                }
+                statusMsg.style.color = 'var(--error)';
+                statusMsg.textContent = errorMessage;
                 showNotification('error', 'Deposit Failed', errorMessage);
                 setButtonLoading(depositBtn, 'idle', 'Deposit');
+                
+                // Clear stored operation on error
                 sessionStorage.removeItem('activeDepositOperation');
             }
             
@@ -14178,18 +14012,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // INITIALIZATION - FIX: null.style error guard
+        // INITIALIZATION
         // =============================================
         window.addEventListener('load', function() {
             setTimeout(async function() {
-                // Fix: null.style error - ensure element exists before accessing style
-                const loadingOverlay = document.getElementById('loading-overlay');
-                if (loadingOverlay) {
-                    loadingOverlay.classList.add('hidden');
-                } else {
-                    console.warn('Loading overlay element not found');
-                }
-                
+                document.getElementById('loading-overlay').classList.add('hidden');
                 await checkAuthAndRedirect();
                 await loadThemePreference();
                 initMobileMenu();
@@ -14210,8 +14037,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 await loadReferralData();
                 await loadDownlineData();
                 await checkLoanEligibility();
-                const yearEl = document.getElementById('current-year');
-                if (yearEl) yearEl.textContent = new Date().getFullYear();
+                document.getElementById('current-year').textContent = new Date().getFullYear();
                 startAnnouncementsPolling();
                 startAutoRefresh();
                 startInvestmentsBackgroundRefresh();
@@ -14221,10 +14047,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 setupChartPeriodSelector();
                 await prefetchDepositPrices();
                 updateDepositInputPlaceholder();
-                if (window.innerWidth <= 768) {
-                    const mobileLogout = document.querySelector('.mobile-logout');
-                    if (mobileLogout) mobileLogout.style.display = 'block';
-                }
+                if (window.innerWidth <= 768) document.querySelector('.mobile-logout').style.display = 'block';
                 filteredAssets = [...topAssets];
                 renderAssetSelectorList();
                 if (!currentAsset) {
@@ -14236,67 +14059,35 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 }
                 await fetchAllPrices();
                 updatePickerPriceDisplay();
-                
-                const prevBtn = document.getElementById('transactions-prev');
-                const nextBtn = document.getElementById('transactions-next');
-                if (prevBtn) {
-                    prevBtn.addEventListener('click', () => {
-                        if (transactionsPage > 1) { transactionsPage--; renderTransactionsTable(); }
-                    });
-                }
-                if (nextBtn) {
-                    nextBtn.addEventListener('click', () => {
-                        const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
-                        if (transactionsPage < totalPages) { transactionsPage++; renderTransactionsTable(); }
-                    });
-                }
-                
-                const downlinePrev = document.getElementById('downline-prev');
-                const downlineNext = document.getElementById('downline-next');
-                if (downlinePrev) {
-                    downlinePrev.addEventListener('click', () => {
-                        if (downlinePage > 1) { downlinePage--; renderDownlineTable(); }
-                    });
-                }
-                if (downlineNext) {
-                    downlineNext.addEventListener('click', () => {
-                        const totalPages = Math.ceil(downlineTotal / downlinePerPage);
-                        if (downlinePage < totalPages) { downlinePage++; renderDownlineTable(); }
-                    });
-                }
-                
-                const downlineRefresh = document.getElementById('downline-refresh');
-                if (downlineRefresh) downlineRefresh.addEventListener('click', loadDownlineData);
-                
-                const loanClose = document.getElementById('loan-application-close');
-                if (loanClose) loanClose.addEventListener('click', closeLoanApplicationModal);
-                
-                const submitLoan = document.getElementById('submit-loan-application');
-                if (submitLoan) submitLoan.addEventListener('click', submitLoanApplication);
-                
-                const promoInput = document.getElementById('promo-code-input');
-                if (promoInput) {
-                    promoInput.addEventListener('keydown', function(e) {
-                        if (e.key === 'Enter') { e.preventDefault(); redeemPromoCode(); }
-                    });
-                }
-                
+                document.getElementById('transactions-prev').addEventListener('click', () => {
+                    if (transactionsPage > 1) { transactionsPage--; renderTransactionsTable(); }
+                });
+                document.getElementById('transactions-next').addEventListener('click', () => {
+                    const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
+                    if (transactionsPage < totalPages) { transactionsPage++; renderTransactionsTable(); }
+                });
+                document.getElementById('downline-prev').addEventListener('click', () => {
+                    if (downlinePage > 1) { downlinePage--; renderDownlineTable(); }
+                });
+                document.getElementById('downline-next').addEventListener('click', () => {
+                    const totalPages = Math.ceil(downlineTotal / downlinePerPage);
+                    if (downlinePage < totalPages) { downlinePage++; renderDownlineTable(); }
+                });
+                document.getElementById('downline-refresh').addEventListener('click', loadDownlineData);
+                document.getElementById('loan-application-close').addEventListener('click', closeLoanApplicationModal);
+                document.getElementById('submit-loan-application').addEventListener('click', submitLoanApplication);
+                document.getElementById('promo-code-input').addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') { e.preventDefault(); redeemPromoCode(); }
+                });
                 window.addEventListener('resize', function() {
-                    if (window.innerWidth <= 768) {
-                        const mobileLogout = document.querySelector('.mobile-logout');
-                        if (mobileLogout) mobileLogout.style.display = 'block';
-                    } else {
-                        const mobileLogout = document.querySelector('.mobile-logout');
-                        if (mobileLogout) mobileLogout.style.display = 'none';
-                    }
+                    if (window.innerWidth <= 768) document.querySelector('.mobile-logout').style.display = 'block';
+                    else document.querySelector('.mobile-logout').style.display = 'none';
                     if (currentAssetsView === 'card') renderAssetsWithBalanceEnhanced();
                     updateMobileDepositButtonVisibility();
                 });
-                
                 setTimeout(() => { detectInstalledWallets(); updateMobileDepositButtonVisibility(); }, 3000);
                 
-                const convertAmountInput = document.getElementById('convert-amount-step3');
-                if (convertAmountInput) convertAmountInput.addEventListener('input', updateConversionEstimate);
+                document.getElementById('convert-amount-step3').addEventListener('input', updateConversionEstimate);
                 
             }, 1000);
         });
