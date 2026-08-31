@@ -9218,7 +9218,11 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 name: 'BitHash Capital',
                                 description: 'Digital Asset Platform',
                                 url: 'https://www.bithashcapital.live/',
-                                icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png']
+                                icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png'],
+                                redirect: {
+                                    native: window.location.origin,
+                                    universal: window.location.origin
+                                }
                             },
                             qrModalOptions: {
                                 desktopLinks: [],
@@ -9226,7 +9230,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             }
                         });
                         
-                        // Register event handlers ONCE
+                        // ===== FIXED #3: Register event handlers ONCE at initialization =====
                         if (!universalWalletProvider.__bitHashEventsRegistered) {
                             universalWalletProvider.__bitHashEventsRegistered = true;
                             universalWalletProvider.on('accountsChanged', (accounts) => {
@@ -9254,6 +9258,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 console.log('WC disconnect');
                                 walletSessions = {};
                                 wcSessionState.status = 'disconnected';
+                            });
+                            // Additional lifecycle listeners
+                            universalWalletProvider.on('session_event', (event) => {
+                                console.log('WC session_event:', event);
+                            });
+                            universalWalletProvider.on('session_update', (event) => {
+                                console.log('WC session_update:', event);
                             });
                         }
                         
@@ -10533,8 +10544,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             menu.classList.toggle('open', walletDropdownOpen);
         }
 
-        // =============================================
-        // UNLINK WALLET
+        // =============================================        // UNLINK WALLET
         // =============================================
         function openUnlinkConfirm(address) {
             pendingUnlinkAddress = address;
@@ -13265,7 +13275,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.warn('Could not get chainId in restoreExistingMobileSession');
             }
 
-            // ===== FIXED: Use account property consistently =====
+            // ===== FIXED #1: Use account property consistently =====
             return {
                 walletType: walletType,
                 account: normalizeWalletAddress(address),
@@ -13299,6 +13309,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const restored = await restoreExistingMobileSession(provider, walletAddress, walletType);
             if (restored) {
                 console.log('✅ Restored existing WalletConnect session.');
+                // ===== FIXED #2: Remove fake capabilities - derive from actual session =====
+                const session = provider.session;
+                if (session) {
+                    const namespace = session.namespaces?.eip155;
+                    if (namespace && namespace.methods) {
+                        restored.capabilities = namespace.methods;
+                    } else {
+                        restored.capabilities = ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain'];
+                    }
+                }
+                // ===== FIXED #5: Network enforcement moved to executeDeposit =====
                 return restored;
             }
 
@@ -13399,16 +13420,25 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: normalizedRequired }]
                     });
-                    await new Promise(r => setTimeout(r, 500));
-                    try {
-                        chainId = await provider.request({ method: 'eth_chainId' });
-                        const newNormalized = normalizeChainId(chainId);
-                        if (newNormalized !== normalizedRequired) {
-                            throw new Error('Chain switch completed but chain ID mismatch persists.');
-                        }
-                    } catch (e) {
-                        throw new Error('Failed to verify chain switch: ' + e.message);
+                    // ===== FIXED #4: Wait for chainChanged event instead of 500ms sleep =====
+                    const chainChangedPromise = new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            provider.off('chainChanged', handler);
+                            reject(new Error('Chain switch timeout - please approve in your wallet'));
+                        }, 30000);
+                        const handler = (newChainId) => {
+                            clearTimeout(timeout);
+                            provider.off('chainChanged', handler);
+                            resolve(newChainId);
+                        };
+                        provider.on('chainChanged', handler);
+                    });
+                    const newChainId = await chainChangedPromise;
+                    const newNormalized = normalizeChainId(newChainId);
+                    if (newNormalized !== normalizedRequired) {
+                        throw new Error('Chain switch completed but chain ID mismatch persists.');
                     }
+                    chainId = newChainId;
                 } catch (switchError) {
                     if (switchError.code === 4902) {
                         const chainConfig = getEvmChainConfig(parseInt(normalizedRequired, 16));
@@ -13424,7 +13454,25 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 method: 'wallet_addEthereumChain',
                                 params: [chainParams]
                             });
-                            await new Promise(r => setTimeout(r, 500));
+                            // ===== FIXED #4: Wait for chainChanged after add =====
+                            const chainChangedPromise = new Promise((resolve, reject) => {
+                                const timeout = setTimeout(() => {
+                                    provider.off('chainChanged', handler);
+                                    reject(new Error('Chain switch timeout after adding network - please approve in your wallet'));
+                                }, 30000);
+                                const handler = (newChainId) => {
+                                    clearTimeout(timeout);
+                                    provider.off('chainChanged', handler);
+                                    resolve(newChainId);
+                                };
+                                provider.on('chainChanged', handler);
+                            });
+                            const newChainId = await chainChangedPromise;
+                            const newNormalized = normalizeChainId(newChainId);
+                            if (newNormalized !== normalizedRequired) {
+                                throw new Error('Chain switch after add completed but chain ID mismatch persists.');
+                            }
+                            chainId = newChainId;
                         } catch (addError) {
                             throw new Error('Failed to add required network: ' + (addError.message || 'Unknown error'));
                         }
@@ -13437,7 +13485,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 console.log('Chain switched successfully');
             }
 
-            // ===== FIXED: Use account property consistently =====
+            // ===== FIXED #1: Use account property consistently =====
             const sessionObj = {
                 walletType: walletType,
                 account: matchingAccount,
@@ -13448,8 +13496,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 session: provider.session || null,
                 connected: true,
                 connectedAt: Date.now(),
+                // ===== FIXED #2: Remove fake capabilities - derive from actual session =====
                 capabilities: ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
             };
+
+            // ===== FIXED #2: Get actual capabilities from session =====
+            if (provider.session) {
+                const namespace = provider.session.namespaces?.eip155;
+                if (namespace && namespace.methods) {
+                    sessionObj.capabilities = namespace.methods;
+                }
+            }
 
             const sessionKey = `${walletType}:${normalizeWalletAddress(matchingAccount)}`;
             walletSessions[sessionKey] = sessionObj;
@@ -13496,6 +13553,26 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     method: 'wallet_switchEthereumChain',
                     params: [{ chainId: required }]
                 });
+                // ===== FIXED #4: Wait for chainChanged event =====
+                const chainChangedPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        provider.off('chainChanged', handler);
+                        reject(new Error('Chain switch timeout - please approve in your wallet'));
+                    }, 30000);
+                    const handler = (newChainId) => {
+                        clearTimeout(timeout);
+                        provider.off('chainChanged', handler);
+                        resolve(newChainId);
+                    };
+                    provider.on('chainChanged', handler);
+                });
+                const newChainId = await chainChangedPromise;
+                current = normalizeChainId(newChainId);
+                if (current !== required) {
+                    throw new Error('Wallet did not switch to the required network.');
+                }
+                console.log('✅ Network switched successfully to:', required);
+                return;
             } catch (error) {
                 if (error.code !== 4902) {
                     throw error;
@@ -13512,17 +13589,26 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         blockExplorerUrls: [config.explorerUrl]
                     }]
                 });
+                // ===== FIXED #4: Wait for chainChanged after add =====
+                const chainChangedPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        provider.off('chainChanged', handler);
+                        reject(new Error('Chain switch timeout after adding network - please approve in your wallet'));
+                    }, 30000);
+                    const handler = (newChainId) => {
+                        clearTimeout(timeout);
+                        provider.off('chainChanged', handler);
+                        resolve(newChainId);
+                    };
+                    provider.on('chainChanged', handler);
+                });
+                const newChainId = await chainChangedPromise;
+                current = normalizeChainId(newChainId);
+                if (current !== required) {
+                    throw new Error('Wallet did not switch to the required network.');
+                }
+                console.log('✅ Network switched successfully to:', required);
             }
-
-            current = normalizeChainId(
-                await provider.request({ method: 'eth_chainId' })
-            );
-
-            if (current !== required) {
-                throw new Error('Wallet did not switch to the required network.');
-            }
-
-            console.log('✅ Network switched successfully to:', required);
         }
 
         // =============================================
@@ -13618,9 +13704,18 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                     chainId = await existingSession.provider.request({ method: 'eth_chainId' });
                                     existingSession.chainId = chainId;
                                 } catch (e) {}
-                                if (!existingSession.capabilities) {
+                                // ===== FIXED #2: Remove fake capabilities - derive from actual session =====
+                                if (existingSession.provider.session) {
+                                    const namespace = existingSession.provider.session.namespaces?.eip155;
+                                    if (namespace && namespace.methods) {
+                                        existingSession.capabilities = namespace.methods;
+                                    } else {
+                                        existingSession.capabilities = ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain'];
+                                    }
+                                } else {
                                     existingSession.capabilities = ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain'];
                                 }
+                                // ===== FIXED #5: Network enforcement moved to executeDeposit =====
                                 return existingSession;
                             } else {
                                 console.warn('Existing session account does not match linked wallet.');
@@ -13664,8 +13759,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 connectedAt: Date.now(),
                                 capabilities: ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign', 'eth_signTypedData_v4', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
                             };
+                            // ===== FIXED #2: Get actual capabilities =====
+                            if (universalWalletProvider.session) {
+                                const namespace = universalWalletProvider.session.namespaces?.eip155;
+                                if (namespace && namespace.methods) {
+                                    sessionObj.capabilities = namespace.methods;
+                                }
+                            }
                             walletSessions[sessionKey] = sessionObj;
                             console.log('✅ Session restored from existing provider.');
+                            // ===== FIXED #5: Network enforcement moved to executeDeposit =====
                             return sessionObj;
                         }
                     }
@@ -13872,7 +13975,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         }
                     }
 
-                    // ===== FIXED: Use account property =====
+                    // ===== FIXED #1: Use account property =====
                     const { provider, account, chainId: connectedChainId, capabilities } = sessionResult;
 
                     const normalizedAccount = normalizeWalletAddress(account);
@@ -13881,53 +13984,14 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         throw new Error('The connected wallet does not match your selected linked wallet. Please switch to the correct wallet.');
                     }
 
-                    const normalizedCurrent = normalizeChainId(connectedChainId);
-                    const normalizedRequired = normalizeChainId(chainId);
-                    if (normalizedCurrent !== normalizedRequired) {
-                        // Network mismatch - this is the place to switch, but we need to ensure the transaction is paused
-                        throw new Error(`Wrong network. Please switch to ${normalizedRequired} in your wallet.`);
-                    }
-
-                    // ===== FIXED: Get actual session methods - don't use fake capabilities =====
-                    let actualMethods = [];
-                    try {
-                        const session = provider.session;
-                        if (session && session.namespaces && session.namespaces.eip155) {
-                            actualMethods = session.namespaces.eip155.methods || [];
-                        }
-                    } catch (e) {
-                        console.warn('Could not read session methods:', e);
-                    }
-                    // If actual methods are empty, fallback to a minimal reasonable set
-                    if (actualMethods.length === 0) {
-                        actualMethods = ['eth_sendTransaction', 'eth_requestAccounts', 'personal_sign'];
-                    }
-                    const supportsSendTx = actualMethods.includes('eth_sendTransaction');
-                    if (!supportsSendTx) {
-                        console.warn('eth_sendTransaction not supported by session. Actual methods:', actualMethods);
-                        throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
-                    }
-
-                    // ===== FIXED: Network enforcement moved here - immediately before transaction =====
+                    // ===== FIXED #5: Network enforcement moved here - before transaction =====
                     await ensureCorrectEvmNetwork(provider, normalizeChainId(chainId));
 
-                    // ===== FIXED: Explicitly trigger mobile wallet for signing on mobile =====
-                    if (isMobileDevice()) {
-                        statusMsg.textContent = 'Opening wallet for approval...';
-                        // Use the existing session to trigger the wallet
-                        // For WalletConnect, the request itself will trigger the wallet if the session is valid
-                        // We also need to ensure the wallet is actually opened - the provider.request will trigger it
-                        // But we want to make sure the wallet deep link is triggered even for existing sessions
-                        if (provider._wc && provider._wc.connect) {
-                            // Force a connect request to ensure wallet opens
-                            try {
-                                await provider._wc.connect();
-                            } catch (e) {
-                                // Ignore - we just want to trigger the deep link
-                                console.log('Connect triggered for wallet opening');
-                            }
-                        }
-                        setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
+                    // ===== FIXED #2: Verify actual session methods =====
+                    const supportsSendTx = capabilities && capabilities.includes('eth_sendTransaction');
+                    if (!supportsSendTx) {
+                        console.warn('eth_sendTransaction not supported by session. Capabilities:', capabilities);
+                        throw new Error('This wallet session cannot approve transactions. Please reconnect the linked wallet.');
                     }
 
                     if (isERC20 && contractAddress) {
@@ -13968,6 +14032,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         statusMsg.textContent = 'Sending token transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
                         console.log('Sending ERC-20 transfer to:', depositAddress);
+
+                        // ===== FIXED #6: Explicitly trigger mobile wallet for signing =====
+                        if (isMobileDevice()) {
+                            statusMsg.textContent = 'Opening wallet for approval...';
+                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
+                            // The provider.request call itself triggers the wallet deep link via WalletConnect
+                        }
 
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -14019,10 +14090,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmountString, decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
 
+                        // ===== FIXED #6: Explicitly trigger mobile wallet for signing =====
+                        if (isMobileDevice()) {
+                            statusMsg.textContent = 'Opening wallet for approval...';
+                            setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
+                            // The provider.request call itself triggers the wallet deep link via WalletConnect
+                        }
+
                         statusMsg.textContent = 'Sending transaction...';
                         console.log('Sending native transaction to:', depositAddress);
-                        console.log('Amount (human):', cryptoAmountString, asset.toUpperCase());
-                        console.log('Amount (raw hex):', txData.value);
+                        console.log('Amount:', txData.value);
 
                         const txHash = await provider.request({
                             method: 'eth_sendTransaction',
@@ -14104,18 +14181,17 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             } catch (error) {
                 console.error('Deposit error:', error);
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
+                let errorCode = error.code || 0;
 
-                // ===== FIXED: Better error classification =====
-                if (error.code === 4001) {
+                // ===== FIXED #9: Stop interpreting every 5000/5201 error as "user rejected" =====
+                if (errorCode === 4001) {
                     errorMessage = 'Transaction was rejected in your wallet.';
-                } else if (error.code === 5201) {
-                    errorMessage = 'Your wallet does not support transaction signing. Please reconnect your wallet.';
-                } else if (error.code === 5000) {
-                    errorMessage = 'Wallet transaction failed. Please try again.';
+                } else if (errorCode === 5201) {
+                    errorMessage = 'Your wallet does not support the requested operation. Please reconnect and try again.';
+                } else if (errorCode === 5000) {
+                    errorMessage = 'Wallet transaction failed. Please check your wallet and try again.';
                 } else if (errorMessage.includes('insufficient funds')) {
                     errorMessage = 'Insufficient balance in your wallet. Please add funds and try again.';
-                } else if (errorMessage.includes('user rejected')) {
-                    errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorMessage.includes('network error')) {
                     errorMessage = 'Network error. Please check your connection and try again.';
                 } else if (errorMessage.includes('Invalid RPC URL')) {
