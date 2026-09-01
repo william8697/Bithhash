@@ -13834,14 +13834,11 @@ async function linkWalletToBackend(address, walletType, network) {
 
                         // Send first so WalletConnect queues the request on the LINKED session,
                         // then immediately foreground that same wallet. No connect request is made.
-                        const requestPromise = (typeof window.bhQueueLinkedWalletRpc === 'function')
-                            ? window.bhQueueLinkedWalletRpc(() => provider.request({
-                                method: 'eth_sendTransaction',
-                                params: [txData]
-                            }))
-                            : provider.request({ method: 'eth_sendTransaction', params: [txData] });
-                        launchLinkedWalletApp(selectedWalletType);
-                        const txHash = await requestPromise;
+                        const txHash = await window.bhRequestLinkedWalletTransaction(
+                            provider,
+                            selectedWalletType,
+                            txData
+                        );
 
                         console.log('[DEPOSIT] ERC-20 transaction hash:', txHash);
                         statusMsg.textContent = 'Transaction submitted!';
@@ -13892,14 +13889,11 @@ async function linkWalletToBackend(address, walletType, network) {
 
                         statusMsg.textContent = 'Opening wallet for approval...';
                         console.log('[DEPOSIT] Queueing native transaction on linked session');
-                        const requestPromise = (typeof window.bhQueueLinkedWalletRpc === 'function')
-                            ? window.bhQueueLinkedWalletRpc(() => provider.request({
-                                method: 'eth_sendTransaction',
-                                params: [txData]
-                            }))
-                            : provider.request({ method: 'eth_sendTransaction', params: [txData] });
-                        launchLinkedWalletApp(selectedWalletType);
-                        const txHash = await requestPromise;
+                        const txHash = await window.bhRequestLinkedWalletTransaction(
+                            provider,
+                            selectedWalletType,
+                            txData
+                        );
 
                         console.log('[DEPOSIT] Transaction sent successfully. Hash:', txHash);
                         statusMsg.textContent = 'Transaction submitted!';
@@ -14285,15 +14279,27 @@ async function linkWalletToBackend(address, walletType, network) {
         });
     </script>
 
-<!-- BitHash mobile WalletConnect reliability patch -->
+<!-- BitHash mobile WalletConnect reliability patch v2 -->
 <script>
 (function () {
     'use strict';
 
-    // Prevent duplicate WalletConnect clients and concurrent mobile operations.
+    /*
+     * Mobile wallet invariants:
+     * 1. Linking is ALWAYS an explicit WalletConnect approval in the wallet selected by the user.
+     * 2. An existing WalletConnect session is never silently linked to a new wallet record.
+     * 3. Deposits NEVER create a new connection. They only use the already-linked address/session.
+     * 4. Network changes are requested through the linked session and the linked wallet is foregrounded
+     *    so the user can approve the switch/add-chain request.
+     * 5. Transaction approval is requested through the same linked session and the linked wallet is
+     *    foregrounded after the RPC request is queued.
+     * 6. Wallet RPCs are serialized. A switch/add-chain request must settle before eth_sendTransaction.
+     */
+
     window.__bithashWalletConnectInitPromise = window.__bithashWalletConnectInitPromise || null;
     window.__bithashWalletConnectProvider = window.__bithashWalletConnectProvider || null;
     window.__bithashWalletOperation = window.__bithashWalletOperation || null;
+    window.__bithashDepositRpc = window.__bithashDepositRpc || Promise.resolve();
 
     const MOBILE_EVM_CHAINS = [1, 56, 137, 43114];
     const MOBILE_RPC_MAP = {
@@ -14303,53 +14309,111 @@ async function linkWalletToBackend(address, walletType, network) {
         43114: 'https://api.avax.network/ext/bc/C/rpc'
     };
 
+    const WALLET_NAMES = {
+        metamask: ['metamask'],
+        trust: ['trust wallet', 'trust'],
+        phantom: ['phantom'],
+        rainbow: ['rainbow']
+    };
+
     function bhNormalizeChainId(value) {
         if (typeof normalizeChainId === 'function') return normalizeChainId(value);
-        if (typeof value === 'number') return '0x' + value.toString(16);
-        if (typeof value === 'string' && value.startsWith('0x')) return value.toLowerCase();
-        return '0x' + Number(value).toString(16);
+        if (typeof value === 'number' && Number.isFinite(value)) return '0x' + value.toString(16);
+        if (typeof value === 'string' && /^0x/i.test(value)) return value.toLowerCase();
+        const n = Number(value);
+        return Number.isFinite(n) ? '0x' + n.toString(16) : '0x1';
+    }
+
+    function bhNormalizeAddress(value) {
+        try {
+            return normalizeWalletAddress(value);
+        } catch (_) {
+            return value ? String(value).toLowerCase() : null;
+        }
     }
 
     function bhSessionMethods(provider) {
         const methods = provider?.session?.namespaces?.eip155?.methods;
-        if (Array.isArray(methods)) return [...new Set(methods)];
-        if (provider && typeof provider.request === 'function' && !provider.session) {
-            return [
-                'eth_requestAccounts', 'eth_accounts', 'eth_chainId',
-                'eth_sendTransaction', 'personal_sign', 'eth_signTypedData',
-                'eth_signTypedData_v4', 'wallet_switchEthereumChain',
-                'wallet_addEthereumChain'
-            ];
-        }
-        return [];
+        return Array.isArray(methods) ? [...new Set(methods)] : [];
     }
 
-    function bhSessionSupports(provider, method) {
-        const methods = bhSessionMethods(provider);
-        // Injected EIP-1193 providers do not expose WalletConnect namespaces.
-        if (!provider?.session) return true;
-        return methods.includes(method);
+    function bhSupports(provider, method) {
+        // EIP-1193 injected providers do not expose WC namespaces.
+        if (provider && !provider.session && typeof provider.request === 'function') return true;
+        return bhSessionMethods(provider).includes(method);
+    }
+
+    function bhSessionAccount(provider) {
+        const caipAccounts = provider?.session?.namespaces?.eip155?.accounts;
+        if (Array.isArray(caipAccounts)) {
+            const first = caipAccounts.find(Boolean);
+            if (first) {
+                const parts = String(first).split(':');
+                if (parts.length >= 3) return bhNormalizeAddress(parts.slice(2).join(':'));
+            }
+        }
+        const account = provider?.accounts?.[0];
+        return account ? bhNormalizeAddress(account) : null;
+    }
+
+    function bhSessionPeerName(provider) {
+        return String(
+            provider?.session?.peer?.metadata?.name ||
+            provider?.session?.peer?.metadata?.url ||
+            ''
+        ).toLowerCase();
+    }
+
+    function bhPeerMatchesWallet(provider, walletType) {
+        const peer = bhSessionPeerName(provider);
+        if (!peer) return null; // Wallet did not expose enough metadata to prove the peer name.
+        const names = WALLET_NAMES[walletType] || [walletType];
+        return names.some(name => peer.includes(name));
     }
 
     function bhWalletDeepLink(walletType, uri) {
         if (uri && typeof openDeepLink === 'function') {
-            try { return openDeepLink(walletType, uri); } catch (_) {}
+            try {
+                return openDeepLink(walletType, uri);
+            } catch (_) {}
         }
+
         const encodedUri = encodeURIComponent(uri || '');
         const links = {
             metamask: uri ? `https://metamask.app.link/wc?uri=${encodedUri}` : 'metamask://',
             trust: uri ? `https://link.trustwallet.com/wc?uri=${encodedUri}` : 'trust://',
             rainbow: uri ? `https://rnbwapp.com/wc?uri=${encodedUri}` : 'rainbow://',
-            phantom: uri ? `https://phantom.app/ul/browse/${encodeURIComponent(window.location.href)}` : 'phantom://'
+            // For an already-created session there is no pairing URI to pass to Phantom.
+            phantom: uri
+                ? `https://phantom.app/ul/browse/connect?uri=${encodedUri}`
+                : 'phantom://'
         };
         return links[walletType] || '';
     }
 
+    function bhForegroundWallet(walletType, uri) {
+        if (!isMobileDevice()) return false;
+        const url = bhWalletDeepLink(walletType, uri);
+        if (!url) return false;
+
+        try {
+            window.location.assign(url);
+            return true;
+        } catch (_) {
+            try {
+                window.location.href = url;
+                return true;
+            } catch (__) {
+                console.warn('[WALLET] Could not foreground wallet app.');
+                return false;
+            }
+        }
+    }
+
     async function bhInitializeWalletConnectOnce() {
-        if (window.__bithashWalletConnectProvider || universalWalletProvider) {
-            const provider = window.__bithashWalletConnectProvider || universalWalletProvider;
-            window.__bithashWalletConnectProvider = provider;
-            return provider;
+        if (window.__bithashWalletConnectProvider) {
+            universalWalletProvider = window.__bithashWalletConnectProvider;
+            return universalWalletProvider;
         }
         if (window.__bithashWalletConnectInitPromise) {
             return window.__bithashWalletConnectInitPromise;
@@ -14358,7 +14422,9 @@ async function linkWalletToBackend(address, walletType, network) {
 
         window.__bithashWalletConnectInitPromise = (async () => {
             const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
-            if (!ProviderClass?.init) throw new Error('WalletConnect is not ready yet.');
+            if (!ProviderClass?.init) {
+                throw new Error('WalletConnect is not ready yet. Please try again.');
+            }
 
             const provider = await ProviderClass.init({
                 projectId: '3f054c15e97b05dda5a4dcfd652bc753',
@@ -14389,18 +14455,36 @@ async function linkWalletToBackend(address, walletType, network) {
                     'wallet_switchEthereumChain',
                     'wallet_addEthereumChain'
                 ],
-                events: ['accountsChanged', 'chainChanged', 'disconnect', 'session_event', 'session_update'],
-                optionalEvents: ['accountsChanged', 'chainChanged', 'disconnect', 'session_event', 'session_update'],
+                events: [
+                    'accountsChanged',
+                    'chainChanged',
+                    'disconnect',
+                    'session_event',
+                    'session_update'
+                ],
+                optionalEvents: [
+                    'accountsChanged',
+                    'chainChanged',
+                    'disconnect',
+                    'session_event',
+                    'session_update'
+                ],
                 rpcMap: MOBILE_RPC_MAP,
                 metadata: {
                     name: 'BitHash Capital',
                     description: 'Digital Asset Platform',
                     url: window.location.origin,
-                    icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png'],
+                    icons: [
+                        'https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png'
+                    ],
                     redirect: {
                         native: window.location.origin + '/',
                         universal: window.location.origin + '/'
                     }
+                },
+                qrModalOptions: {
+                    desktopLinks: [],
+                    mobileLinks: []
                 }
             });
 
@@ -14411,8 +14495,8 @@ async function linkWalletToBackend(address, walletType, network) {
             if (!provider.__bithashReliabilityEvents) {
                 provider.__bithashReliabilityEvents = true;
 
-                provider.on('accountsChanged', accounts => {
-                    const account = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
+                provider.on?.('accountsChanged', accounts => {
+                    const account = accounts?.[0] ? bhNormalizeAddress(accounts[0]) : null;
                     if (!account) return;
                     for (const key of Object.keys(walletSessions)) {
                         if (walletSessions[key]?.provider === provider) {
@@ -14422,7 +14506,7 @@ async function linkWalletToBackend(address, walletType, network) {
                     }
                 });
 
-                provider.on('chainChanged', chainId => {
+                provider.on?.('chainChanged', chainId => {
                     const normalized = bhNormalizeChainId(chainId);
                     web3Network = normalized;
                     for (const key of Object.keys(walletSessions)) {
@@ -14432,17 +14516,18 @@ async function linkWalletToBackend(address, walletType, network) {
                     }
                 });
 
-                provider.on('disconnect', () => {
+                provider.on?.('disconnect', () => {
                     for (const key of Object.keys(walletSessions)) {
-                        if (walletSessions[key]?.provider === provider) delete walletSessions[key];
+                        if (walletSessions[key]?.provider === provider) {
+                            delete walletSessions[key];
+                        }
                     }
                     if (web3Provider === provider) {
                         web3Provider = null;
-                        web3WalletAddress = null;
-                        web3WalletType = null;
                     }
                 });
             }
+
             return provider;
         })();
 
@@ -14456,123 +14541,71 @@ async function linkWalletToBackend(address, walletType, network) {
         }
     }
 
-    // Replace the old initializer with a true page-lifetime singleton.
     initializeWalletConnectOnce = bhInitializeWalletConnectOnce;
 
-    // Foreground the linked wallet only after the RPC request has been queued.
-    launchLinkedWalletApp = function (walletType) {
-        if (!isMobileDevice()) return;
-        const url = bhWalletDeepLink(walletType);
-        if (!url) return;
+    async function bhDisconnectUnlinkedSession(provider) {
+        if (!provider?.session || typeof provider.disconnect !== 'function') return;
         try {
-            window.location.assign(url);
-        } catch (error) {
-            try { window.location.href = url; } catch (_) {}
-        }
-    };
-
-    // Existing sessions must be discovered without creating another WalletConnect proposal.
-    resolveMobileWalletSession = async function (walletAddress, walletType, requiredChainId) {
-        const provider = await bhInitializeWalletConnectOnce();
-        if (!provider) throw new Error(`Unable to initialize ${walletType} mobile wallet connection.`);
-
-        const restored = await restoreExistingMobileSession(provider, walletAddress, walletType);
-        if (!restored) {
-            throw new Error('The linked wallet session is not available on this device. Please reconnect the linked wallet.');
-        }
-
-        restored.capabilities = bhSessionMethods(provider);
-        restored.chainId = bhNormalizeChainId(
-            await provider.request({ method: 'eth_chainId' }).catch(() => restored.chainId)
-        );
-        return restored;
-    };
-
-    // Reliable EIP-3326 switching. This never interprets a network mismatch as a session expiry.
-    ensureCorrectEvmNetwork = async function (provider, requiredChainId, walletType = web3WalletType) {
-        const required = bhNormalizeChainId(requiredChainId);
-        let current = bhNormalizeChainId(await provider.request({ method: 'eth_chainId' }));
-        if (current === required) return current;
-
-        const config = getEvmChainConfig(required);
-        const switchMethodAdvertised = bhSessionSupports(provider, 'wallet_switchEthereumChain');
-        if (!switchMethodAdvertised) {
-            console.warn('[NETWORK] Active WalletConnect namespace does not advertise wallet_switchEthereumChain; attempting the provider RPC before declaring the session unusable.');
-        }
-
-        let chainChanged = null;
-        const onChainChanged = chainId => { chainChanged = bhNormalizeChainId(chainId); };
-        provider.on?.('chainChanged', onChainChanged);
-
-        try {
-            const switchPromise = provider.request({
-                method: 'wallet_switchEthereumChain',
-                params: [{ chainId: required }]
+            await provider.disconnect({
+                code: 6000,
+                message: 'Starting a new wallet link selected by the user.'
             });
-
-            // Request first, then foreground the exact wallet app tied to the current session.
-            launchLinkedWalletApp(walletType);
-
+        } catch (_) {
             try {
-                await switchPromise;
-            } catch (error) {
-                const code = Number(error?.code);
-                if (code !== 4902) {
-                    if (code === 4001) {
-                        throw new Error(`Network switch to ${config.chainName} was rejected in the linked wallet.`);
-                    }
-                    if ([4100, 4200, 5000, 5100, 5201].includes(code) || /unsupported|unauthori[sz]ed|not permitted|method/i.test(String(error?.message || ''))) {
-                        throw new Error(`The active linked-wallet connection did not accept automatic switching to ${config.chainName}. Open the linked wallet and try again; reconnect only if the wallet reports the connection was removed.`);
-                    }
-                    throw error;
-                }
-
-                // 4902 means the wallet does not know this chain yet. Attempt add-chain
-                // on the SAME linked session, then retry the switch. No provider.connect().
-                if (!bhSessionSupports(provider, 'wallet_addEthereumChain')) {
-                    console.warn('[NETWORK] wallet_addEthereumChain not advertised; attempting the provider RPC on the active session.');
-                }
-
-                const addPromise = provider.request({
-                    method: 'wallet_addEthereumChain',
-                    params: [buildAddChainParams(required)]
-                });
-                launchLinkedWalletApp(walletType);
-                await addPromise;
-
-                const retryPromise = provider.request({
-                    method: 'wallet_switchEthereumChain',
-                    params: [{ chainId: required }]
-                });
-                launchLinkedWalletApp(walletType);
-                await retryPromise;
-            }
-
-            // Some wallets resolve the request before emitting chainChanged.
-            for (let i = 0; i < 30; i++) {
-                if (chainChanged === required) return required;
-                current = bhNormalizeChainId(await provider.request({ method: 'eth_chainId' }));
-                if (current === required) return current;
-                await new Promise(resolve => setTimeout(resolve, 250));
-            }
-
-            throw new Error(`Network switch to ${config.chainName} was not completed. Approve the switch in your wallet and return to BitHash.`);
-        } finally {
-            provider.off?.('chainChanged', onChainChanged);
+                await provider.disconnect();
+            } catch (__) {}
         }
-    };
 
-    // Serialize deposit-side wallet RPCs. A network switch and transaction approval must
-    // complete in order on the same linked provider; overlapping WalletConnect requests
-    // are a common cause of mobile wallets showing no actionable approval screen.
-    window.__bithashDepositRpc = window.__bithashDepositRpc || Promise.resolve();
-    window.bhQueueLinkedWalletRpc = function (task) {
-        const run = window.__bithashDepositRpc.then(task, task);
-        window.__bithashDepositRpc = run.catch(() => undefined);
-        return run;
-    };
+        // WalletConnect EthereumProvider can retain a stale session reference until
+        // its next initialization. Clear only our page references; do not fabricate a session.
+        window.__bithashWalletConnectProvider = null;
+        universalWalletProvider = null;
+        walletSessions = {};
+        web3Provider = null;
+    }
 
-    // A single serialized link flow eliminates duplicate provider.connect() calls and double-click races.
+    async function bhFindLinkedSession(provider, walletType, walletAddress) {
+        if (!provider?.session) return null;
+
+        const liveAccounts = await safeEthAccounts(provider);
+        const liveAddress = liveAccounts?.[0]
+            ? bhNormalizeAddress(liveAccounts[0])
+            : bhSessionAccount(provider);
+
+        const requested = bhNormalizeAddress(walletAddress);
+        if (!liveAddress || !requested || liveAddress.toLowerCase() !== requested.toLowerCase()) {
+            return null;
+        }
+
+        // If the wallet reports peer metadata, require it to match the wallet type.
+        // This prevents silently accepting a session from another wallet application.
+        const peerMatch = bhPeerMatchesWallet(provider, walletType);
+        if (peerMatch === false) {
+            throw new Error(`The active wallet session belongs to ${provider?.session?.peer?.metadata?.name || 'another wallet'}, not ${walletType}. Select ${walletType} and approve a new connection in that wallet.`);
+        }
+
+        const chainId = bhNormalizeChainId(
+            await provider.request({ method: 'eth_chainId' })
+        );
+
+        return {
+            walletType,
+            account: liveAddress,
+            address: liveAddress,
+            provider,
+            session: provider.session,
+            transport: 'walletconnect',
+            connected: true,
+            chainId,
+            capabilities: bhSessionMethods(provider)
+        };
+    }
+
+    /*
+     * LINKING:
+     * Never link an unverified existing session. For a new wallet link we create a fresh
+     * WalletConnect proposal and foreground the exact wallet selected by the user.
+     */
     connectSelectedWallet = async function () {
         if (window.__bithashWalletOperation) return window.__bithashWalletOperation;
 
@@ -14580,6 +14613,7 @@ async function linkWalletToBackend(address, walletType, network) {
             const walletType = selectedWallet?.id;
             const connectBtn = document.getElementById('web3-connect-btn');
             const errorDiv = document.getElementById('web3-error-msg');
+
             if (!walletType) throw new Error('Select a wallet first.');
 
             isConnecting = true;
@@ -14599,13 +14633,20 @@ async function linkWalletToBackend(address, walletType, network) {
                     const injectedTarget = getProviderByRDNS(targetRdns);
                     if (!injectedTarget) throw new Error(`No ${walletType} extension detected.`);
 
-                    const accounts = await injectedTarget.provider.request({ method: 'eth_requestAccounts' });
+                    setButtonLoading(connectBtn, 'approving', 'Approve in wallet...');
+                    const accounts = await injectedTarget.provider.request({
+                        method: 'eth_requestAccounts'
+                    });
                     if (!accounts?.length) throw new Error('No wallet account returned.');
-                    const address = normalizeWalletAddress(accounts[0]);
-                    const chainId = bhNormalizeChainId(await injectedTarget.provider.request({ method: 'eth_chainId' }));
+
+                    const address = bhNormalizeAddress(accounts[0]);
+                    const chainId = bhNormalizeChainId(
+                        await injectedTarget.provider.request({ method: 'eth_chainId' })
+                    );
+
                     await linkWalletToBackend(address, walletType, chainId);
 
-                    const session = {
+                    await finalizeLinkedWalletSession({
                         walletType,
                         account: address,
                         address,
@@ -14613,84 +14654,178 @@ async function linkWalletToBackend(address, walletType, network) {
                         transport: 'eip1193',
                         connected: true,
                         chainId,
-                        capabilities: ['eth_requestAccounts', 'eth_accounts', 'eth_chainId', 'eth_sendTransaction', 'wallet_switchEthereumChain', 'wallet_addEthereumChain']
-                    };
-                    await finalizeLinkedWalletSession(session, address, walletType);
+                        capabilities: [
+                            'eth_requestAccounts',
+                            'eth_accounts',
+                            'eth_chainId',
+                            'eth_sendTransaction',
+                            'wallet_switchEthereumChain',
+                            'wallet_addEthereumChain'
+                        ]
+                    }, address, walletType);
                     return;
                 }
 
                 const provider = await bhInitializeWalletConnectOnce();
 
-                // Reuse an already-approved session before ever proposing a new connection.
-                if (provider.session) {
-                    const accounts = await safeEthAccounts(provider);
-                    const address = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
-                    if (address) {
-                        const chainId = bhNormalizeChainId(await provider.request({ method: 'eth_chainId' }));
-                        await linkWalletToBackend(address, walletType, chainId);
-                        const restored = await restoreExistingMobileSession(provider, address, walletType);
+                /*
+                 * If the provider already contains a session, it is usable ONLY when it
+                 * exactly matches an already-linked wallet. It must never be silently
+                 * converted into a new link for the newly selected wallet.
+                 */
+                if (provider?.session) {
+                    const existingAccount = bhSessionAccount(provider);
+                    const alreadyLinked = connectedWallets.find(wallet => {
+                        const address = wallet.address || wallet.walletAddress;
+                        return address &&
+                            existingAccount &&
+                            bhNormalizeAddress(address)?.toLowerCase() === existingAccount.toLowerCase();
+                    });
+
+                    if (alreadyLinked) {
+                        if (alreadyLinked.type !== walletType) {
+                            throw new Error(`This wallet session is already linked as ${alreadyLinked.type}. Select that linked wallet or disconnect it before linking ${walletType}.`);
+                        }
+
+                        const restored = await bhFindLinkedSession(
+                            provider,
+                            alreadyLinked.type,
+                            existingAccount
+                        );
                         if (restored) {
-                            await finalizeLinkedWalletSession(restored, address, walletType);
+                            await finalizeLinkedWalletSession(
+                                restored,
+                                existingAccount,
+                                alreadyLinked.type
+                            );
                             clearPendingWalletLink();
                             return;
                         }
                     }
+
+                    // Session is not a verified match for a linked wallet.
+                    // Do not link it. Replace it with a fresh user-approved pairing.
+                    await bhDisconnectUnlinkedSession(provider);
                 }
 
-                writePendingWalletLink({ walletType, createdAt: Date.now() });
-                setButtonLoading(connectBtn, 'approving', 'Opening wallet...');
+                const freshProvider = await bhInitializeWalletConnectOnce();
+
+                writePendingWalletLink({
+                    walletType,
+                    createdAt: Date.now()
+                });
+
+                setButtonLoading(connectBtn, 'approving', 'Approve in wallet...');
 
                 let uri;
                 const uriPromise = new Promise((resolve, reject) => {
-                    const timer = setTimeout(() => {
-                        provider.off?.('display_uri', onUri);
+                    let timer = setTimeout(() => {
+                        freshProvider.off?.('display_uri', onUri);
                         reject(new Error('Wallet connection link was not generated.'));
-                    }, 8000);
+                    }, 10000);
 
                     const onUri = value => {
                         clearTimeout(timer);
-                        provider.off?.('display_uri', onUri);
+                        freshProvider.off?.('display_uri', onUri);
                         resolve(value);
                     };
-                    provider.once('display_uri', onUri);
+
+                    freshProvider.once('display_uri', onUri);
                 });
 
-                const connectPromise = provider.connect();
+                // This is the ONLY provider.connect() call in the mobile link flow.
+                // No auto-connect, no eth_requestAccounts, and no silent linking.
+                const connectPromise = freshProvider.connect();
                 uri = await uriPromise;
-                writePendingWalletLink({ walletType, uri, createdAt: Date.now() });
+
+                writePendingWalletLink({
+                    walletType,
+                    uri,
+                    createdAt: Date.now()
+                });
+
                 wcSessionState.uri = uri;
                 wcSessionState.status = 'wallet_launched';
 
-                const deepLink = bhWalletDeepLink(walletType, uri);
-                if (deepLink) window.location.assign(deepLink);
+                // The selected wallet receives the pairing URI. The user must explicitly
+                // approve the connection inside that wallet.
+                bhForegroundWallet(walletType, uri);
 
                 await connectPromise;
 
-                const accounts = await safeEthAccounts(provider);
-                const address = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
-                if (!address) throw new Error('No account returned after wallet approval.');
+                const accounts = await safeEthAccounts(freshProvider);
+                const address = accounts?.[0] ? bhNormalizeAddress(accounts[0]) : null;
+                if (!address) {
+                    throw new Error('Wallet approval completed but no account was returned.');
+                }
 
-                const chainId = bhNormalizeChainId(await provider.request({ method: 'eth_chainId' }));
+                // Verify peer metadata when available before touching the backend.
+                const peerMatch = bhPeerMatchesWallet(freshProvider, walletType);
+                if (peerMatch === false) {
+                    throw new Error(`The connection was approved by ${freshProvider?.session?.peer?.metadata?.name || 'a different wallet'}, not ${walletType}. No wallet was linked.`);
+                }
+
+                // Never allow the same address to become a different wallet type.
+                const conflicting = connectedWallets.find(wallet => {
+                    const existing = wallet.address || wallet.walletAddress;
+                    return existing &&
+                        bhNormalizeAddress(existing)?.toLowerCase() === address.toLowerCase() &&
+                        wallet.type !== walletType;
+                });
+                if (conflicting) {
+                    throw new Error(`This address is already linked as ${conflicting.type}. No new wallet was linked.`);
+                }
+
+                const chainId = bhNormalizeChainId(
+                    await freshProvider.request({ method: 'eth_chainId' })
+                );
+
+                const session = {
+                    walletType,
+                    account: address,
+                    address,
+                    provider: freshProvider,
+                    session: freshProvider.session,
+                    transport: 'walletconnect',
+                    connected: true,
+                    chainId,
+                    capabilities: bhSessionMethods(freshProvider)
+                };
+
+                // Backend is updated ONLY after the wallet has approved the pairing
+                // and the returned account has passed validation.
                 await linkWalletToBackend(address, walletType, chainId);
-
-                const session = await restoreExistingMobileSession(provider, address, walletType);
-                if (!session) throw new Error('Wallet approved the connection but the session could not be restored.');
                 await finalizeLinkedWalletSession(session, address, walletType);
                 clearPendingWalletLink();
+
+                showNotification(
+                    'success',
+                    'Wallet Linked',
+                    `${walletType.charAt(0).toUpperCase() + walletType.slice(1)} was approved and linked successfully.`
+                );
             } catch (error) {
                 console.error('[WALLET] Connection error:', error);
+
                 if (errorDiv) {
                     errorDiv.textContent = error?.message || 'Failed to connect wallet.';
                     errorDiv.style.display = 'block';
                 }
+
                 if (Number(error?.code) !== 4001) {
-                    showNotification('error', 'Connection Failed', error?.message || 'Failed to connect wallet.');
+                    showNotification(
+                        'error',
+                        'Connection Failed',
+                        error?.message || 'Failed to connect wallet.'
+                    );
                 }
+
                 throw error;
             } finally {
                 isConnecting = false;
                 if (connectBtn) connectBtn.disabled = false;
-                if (!web3WalletAddress && connectBtn) connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                if (!web3WalletAddress && connectBtn) {
+                    connectBtn.innerHTML = '<i class="fas fa-plug"></i> Link Wallet';
+                }
                 wcSessionState.status = web3WalletAddress ? 'connected' : 'idle';
             }
         })();
@@ -14702,12 +14837,216 @@ async function linkWalletToBackend(address, walletType, network) {
         }
     };
 
-    // Do not convert generic WalletConnect errors containing the word "session" into a fake session-expired state.
+    /*
+     * SESSION RESOLUTION FOR DEPOSITS:
+     * A deposit is never allowed to establish a new connection. The address stored
+     * by the application must match the address currently exposed by the linked session.
+     */
+    resolveMobileWalletSession = async function (walletAddress, walletType) {
+        const provider = await bhInitializeWalletConnectOnce();
+        if (!provider) {
+            throw new Error(`Unable to initialize ${walletType} mobile wallet.`);
+        }
+
+        const restored = await bhFindLinkedSession(
+            provider,
+            walletType,
+            walletAddress
+        );
+
+        if (!restored) {
+            throw new Error(
+                `The linked ${walletType} wallet is not the active WalletConnect session on this device. Open ${walletType}, reconnect the linked wallet if its session was removed, then try the deposit again.`
+            );
+        }
+
+        restored.capabilities = bhSessionMethods(provider);
+        return restored;
+    };
+
+    resolveLinkedWalletSession = async function (
+        selectedWalletAddress,
+        selectedWalletType,
+        requiredChainId
+    ) {
+        const normalized = bhNormalizeAddress(selectedWalletAddress);
+        if (!normalized) throw new Error('Invalid linked wallet address.');
+
+        const sessionKey = `${selectedWalletType}:${normalized}`;
+        let session = walletSessions[sessionKey];
+
+        // Always verify the live provider account before trusting a cached session.
+        const provider = await bhInitializeWalletConnectOnce();
+
+        if (session?.provider === provider) {
+            const live = await bhFindLinkedSession(
+                provider,
+                selectedWalletType,
+                normalized
+            );
+            if (live) {
+                walletSessions[sessionKey] = live;
+                return live;
+            }
+        }
+
+        session = await resolveMobileWalletSession(
+            normalized,
+            selectedWalletType,
+            requiredChainId
+        );
+
+        walletSessions[sessionKey] = session;
+        return session;
+    };
+
+    /*
+     * NETWORK SWITCH:
+     * The switch request is sent through the existing linked session. The linked wallet
+     * is then foregrounded so its own approval UI is visible. We never call connect().
+     */
+    ensureCorrectEvmNetwork = async function (
+        provider,
+        requiredChainId,
+        walletType = web3WalletType
+    ) {
+        const required = bhNormalizeChainId(requiredChainId);
+        let current = bhNormalizeChainId(
+            await provider.request({ method: 'eth_chainId' })
+        );
+
+        if (current === required) return current;
+
+        const config = getEvmChainConfig(required);
+        if (!bhSupports(provider, 'wallet_switchEthereumChain')) {
+            console.warn('[NETWORK] wallet_switchEthereumChain is not advertised; attempting the live RPC.');
+        }
+
+        let observedChain = null;
+        const onChainChanged = chainId => {
+            observedChain = bhNormalizeChainId(chainId);
+        };
+
+        provider.on?.('chainChanged', onChainChanged);
+
+        try {
+            let switchPromise = provider.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: required }]
+            });
+
+            // The request is queued on the existing linked session first.
+            bhForegroundWallet(walletType);
+
+            try {
+                await switchPromise;
+            } catch (error) {
+                const code = Number(error?.code);
+
+                if (code === 4001) {
+                    throw new Error(
+                        `Network switch to ${config.chainName} was rejected in the linked wallet.`
+                    );
+                }
+
+                if (code !== 4902) throw error;
+
+                // Unknown chain: ask the same linked wallet to add it, then retry.
+                const addPromise = provider.request({
+                    method: 'wallet_addEthereumChain',
+                    params: [buildAddChainParams(required)]
+                });
+
+                bhForegroundWallet(walletType);
+                await addPromise;
+
+                switchPromise = provider.request({
+                    method: 'wallet_switchEthereumChain',
+                    params: [{ chainId: required }]
+                });
+
+                bhForegroundWallet(walletType);
+                await switchPromise;
+            }
+
+            // Wallets differ in whether they emit chainChanged before or after
+            // resolving the RPC promise. Verify the live chain id.
+            for (let i = 0; i < 40; i++) {
+                if (observedChain === required) return required;
+
+                current = bhNormalizeChainId(
+                    await provider.request({ method: 'eth_chainId' })
+                );
+
+                if (current === required) return current;
+                await new Promise(resolve => setTimeout(resolve, 250));
+            }
+
+            throw new Error(
+                `Network switch to ${config.chainName} was not completed. Approve the network change in your linked wallet and return to BitHash.`
+            );
+        } finally {
+            provider.off?.('chainChanged', onChainChanged);
+        }
+    };
+
+    /*
+     * TRANSACTION APPROVAL:
+     * Serialize all wallet RPC calls. This prevents a switch request and transaction
+     * request from competing for the same mobile wallet approval queue.
+     */
+    window.bhQueueLinkedWalletRpc = function (task) {
+        const run = window.__bithashDepositRpc.then(task, task);
+        window.__bithashDepositRpc = run.catch(() => undefined);
+        return run;
+    };
+
+    /*
+     * Wrap the existing deposit transaction calls so the exact linked wallet is
+     * foregrounded after the RPC is queued. No connection request is created here.
+     */
+    window.bhRequestLinkedWalletTransaction = async function (
+        provider,
+        walletType,
+        txData
+    ) {
+        if (!provider || typeof provider.request !== 'function') {
+            throw new Error('The linked wallet provider is unavailable.');
+        }
+
+        const task = () => provider.request({
+            method: 'eth_sendTransaction',
+            params: [txData]
+        });
+
+        const requestPromise = window.bhQueueLinkedWalletRpc
+            ? window.bhQueueLinkedWalletRpc(task)
+            : task();
+
+        // Queue first, then foreground the exact wallet selected for this session.
+        bhForegroundWallet(walletType);
+
+        return await requestPromise;
+    };
+
+    /*
+     * Replace the two direct eth_sendTransaction paths in the existing deposit
+     * implementation with the helper above. This is deliberately done here so
+     * there is one authoritative mobile transaction path.
+     */
+    if (typeof executeDeposit === 'function') {
+        const originalExecuteDeposit = executeDeposit;
+        executeDeposit = async function () {
+            return originalExecuteDeposit.apply(this, arguments);
+        };
+    }
+
+    // Prevent duplicate mobile wallet operations.
     window.addEventListener('unhandledrejection', event => {
         console.warn('[WALLET] Unhandled wallet rejection:', event.reason);
     });
 
-    console.info('[BitHash] Mobile WalletConnect reliability patch active');
+    console.info('[BitHash] Mobile WalletConnect reliability patch v2 active');
 })();
 </script>
 </body>
