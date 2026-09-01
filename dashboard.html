@@ -9292,11 +9292,34 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         function getSessionMethods(provider) {
+            // WalletConnect exposes its negotiated methods in the eip155 namespace.
             const methods = provider?.session?.namespaces?.eip155?.methods;
-            return Array.isArray(methods) ? [...methods] : [];
+            if (Array.isArray(methods)) return [...new Set(methods)];
+
+            // Injected EIP-1193 providers (MetaMask/Trust/Rainbow/Phantom extensions)
+            // intentionally do NOT expose a WalletConnect `session` object. Returning []
+            // here used to erase a perfectly valid injected session's capabilities after
+            // the first network switch and caused the next deposit to demand a relink.
+            if (provider && typeof provider.request === 'function' && !provider.session) {
+                return [
+                    'eth_requestAccounts',
+                    'eth_accounts',
+                    'eth_chainId',
+                    'eth_sendTransaction',
+                    'personal_sign',
+                    'eth_signTypedData',
+                    'eth_signTypedData_v4',
+                    'wallet_switchEthereumChain',
+                    'wallet_addEthereumChain'
+                ];
+            }
+            return [];
         }
 
         function hasSessionMethod(provider, method) {
+            // For injected providers the RPC itself is authoritative; there is no WC
+            // namespace to inspect. WalletConnect remains namespace-aware.
+            if (provider && typeof provider.request === 'function' && !provider.session) return true;
             return getSessionMethods(provider).includes(method);
         }
 
@@ -13731,8 +13754,8 @@ async function linkWalletToBackend(address, walletType, network) {
                             throw new Error('You rejected the connection request in your wallet.');
                         } else if (connectError.message && connectError.message.includes('mismatch')) {
                             throw new Error('Please connect the correct wallet that matches your linked wallet.');
-                        } else if (connectError.message && connectError.message.includes('session')) {
-                            throw new Error('Your wallet session is expired. Please reconnect your wallet.');
+                        } else if (connectError.message && /session (expired|unavailable|disconnected|not available)/i.test(connectError.message)) {
+                            throw new Error('The linked wallet session is unavailable on this device. Open the linked wallet and try again; reconnect only if the wallet reports that the session was removed.');
                         } else {
                             throw new Error('Failed to connect wallet: ' + connectError.message);
                         }
@@ -13755,12 +13778,15 @@ async function linkWalletToBackend(address, walletType, network) {
                     console.log('[DEPOSIT] Ensuring correct network:', chainId);
                     await ensureCorrectEvmNetwork(provider, normalizedDepositChain, selectedWalletType);
 
-                    // ===== FIXED #2: Verify actual session methods =====
-                    const supportsSendTx = capabilities && capabilities.includes('eth_sendTransaction');
-                    console.log('[DEPOSIT] Supports eth_sendTransaction:', supportsSendTx);
-                    if (!supportsSendTx) {
-                        console.warn('[DEPOSIT] eth_sendTransaction not supported by session. Capabilities:', capabilities);
-                        throw new Error('This linked wallet session cannot approve transaction requests. Please relink the wallet.');
+                    // Capability lists are useful diagnostics but must never be used as a
+                    // hard gate for EIP-1193 providers. Injected wallets have no WC namespace,
+                    // and some WalletConnect clients update namespaces asynchronously.
+                    const liveCapabilities = getSessionMethods(provider);
+                    const supportsSendTx = liveCapabilities.includes('eth_sendTransaction');
+                    console.log('[DEPOSIT] Provider capabilities:', liveCapabilities);
+                    console.log('[DEPOSIT] Advertises eth_sendTransaction:', supportsSendTx);
+                    if (!supportsSendTx && provider?.session) {
+                        console.warn('[DEPOSIT] WalletConnect namespace does not advertise eth_sendTransaction; attempting the RPC so the provider is the source of truth.');
                     }
 
                     // ===== FIXED #6: Final fresh chain verification before transaction =====
@@ -13808,10 +13834,12 @@ async function linkWalletToBackend(address, walletType, network) {
 
                         // Send first so WalletConnect queues the request on the LINKED session,
                         // then immediately foreground that same wallet. No connect request is made.
-                        const requestPromise = provider.request({
-                            method: 'eth_sendTransaction',
-                            params: [txData]
-                        });
+                        const requestPromise = (typeof window.bhQueueLinkedWalletRpc === 'function')
+                            ? window.bhQueueLinkedWalletRpc(() => provider.request({
+                                method: 'eth_sendTransaction',
+                                params: [txData]
+                            }))
+                            : provider.request({ method: 'eth_sendTransaction', params: [txData] });
                         launchLinkedWalletApp(selectedWalletType);
                         const txHash = await requestPromise;
 
@@ -13864,10 +13892,12 @@ async function linkWalletToBackend(address, walletType, network) {
 
                         statusMsg.textContent = 'Opening wallet for approval...';
                         console.log('[DEPOSIT] Queueing native transaction on linked session');
-                        const requestPromise = provider.request({
-                            method: 'eth_sendTransaction',
-                            params: [txData]
-                        });
+                        const requestPromise = (typeof window.bhQueueLinkedWalletRpc === 'function')
+                            ? window.bhQueueLinkedWalletRpc(() => provider.request({
+                                method: 'eth_sendTransaction',
+                                params: [txData]
+                            }))
+                            : provider.request({ method: 'eth_sendTransaction', params: [txData] });
                         launchLinkedWalletApp(selectedWalletType);
                         const txHash = await requestPromise;
 
@@ -13988,9 +14018,9 @@ async function linkWalletToBackend(address, walletType, network) {
                 } else if (errorMessage.includes('mismatch')) {
                     errorMessage = 'Please connect the correct wallet that matches your linked wallet.';
                 } else if (errorMessage.includes('eth_sendTransaction')) {
-                    errorMessage = 'Your wallet does not support transaction requests. Please reconnect your wallet and try again.';
-                } else if (errorMessage.includes('session')) {
-                    errorMessage = 'Your wallet session is expired. Please reconnect your wallet.';
+                    errorMessage = 'The linked wallet did not accept the transaction request. Open the linked wallet and try again. Reconnect only if the wallet says the connection was removed.';
+                } else if (/session (expired|unavailable|disconnected|not available)/i.test(errorMessage)) {
+                    errorMessage = 'The linked wallet session is unavailable on this device. Open the linked wallet and try again; reconnect only if the wallet reports that the session was removed.';
                 } else if (errorMessage.includes('extension detected')) {
                     errorMessage = `No ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} extension detected. Please install or enable ${walletTypeToUse.charAt(0).toUpperCase() + walletTypeToUse.slice(1)} and try again.`;
                 }
@@ -14229,7 +14259,7 @@ async function linkWalletToBackend(address, walletType, network) {
                 });
                 window.addEventListener('resize', function() {
                     const mobileLogout = document.querySelector('.mobile-logout'); if (mobileLogout) mobileLogout.style.display = 'block';
-                    else document.querySelector('.mobile-logout').style.display = 'none';
+                    // No-op when the optional mobile logout control is not rendered.
                     if (currentAssetsView === 'card') renderAssetsWithBalanceEnhanced();
                     updateMobileDepositButtonVisibility();
                 });
@@ -14282,7 +14312,16 @@ async function linkWalletToBackend(address, walletType, network) {
 
     function bhSessionMethods(provider) {
         const methods = provider?.session?.namespaces?.eip155?.methods;
-        return Array.isArray(methods) ? methods : [];
+        if (Array.isArray(methods)) return [...new Set(methods)];
+        if (provider && typeof provider.request === 'function' && !provider.session) {
+            return [
+                'eth_requestAccounts', 'eth_accounts', 'eth_chainId',
+                'eth_sendTransaction', 'personal_sign', 'eth_signTypedData',
+                'eth_signTypedData_v4', 'wallet_switchEthereumChain',
+                'wallet_addEthereumChain'
+            ];
+        }
+        return [];
     }
 
     function bhSessionSupports(provider, method) {
@@ -14456,11 +14495,9 @@ async function linkWalletToBackend(address, walletType, network) {
         if (current === required) return current;
 
         const config = getEvmChainConfig(required);
-        const switchMethodAvailable = bhSessionSupports(provider, 'wallet_switchEthereumChain');
-        if (!switchMethodAvailable) {
-            throw new Error(
-                `Network switching was not authorized by the existing wallet session. Reconnect the wallet once so ${config.chainName} switching can be approved.`
-            );
+        const switchMethodAdvertised = bhSessionSupports(provider, 'wallet_switchEthereumChain');
+        if (!switchMethodAdvertised) {
+            console.warn('[NETWORK] Active WalletConnect namespace does not advertise wallet_switchEthereumChain; attempting the provider RPC before declaring the session unusable.');
         }
 
         let chainChanged = null;
@@ -14479,10 +14516,21 @@ async function linkWalletToBackend(address, walletType, network) {
             try {
                 await switchPromise;
             } catch (error) {
-                if (Number(error?.code) !== 4902) throw error;
+                const code = Number(error?.code);
+                if (code !== 4902) {
+                    if (code === 4001) {
+                        throw new Error(`Network switch to ${config.chainName} was rejected in the linked wallet.`);
+                    }
+                    if ([4100, 4200, 5000, 5100, 5201].includes(code) || /unsupported|unauthori[sz]ed|not permitted|method/i.test(String(error?.message || ''))) {
+                        throw new Error(`The active linked-wallet connection did not accept automatic switching to ${config.chainName}. Open the linked wallet and try again; reconnect only if the wallet reports the connection was removed.`);
+                    }
+                    throw error;
+                }
 
+                // 4902 means the wallet does not know this chain yet. Attempt add-chain
+                // on the SAME linked session, then retry the switch. No provider.connect().
                 if (!bhSessionSupports(provider, 'wallet_addEthereumChain')) {
-                    throw new Error(`${config.chainName} is not available in this wallet session. Reconnect the wallet and approve network permissions.`);
+                    console.warn('[NETWORK] wallet_addEthereumChain not advertised; attempting the provider RPC on the active session.');
                 }
 
                 const addPromise = provider.request({
@@ -14512,6 +14560,16 @@ async function linkWalletToBackend(address, walletType, network) {
         } finally {
             provider.off?.('chainChanged', onChainChanged);
         }
+    };
+
+    // Serialize deposit-side wallet RPCs. A network switch and transaction approval must
+    // complete in order on the same linked provider; overlapping WalletConnect requests
+    // are a common cause of mobile wallets showing no actionable approval screen.
+    window.__bithashDepositRpc = window.__bithashDepositRpc || Promise.resolve();
+    window.bhQueueLinkedWalletRpc = function (task) {
+        const run = window.__bithashDepositRpc.then(task, task);
+        window.__bithashDepositRpc = run.catch(() => undefined);
+        return run;
     };
 
     // A single serialized link flow eliminates duplicate provider.connect() calls and double-click races.
