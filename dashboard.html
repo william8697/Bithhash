@@ -8884,11 +8884,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         let currentAsset = null;
         let assetSelectionVersion = 0;
 
-        // ===== WEB3/WALLETCONNECT STATE - SINGLETON IMPLEMENTATION =====
-        // CRITICAL FIX: Single WalletConnect provider instance
-        let walletConnectProvider = null;
-        let walletConnectInitPromise = null;
+        // ===== WEB3/WALLETCONNECT STATE =====
+        let universalWalletProvider = null;
         let walletConnectInitialized = false;
+        let walletConnectInitPromise = null;
         const MAX_WALLETCONNECT_RETRIES = 15;
         let wcSessionState = {
             status: 'idle',
@@ -9166,23 +9165,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // SINGLETON WALLETCONNECT PROVIDER - CRITICAL FIX
+        // WALLETCONNECT INIT - IDEMPOTENT with multi-chain support
         // =============================================
-        async function getWalletConnectProvider() {
-            // Return cached provider if it exists and has a session
-            if (walletConnectProvider) {
-                return walletConnectProvider;
-            }
-
-            // Return pending initialization promise if one exists
-            if (walletConnectInitPromise) {
-                return walletConnectInitPromise;
-            }
-
-            // Only initialize for mobile devices
-            if (!isMobileDevice()) {
-                return null;
-            }
+        // =============================================
+        // WALLETCONNECT INIT - SINGLETON / MOBILE-SAFE
+        // =============================================
+        async function initializeWalletConnectOnce() {
+            if (universalWalletProvider) return universalWalletProvider;
+            if (walletConnectInitPromise) return walletConnectInitPromise;
+            if (!isMobileDevice()) return null;
 
             walletConnectInitPromise = (async () => {
                 let attempts = 0;
@@ -9195,8 +9186,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             continue;
                         }
 
-                        // SINGLE provider instance - never call init() more than once
-                        walletConnectProvider = await ProviderClass.init({
+                        universalWalletProvider = await ProviderClass.init({
                             projectId: '3f054c15e97b05dda5a4dcfd652bc753',
                             showQrModal: false,
                             chains: [1],
@@ -9223,6 +9213,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 description: 'Digital Asset Platform',
                                 url: 'https://www.bithashcapital.live/',
                                 icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png'],
+                                // The wallet uses this to return to the dapp after approval.
                                 redirect: {
                                     native: `${window.location.origin}/`,
                                     universal: `${window.location.origin}/`
@@ -9231,11 +9222,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                             qrModalOptions: { desktopLinks: [], mobileLinks: [] }
                         });
 
-                        // Register events only once
-                        if (!walletConnectProvider.__bitHashEventsRegistered) {
-                            walletConnectProvider.__bitHashEventsRegistered = true;
+                        if (!universalWalletProvider.__bitHashEventsRegistered) {
+                            universalWalletProvider.__bitHashEventsRegistered = true;
 
-                            walletConnectProvider.on('accountsChanged', (accounts) => {
+                            universalWalletProvider.on('accountsChanged', (accounts) => {
                                 console.log('[WC] accountsChanged:', accounts);
                                 const account = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
                                 if (!account) return;
@@ -9246,28 +9236,28 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                                 }
                             });
 
-                            walletConnectProvider.on('chainChanged', (chainId) => {
+                            universalWalletProvider.on('chainChanged', (chainId) => {
                                 const normalized = normalizeChainId(chainId);
                                 console.log('[WC] chainChanged:', normalized);
                                 for (const key of Object.keys(walletSessions)) {
-                                    if (walletSessions[key]?.provider === walletConnectProvider) {
+                                    if (walletSessions[key]?.provider === universalWalletProvider) {
                                         walletSessions[key].chainId = normalized;
                                     }
                                 }
                             });
 
-                            walletConnectProvider.on('disconnect', () => {
+                            universalWalletProvider.on('disconnect', () => {
                                 console.warn('[WC] disconnected');
                                 walletSessions = {};
                                 wcSessionState.status = 'disconnected';
                             });
 
-                            walletConnectProvider.on('session_event', e => console.log('[WC] session_event:', e));
-                            walletConnectProvider.on('session_update', e => console.log('[WC] session_update:', e));
+                            universalWalletProvider.on('session_event', e => console.log('[WC] session_event:', e));
+                            universalWalletProvider.on('session_update', e => console.log('[WC] session_update:', e));
                         }
 
                         walletConnectInitialized = true;
-                        return walletConnectProvider;
+                        return universalWalletProvider;
                     } catch (err) {
                         console.error('[WC] provider init failed:', err);
                         attempts++;
@@ -9280,13 +9270,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             try {
                 return await walletConnectInitPromise;
             } finally {
+                // Do not leave a resolved promise as the provider itself is the singleton.
                 walletConnectInitPromise = null;
             }
-        }
-
-        // Legacy compatibility
-        async function initializeWalletConnectOnce() {
-            return getWalletConnectProvider();
         }
 
         function readPendingWalletLink() {
@@ -9305,14 +9291,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             sessionStorage.removeItem('pendingWalletLink');
         }
 
-        // =============================================
-        // SESSION CAPABILITY HELPERS
-        // =============================================
         function getSessionMethods(provider) {
-            if (provider?.session?.namespaces?.eip155?.methods) {
-                return [...new Set(provider.session.namespaces.eip155.methods)];
-            }
-            // For injected providers, return standard methods
+            // WalletConnect exposes its negotiated methods in the eip155 namespace.
+            const methods = provider?.session?.namespaces?.eip155?.methods;
+            if (Array.isArray(methods)) return [...new Set(methods)];
+
+            // Injected EIP-1193 providers (MetaMask/Trust/Rainbow/Phantom extensions)
+            // intentionally do NOT expose a WalletConnect `session` object. Returning []
+            // here used to erase a perfectly valid injected session's capabilities after
+            // the first network switch and caused the next deposit to demand a relink.
             if (provider && typeof provider.request === 'function' && !provider.session) {
                 return [
                     'eth_requestAccounts',
@@ -9330,6 +9317,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         function hasSessionMethod(provider, method) {
+            // For injected providers the RPC itself is authoritative; there is no WC
+            // namespace to inspect. WalletConnect remains namespace-aware.
             if (provider && typeof provider.request === 'function' && !provider.session) return true;
             return getSessionMethods(provider).includes(method);
         }
@@ -9345,196 +9334,40 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             const link = links[walletType];
             if (!link) return;
             try {
+                // Deliberately do not await anything here. The RPC request is already queued
+                // on the WC session, and this navigation only foregrounds the linked wallet.
                 window.location.href = link;
             } catch (e) {
                 console.warn('[WALLET] Unable to foreground wallet:', e);
             }
         }
 
-        // =============================================
-        // RESTORE EXISTING MOBILE SESSION
-        // =============================================
-        async function restoreExistingMobileSession(provider, walletAddress, walletType) {
-            const linked = normalizeWalletAddress(walletAddress);
-            if (!linked || !provider?.session) return null;
+        async function resumePendingWalletLink() {
+            const pending = readPendingWalletLink();
+            if (!pending?.walletType) return false;
+            if (Date.now() - Number(pending.createdAt || 0) > 5 * 60 * 1000) {
+                clearPendingWalletLink();
+                return false;
+            }
+
+            const provider = await initializeWalletConnectOnce();
+            if (!provider?.session) return false;
 
             const namespace = provider.session.namespaces?.eip155;
-            if (!namespace) return null;
+            const caip = namespace?.accounts?.find(Boolean);
+            const address = caip ? normalizeWalletAddress(String(caip).split(':')[2]) : null;
+            if (!address) return false;
 
-            const matchingCaipAccount = (namespace.accounts || []).find(account => {
-                const parts = String(account).split(':');
-                return parts.length >= 3 && normalizeWalletAddress(parts[2])?.toLowerCase() === linked.toLowerCase();
-            });
-            if (!matchingCaipAccount) return null;
+            const restored = await restoreExistingMobileSession(provider, address, pending.walletType);
+            if (!restored) return false;
 
-            const address = normalizeWalletAddress(matchingCaipAccount.split(':')[2]);
             const chainId = normalizeChainId(await provider.request({ method: 'eth_chainId' }));
-            return {
-                walletType,
-                account: address,
-                address,
-                provider,
-                session: provider.session,
-                transport: 'walletconnect',
-                connected: true,
-                chainId,
-                capabilities: getSessionMethods(provider)
-            };
+            await linkWalletToBackend(address, pending.walletType, chainId);
+            await finalizeLinkedWalletSession(restored, address, pending.walletType);
+            clearPendingWalletLink();
+            return true;
         }
 
-        // =============================================
-        // RESOLVE MOBILE WALLET SESSION - FIXED
-        // =============================================
-        async function resolveMobileWalletSession(walletAddress, walletType, requiredChainId) {
-            const provider = await getWalletConnectProvider();
-            if (!provider) throw new Error(`Please install ${walletType} mobile app.`);
-
-            // First try to restore existing session for this wallet
-            const restored = await restoreExistingMobileSession(provider, walletAddress, walletType);
-            if (restored) return restored;
-
-            // IMPORTANT: A deposit must NEVER create a new connection automatically.
-            // If the wallet is linked, absence of its session is a recoverable session state,
-            // not permission to issue a new connect request.
-            throw new Error('Linked wallet session is unavailable. Please open the linked wallet and return to the app.');
-        }
-
-        // =============================================
-        // RESOLVE LINKED WALLET SESSION - FIXED
-        // =============================================
-        async function resolveLinkedWalletSession(selectedWalletAddress, selectedWalletType, requiredChainId) {
-            console.log('[SESSION] Resolving linked wallet session');
-            
-            const normalizedLinked = normalizeWalletAddress(selectedWalletAddress);
-            if (!normalizedLinked) {
-                throw new Error('Invalid wallet address provided');
-            }
-
-            // Check if we have a valid session for this specific wallet
-            const sessionKey = `${selectedWalletType}:${normalizedLinked}`;
-            let existingSession = walletSessions[sessionKey];
-
-            if (existingSession && existingSession.connected) {
-                console.log('[SESSION] Found existing session for linked wallet:', sessionKey);
-                try {
-                    if (existingSession.provider) {
-                        let accounts = existingSession.provider.accounts;
-                        if (!accounts || accounts.length === 0) {
-                            try {
-                                accounts = await existingSession.provider.request({ method: 'eth_accounts' });
-                            } catch (e) {}
-                        }
-                        if (accounts && accounts.length > 0) {
-                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
-                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                                console.log('[SESSION] Existing session is valid and matches linked wallet.');
-                                let chainId = existingSession.chainId;
-                                try {
-                                    chainId = await existingSession.provider.request({ method: 'eth_chainId' });
-                                    existingSession.chainId = chainId;
-                                } catch (e) {
-                                    console.warn('[SESSION] Could not get chainId from existing session');
-                                }
-                                if (existingSession.provider.session) {
-                                    const namespace = existingSession.provider.session.namespaces?.eip155;
-                                    if (namespace && namespace.methods) {
-                                        existingSession.capabilities = namespace.methods;
-                                    } else {
-                                        existingSession.capabilities = getSessionMethods(existingSession.provider);
-                                    }
-                                } else {
-                                    existingSession.capabilities = getSessionMethods(existingSession.provider);
-                                }
-                                return existingSession;
-                            } else {
-                                console.warn('[SESSION] Existing session account does not match linked wallet.');
-                            }
-                        }
-                    }
-                    console.warn('[SESSION] Existing session is stale. Removing.');
-                    delete walletSessions[sessionKey];
-                } catch (e) {
-                    console.warn('[SESSION] Existing session is stale. Removing:', e.message);
-                    delete walletSessions[sessionKey];
-                }
-            }
-
-            // For desktop: use EIP-1193 providers
-            if (!isMobileDevice()) {
-                const targetRdns = {
-                    'metamask': 'io.metamask',
-                    'trust': 'com.trustwallet.app',
-                    'phantom': 'app.phantom',
-                    'rainbow': 'me.rainbow'
-                }[selectedWalletType] || 'io.metamask';
-
-                const injectedTarget = getProviderByRDNS(targetRdns);
-                if (injectedTarget) {
-                    const provider = injectedTarget.provider;
-                    try {
-                        // eth_accounts without requesting new connection
-                        const accounts = await provider.request({ method: 'eth_accounts' });
-                        if (accounts && accounts.length > 0) {
-                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
-                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                                console.log('[SESSION] Found matching injected provider session.');
-                                let chainId = '0x1';
-                                try {
-                                    chainId = await provider.request({ method: 'eth_chainId' });
-                                } catch (e) {}
-                                const sessionObj = {
-                                    walletType: selectedWalletType,
-                                    account: normalizedAccount,
-                                    address: normalizedAccount,
-                                    transport: 'eip1193',
-                                    provider: provider,
-                                    chainId: chainId,
-                                    session: null,
-                                    connected: true,
-                                    connectedAt: Date.now(),
-                                    capabilities: ['eth_sendTransaction', 'eth_requestAccounts']
-                                };
-                                walletSessions[sessionKey] = sessionObj;
-                                return sessionObj;
-                            }
-                        }
-                        // If no matching account, try eth_requestAccounts
-                        const requested = await provider.request({ method: 'eth_requestAccounts' });
-                        if (requested && requested.length > 0) {
-                            const normalizedAccount = normalizeWalletAddress(requested[0]);
-                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
-                                let chainId = '0x1';
-                                try {
-                                    chainId = await provider.request({ method: 'eth_chainId' });
-                                } catch (e) {}
-                                const sessionObj = {
-                                    walletType: selectedWalletType,
-                                    account: normalizedAccount,
-                                    address: normalizedAccount,
-                                    transport: 'eip1193',
-                                    provider: provider,
-                                    chainId: chainId,
-                                    session: null,
-                                    connected: true,
-                                    connectedAt: Date.now(),
-                                    capabilities: ['eth_sendTransaction', 'eth_requestAccounts']
-                                };
-                                walletSessions[sessionKey] = sessionObj;
-                                return sessionObj;
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('[SESSION] Failed to read injected provider accounts:', e.message);
-                    }
-                }
-                throw new Error(`No ${selectedWalletType} extension detected. Please install or enable ${selectedWalletType} and try again.`);
-            }
-
-            // Mobile: use mobile session resolution
-            return await resolveMobileWalletSession(selectedWalletAddress, selectedWalletType, requiredChainId);
-        }
-
-        // =============================================
         // AUTHENTICATION FUNCTIONS
         // =============================================
         function getAuthToken() {
@@ -10368,8 +10201,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
+        // ===== FIXED: connectSelectedWallet - uses restoreExistingMobileSession and account consistency =====
         // =============================================
-        // CONNECT SELECTED WALLET - FIXED
+        // CONNECT SELECTED WALLET - SINGLE MOBILE LINK FLOW
         // =============================================
         async function connectSelectedWallet() {
             const walletType = selectedWallet?.id;
@@ -10410,37 +10244,35 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     return;
                 }
 
-                // Mobile: Use the singleton WalletConnect provider
-                const provider = await getWalletConnectProvider();
+                const provider = await initializeWalletConnectOnce();
                 if (!provider) throw new Error(`Unable to initialize ${walletType}.`);
 
-                // Check if there's an existing session we can use
+                // Restore first. NEVER create a new connection for a wallet that is already linked.
+                const linked = connectedWallets.find(w => w.type === walletType);
+                if (linked) {
+                    const restored = await restoreExistingMobileSession(provider, linked.address || linked.walletAddress, walletType);
+                    if (restored) {
+                        await finalizeLinkedWalletSession(restored, linked.address || linked.walletAddress, walletType);
+                        return;
+                    }
+                }
+
+                // Only one code path may call provider.connect().
                 if (provider.session) {
-                    const namespace = provider.session.namespaces?.eip155;
-                    if (namespace) {
-                        const existingAccounts = namespace.accounts || [];
-                        if (existingAccounts.length > 0) {
-                            // Check if any account matches our expected format
-                            for (const caipAccount of existingAccounts) {
-                                const parts = String(caipAccount).split(':');
-                                if (parts.length >= 3) {
-                                    const address = normalizeWalletAddress(parts[2]);
-                                    if (address) {
-                                        await linkWalletToBackend(address, walletType, normalizeChainId(await provider.request({ method: 'eth_chainId' })));
-                                        const restored = await restoreExistingMobileSession(provider, address, walletType);
-                                        if (restored) {
-                                            await finalizeLinkedWalletSession(restored, address, walletType);
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
+                    const accounts = await safeEthAccounts(provider);
+                    const existing = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
+                    if (existing) {
+                        await linkWalletToBackend(existing, walletType, normalizeChainId(await provider.request({ method: 'eth_chainId' })));
+                        const restored = await restoreExistingMobileSession(provider, existing, walletType);
+                        if (restored) {
+                            await finalizeLinkedWalletSession(restored, existing, walletType);
+                            return;
                         }
                     }
                 }
 
-                // No valid session - create a new one
                 writePendingWalletLink({ walletType, createdAt: Date.now() });
+                setButtonLoading(connectBtn, 'approving', 'Opening wallet...');
 
                 let resolveUri;
                 let rejectUri;
@@ -10451,7 +10283,6 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 const onUri = uri => resolveUri(uri);
                 provider.once('display_uri', onUri);
 
-                setButtonLoading(connectBtn, 'approving', 'Opening wallet...');
                 const connectPromise = provider.connect();
                 const uri = await Promise.race([
                     uriPromise,
@@ -10465,9 +10296,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 // Launch immediately. Do NOT call connect() again after MetaMask unlocks.
                 window.location.href = openDeepLink(walletType, uri);
 
+                // This promise remains the single pending connection operation.
                 await connectPromise;
 
-                const accounts = await provider.request({ method: 'eth_accounts' });
+                const accounts = await safeEthAccounts(provider);
                 const address = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
                 if (!address) throw new Error('No account returned from wallet approval.');
 
@@ -10494,6 +10326,15 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }
         }
 
+        async function safeEthAccounts(provider) {
+            try {
+                const accounts = await provider.request({ method: 'eth_accounts' });
+                return Array.isArray(accounts) ? accounts : [];
+            } catch (_) {
+                return [];
+            }
+        }
+
         async function finalizeLinkedWalletSession(session, address, walletType) {
             const normalized = normalizeWalletAddress(address);
             const chainId = normalizeChainId(session.chainId || await session.provider.request({ method: 'eth_chainId' }));
@@ -10508,7 +10349,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             showNotification('success', 'Wallet Connected', `Successfully linked ${walletType} wallet.`);
         }
 
-        async function linkWalletToBackend(address, walletType, network) {
+
+async function linkWalletToBackend(address, walletType, network) {
             console.log('[BACKEND] Linking wallet:', address, walletType, network);
             try {
                 const token = getAuthToken();
@@ -10697,8 +10539,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             menu.classList.toggle('open', walletDropdownOpen);
         }
 
-        // =============================================
-        // UNLINK WALLET
+        // =============================================        // UNLINK WALLET
         // =============================================
         function openUnlinkConfirm(address) {
             pendingUnlinkAddress = address;
@@ -10739,6 +10580,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     throw new Error(error.message || 'Failed to remove wallet.');
                 }
 
+                // A removed wallet must leave no stale local session, pending request,
+                // selected-wallet pointer, or deposit operation behind.
                 connectedWallets = (connectedWallets || []).filter(w => {
                     const wa = normalizeWalletAddress(w.address || w.walletAddress);
                     return !(wa && normalized && wa.toLowerCase() === normalized.toLowerCase());
@@ -10766,8 +10609,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         try { await window.__bithashWalletConnectProvider.disconnect({ code: 6000, message: 'Wallet unlinked by user.' }); } catch (_) {}
                     }
                     window.__bithashWalletConnectProvider = null;
-                    walletConnectProvider = null;
-                    walletConnectInitialized = false;
+                    if (typeof universalWalletProvider !== 'undefined') universalWalletProvider = null;
+                    if (typeof walletConnectInitialized !== 'undefined') walletConnectInitialized = false;
                     if (typeof wcSessionState !== 'undefined') wcSessionState.status = 'idle';
                 }
 
@@ -13392,6 +13235,75 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         });
 
         // =============================================
+        // RESTORE EXISTING MOBILE SESSION - FIXED
+        // =============================================
+        // =============================================
+        // RESTORE EXISTING MOBILE SESSION
+        // =============================================
+        async function restoreExistingMobileSession(provider, walletAddress, walletType) {
+            const linked = normalizeWalletAddress(walletAddress);
+            if (!linked || !provider?.session) return null;
+
+            const namespace = provider.session.namespaces?.eip155;
+            if (!namespace) return null;
+
+            const matchingCaipAccount = (namespace.accounts || []).find(account => {
+                const parts = String(account).split(':');
+                return parts.length >= 3 && normalizeWalletAddress(parts[2])?.toLowerCase() === linked.toLowerCase();
+            });
+            if (!matchingCaipAccount) return null;
+
+            const address = normalizeWalletAddress(matchingCaipAccount.split(':')[2]);
+            const chainId = normalizeChainId(await provider.request({ method: 'eth_chainId' }));
+            return {
+                walletType,
+                account: address,
+                address,
+                provider,
+                session: provider.session,
+                transport: 'walletconnect',
+                connected: true,
+                chainId,
+                capabilities: getSessionMethods(provider)
+            };
+        }
+
+
+// =============================================
+        // RESOLVE MOBILE WALLET SESSION - FIXED
+        // =============================================
+        // =============================================
+        // RESOLVE MOBILE WALLET SESSION
+        // =============================================
+        async function resolveMobileWalletSession(walletAddress, walletType, requiredChainId) {
+            const provider = await initializeWalletConnectOnce();
+            if (!provider) throw new Error(`Please install ${walletType} mobile app.`);
+
+            const restored = await restoreExistingMobileSession(provider, walletAddress, walletType);
+            if (restored) return restored;
+
+            // IMPORTANT: A deposit must NEVER create a new connection.
+            // If the wallet is linked, absence of its session is a recoverable session state,
+            // not permission to issue a new connect request.
+            throw new Error('Linked wallet session is unavailable. Please open the linked wallet and return to the app.');
+        }
+
+        // =============================================
+        // LEGACY CONNECT HELPER - KEPT FOR LINKING ONLY
+        // =============================================
+        async function createNewMobileWalletConnectSession(provider, walletAddress, walletType, requiredChainId) {
+            if (!provider || provider.session) {
+                const restored = await restoreExistingMobileSession(provider, walletAddress, walletType);
+                if (restored) return restored;
+            }
+            throw new Error('A new wallet connection may only be started by connectSelectedWallet().');
+        }
+
+
+// =============================================
+        // GET EVM CHAIN CONFIG
+        // =============================================
+        // =============================================
         // GET EVM CHAIN CONFIG
         // =============================================
         function getEvmChainConfig(chainId) {
@@ -13413,10 +13325,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             };
         }
 
-        // =============================================
-        // ENSURE CORRECT EVM NETWORK - FIXED
-        // =============================================
-        async function ensureCorrectEvmNetwork(provider, requiredChainId, walletType) {
+        async function ensureCorrectEvmNetwork(provider, requiredChainId, walletType = web3WalletType) {
             const required = normalizeChainId(requiredChainId);
             let current = normalizeChainId(await provider.request({ method: 'eth_chainId' }));
             if (current === required) return current;
@@ -13425,6 +13334,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 throw new Error(`${walletType || 'This wallet'} did not negotiate wallet_switchEthereumChain for this linked session.`);
             }
 
+            // Register before sending so a fast wallet cannot race the listener.
             let changedResolve;
             const changedPromise = new Promise(resolve => { changedResolve = resolve; });
             const onChainChanged = id => changedResolve(normalizeChainId(id));
@@ -13435,7 +13345,10 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     method: 'wallet_switchEthereumChain',
                     params: [{ chainId: required }]
                 });
+
+                // WC queues the request on the existing session; foreground the already-linked wallet.
                 launchLinkedWalletApp(walletType);
+
                 let switchResult;
                 try {
                     switchResult = await switchPromise;
@@ -13452,6 +13365,8 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                     await addPromise;
                 }
 
+                // EIP-3326 returns null on success. Verify with eth_chainId instead of
+                // requiring chainChanged to occur after the RPC promise.
                 for (let i = 0; i < 20; i++) {
                     current = normalizeChainId(await provider.request({ method: 'eth_chainId' }));
                     if (current === required) return current;
@@ -13464,14 +13379,16 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         if (current === required) return current;
                     }
                 }
+
                 throw new Error('Wallet did not switch to the required network.');
             } finally {
                 provider.off('chainChanged', onChainChanged);
             }
         }
 
-        // =============================================
-        // BUILD NATIVE TRANSACTION
+
+// =============================================
+        // BUILD NATIVE TRANSACTION - FIXED
         // =============================================
         async function buildNativeTransaction({ account, depositAddress, cryptoAmountString, decimals }) {
             if (!ethers.isAddress(account)) {
@@ -13492,7 +13409,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // BUILD ERC20 TRANSACTION
+        // BUILD ERC20 TRANSACTION - FIXED with ethers ABI encoding
         // =============================================
         async function buildERC20Transaction({ account, contractAddress, depositAddress, amount, decimals }) {
             if (!ethers.isAddress(account)) {
@@ -13527,180 +13444,177 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
-        // REQUEST LINKED WALLET TRANSACTION - FIXED
+        // RESOLVE LINKED WALLET SESSION - FIXED
         // =============================================
-        async function requestLinkedWalletTransaction(provider, walletType, txData) {
-            if (!provider?.request) {
-                throw new Error('Linked wallet provider unavailable.');
+        async function resolveLinkedWalletSession(selectedWalletAddress, selectedWalletType, requiredChainId) {
+            console.log('[SESSION] ========== RESOLVE LINKED WALLET SESSION ==========');
+            console.log('[SESSION] Selected address:', selectedWalletAddress);
+            console.log('[SESSION] Selected type:', selectedWalletType);
+            console.log('[SESSION] Required chain:', requiredChainId);
+
+            const normalizedLinked = normalizeWalletAddress(selectedWalletAddress);
+            if (!normalizedLinked) {
+                throw new Error('Invalid wallet address provided');
             }
 
-            const expected = normalizeWalletAddress(txData.from);
+            // Check if we have a valid session for this specific wallet
+            const sessionKey = `${selectedWalletType}:${normalizedLinked}`;
+            let existingSession = walletSessions[sessionKey];
 
-            const accounts = await provider.request({
-                method: 'eth_accounts'
-            });
-
-            const live = accounts?.[0] ? normalizeWalletAddress(accounts[0]) : null;
-
-            if (!live || live.toLowerCase() !== expected.toLowerCase()) {
-                launchLinkedWalletApp(walletType);
-                throw new Error(`Open ${walletType.charAt(0).toUpperCase() + walletType.slice(1)} and select the linked account.`);
-            }
-
-            const currentChain = normalizeChainId(
-                await provider.request({
-                    method: 'eth_chainId'
-                })
-            );
-
-            if (!hasSessionMethod(provider, 'eth_sendTransaction')) {
-                throw new Error(`${walletType.charAt(0).toUpperCase() + walletType.slice(1)} is not authorized to approve transactions on this session.`);
-            }
-
-            // Save pending transaction state
-            try {
-                localStorage.setItem('bithash.deposit.pendingTx.v3', JSON.stringify({
-                    walletType,
-                    account: expected,
-                    chainId: currentChain,
-                    transaction: txData,
-                    createdAt: Date.now()
-                }));
-            } catch (_) {}
-
-            // Queue the request then foreground the wallet
-            const hash = await provider.request({
-                method: 'eth_sendTransaction',
-                params: [txData]
-            });
-
-            try {
-                localStorage.removeItem('bithash.deposit.pendingTx.v3');
-                localStorage.removeItem('bithash.deposit.pending.v3');
-            } catch (_) {}
-
-            return hash;
-        }
-
-        // =============================================
-        // DEPOSIT MODAL FUNCTIONS
-        // =============================================
-        function openDepositModal() {
-            document.getElementById('deposit-modal').classList.add('active');
-            if (currentAsset) {
-                updateAssetPickerUIModal(currentAsset);
-                updateDepositModalNetwork();
-                updateDepositModalRateInfo(currentAsset.symbol);
-                updateDepositModalFiatEstimate();
-                renderDepositModal(currentAsset);
-            }
-            const mainAmount = document.getElementById('deposit-amount-input');
-            const modalAmount = document.getElementById('deposit-modal-amount-input');
-            if (mainAmount && modalAmount) { modalAmount.value = mainAmount.value; updateDepositModalFiatEstimate(); }
-            document.getElementById('deposit-modal-status-msg').textContent = '';
-            hideDepositModalAddress();
-        }
-
-        function closeDepositModal() {
-            document.getElementById('deposit-modal').classList.remove('active');
-        }
-
-        async function executeDepositModal() {
-            const modalAmount = document.getElementById('deposit-modal-amount-input');
-            const mainAmount = document.getElementById('deposit-amount-input');
-            if (modalAmount && mainAmount) mainAmount.value = modalAmount.value;
-            await updateFiatEstimate();
-            await executeDeposit();
-            const modalStatus = document.getElementById('deposit-modal-status-msg');
-            const mainStatus = document.getElementById('deposit-status-msg');
-            if (modalStatus && mainStatus) {
-                modalStatus.textContent = mainStatus.textContent;
-                modalStatus.style.color = mainStatus.style.color;
-            }
-        }
-
-        function showDepositModalAddress(address, asset) {
-            const container = document.getElementById('deposit-modal-address-container');
-            const addressText = document.getElementById('deposit-modal-address-text');
-            if (container && addressText) {
-                addressText.textContent = address;
-                container.style.display = 'block';
-            }
-            generateDepositModalQR(address);
-            depositModalQRVisible = false;
-            const qrSection = document.getElementById('deposit-modal-qr-section');
-            if (qrSection) qrSection.style.display = 'none';
-        }
-
-        function hideDepositModalAddress() {
-            const container = document.getElementById('deposit-modal-address-container');
-            if (container) container.style.display = 'none';
-        }
-
-        function copyDepositModalAddress() {
-            const addressText = document.getElementById('deposit-modal-address-text');
-            if (!addressText) return;
-            const address = addressText.textContent;
-            if (!address || address === '0x0000000000000000000000000000000000000000') {
-                showNotification('warning', 'No Address', 'Please generate a deposit address first.');
-                return;
-            }
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(address).then(() => {
-                    const btn = document.getElementById('copy-modal-address-btn');
-                    if (btn) {
-                        const orig = btn.innerHTML;
-                        btn.innerHTML = '<i class="fas fa-check"></i> Copied!';
-                        btn.classList.add('copied');
-                        showNotification('success', 'Address Copied', 'Deposit address copied to clipboard.');
-                        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
-                    }
-                }).catch(() => { fallbackCopyAddress(address); });
-            } else { fallbackCopyAddress(address); }
-        }
-
-        function generateDepositModalQR(address) {
-            const container = document.getElementById('deposit-modal-qr-container');
-            if (!container) { console.warn('Modal QR container not found'); return; }
-            container.innerHTML = '';
-            ensureQRCodeLoaded(() => {
+            if (existingSession && existingSession.connected) {
+                console.log('[SESSION] Found existing session for linked wallet:', sessionKey);
                 try {
-                    container.innerHTML = '';
-                    qrModalInstance = new QRCode(container, {
-                        text: address,
-                        width: 180,
-                        height: 180,
-                        colorDark: '#FFFFFF',
-                        colorLight: '#0B0E11',
-                        correctLevel: QRCode.CorrectLevel.H
-                    });
+                    if (existingSession.provider) {
+                        let accounts = existingSession.provider.accounts;
+                        if (!accounts || accounts.length === 0) {
+                            try {
+                                accounts = await existingSession.provider.request({ method: 'eth_accounts' });
+                            } catch (e) {}
+                        }
+                        if (accounts && accounts.length > 0) {
+                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
+                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
+                                console.log('[SESSION] ✅ Existing session is valid and matches linked wallet.');
+                                let chainId = existingSession.chainId;
+                                try {
+                                    chainId = await existingSession.provider.request({ method: 'eth_chainId' });
+                                    existingSession.chainId = chainId;
+                                    console.log('[SESSION] Updated chainId from session:', chainId);
+                                } catch (e) {
+                                    console.warn('[SESSION] Could not get chainId from existing session');
+                                }
+                                // ===== FIXED #2: Remove fake capabilities - derive from actual session =====
+                                if (existingSession.provider.session) {
+                                    const namespace = existingSession.provider.session.namespaces?.eip155;
+                                    if (namespace && namespace.methods) {
+                                        existingSession.capabilities = namespace.methods;
+                                        console.log('[SESSION] Updated capabilities from session:', existingSession.capabilities);
+                                    } else {
+                                        console.log('[SESSION] No namespace.methods found, using fallback');
+                                        existingSession.capabilities = getSessionMethods(existingSession.provider);
+                                    }
+                                } else {
+                                    console.log('[SESSION] No session object available');
+                                    existingSession.capabilities = getSessionMethods(existingSession.provider);
+                                }
+                                // ===== FIXED #5: Network enforcement moved to executeDeposit =====
+                                return existingSession;
+                            } else {
+                                console.warn('[SESSION] Existing session account does not match linked wallet.');
+                            }
+                        }
+                    }
+                    console.warn('[SESSION] Existing session is stale. Removing.');
+                    delete walletSessions[sessionKey];
                 } catch (e) {
-                    console.error('Modal QR Code generation failed:', e);
-                    container.innerHTML = '<p style="color: var(--gray); font-size: 0.8rem;">QR code generation failed</p>';
+                    console.warn('[SESSION] Existing session is stale. Removing:', e.message);
+                    delete walletSessions[sessionKey];
                 }
-            });
-        }
+            }
 
-        function toggleDepositModalQR() {
-            const qrSection = document.getElementById('deposit-modal-qr-section');
-            if (!qrSection) return;
-            depositModalQRVisible = !depositModalQRVisible;
-            qrSection.style.display = depositModalQRVisible ? 'block' : 'none';
-            const btn = document.getElementById('qr-modal-toggle-btn');
-            if (btn) { btn.innerHTML = depositModalQRVisible ? '<i class="fas fa-times"></i> Close' : '<i class="fas fa-qrcode"></i> QR'; }
-        }
+            // Check if there's any active WC session we can use
+            if (universalWalletProvider) {
+                console.log('[SESSION] Checking universalWalletProvider for existing session');
+                try {
+                    let accounts = universalWalletProvider.accounts;
+                    if (!accounts || accounts.length === 0) {
+                        try {
+                            accounts = await universalWalletProvider.request({ method: 'eth_accounts' });
+                        } catch (e) {}
+                    }
+                    if (accounts && accounts.length > 0) {
+                        const normalizedAccount = normalizeWalletAddress(accounts[0]);
+                        if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
+                            console.log('[SESSION] ✅ Found matching account in existing WalletConnect provider.');
+                            let chainId = '0x1';
+                            try {
+                                chainId = await universalWalletProvider.request({ method: 'eth_chainId' });
+                            } catch (e) {}
+                            const sessionObj = {
+                                walletType: selectedWalletType,
+                                account: normalizedAccount,
+                                address: normalizedAccount,
+                                transport: 'walletconnect',
+                                provider: universalWalletProvider,
+                                chainId: chainId,
+                                session: universalWalletProvider.session || null,
+                                connected: true,
+                                connectedAt: Date.now(),
+                                capabilities: getSessionMethods(universalWalletProvider)
+                            };
+                            // ===== FIXED #2: Get actual capabilities =====
+                            if (universalWalletProvider.session) {
+                                const namespace = universalWalletProvider.session.namespaces?.eip155;
+                                if (namespace && namespace.methods) {
+                                    sessionObj.capabilities = namespace.methods;
+                                    console.log('[SESSION] Actual capabilities from session:', namespace.methods);
+                                } else {
+                                    console.log('[SESSION] No namespace.methods found, using fallback');
+                                }
+                            } else {
+                                console.log('[SESSION] No session object available');
+                            }
+                            walletSessions[sessionKey] = sessionObj;
+                            console.log('[SESSION] ✅ Session restored from existing provider.');
+                            // ===== FIXED #5: Network enforcement moved to executeDeposit =====
+                            return sessionObj;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[SESSION] Failed to check existing WC provider:', e.message);
+                }
+            }
 
-        function downloadDepositModalQR() {
-            const container = document.getElementById('deposit-modal-qr-container');
-            if (!container) return;
-            const canvas = container.querySelector('canvas');
-            if (canvas) {
-                const link = document.createElement('a');
-                link.download = `bithash-deposit-modal-${currentDepositAsset || 'crypto'}-qr.png`;
-                link.href = canvas.toDataURL('image/png');
-                link.click();
-                showNotification('success', 'QR Downloaded', 'QR code image downloaded.');
-            } else { showNotification('warning', 'No QR', 'Please generate a QR code first.'); }
+            // No valid session - check if we're on desktop and should use EIP-1193
+            if (!isMobileDevice()) {
+                console.log('[SESSION] Desktop: Checking EIP-6963 providers');
+                const targetRdns = {
+                    'metamask': 'io.metamask',
+                    'trust': 'com.trustwallet.app',
+                    'phantom': 'app.phantom',
+                    'rainbow': 'me.rainbow'
+                }[selectedWalletType] || 'io.metamask';
+
+                const injectedTarget = getProviderByRDNS(targetRdns);
+                if (injectedTarget) {
+                    const provider = injectedTarget.provider;
+                    try {
+                        const accounts = await provider.request({ method: 'eth_accounts' });
+                        if (accounts && accounts.length > 0) {
+                            const normalizedAccount = normalizeWalletAddress(accounts[0]);
+                            if (normalizedAccount && normalizedAccount.toLowerCase() === normalizedLinked.toLowerCase()) {
+                                console.log('[SESSION] ✅ Found matching injected provider session.');
+                                let chainId = '0x1';
+                                try {
+                                    chainId = await provider.request({ method: 'eth_chainId' });
+                                } catch (e) {}
+                                const sessionObj = {
+                                    walletType: selectedWalletType,
+                                    account: normalizedAccount,
+                                    address: normalizedAccount,
+                                    transport: 'eip1193',
+                                    provider: provider,
+                                    chainId: chainId,
+                                    session: null,
+                                    connected: true,
+                                    connectedAt: Date.now(),
+                                    capabilities: ['eth_sendTransaction', 'eth_requestAccounts']
+                                };
+                                walletSessions[sessionKey] = sessionObj;
+                                console.log('[SESSION] ✅ Session created from injected provider.');
+                                return sessionObj;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[SESSION] Failed to read injected provider accounts:', e.message);
+                    }
+                }
+                throw new Error(`No ${selectedWalletType} extension detected. Please install or enable ${selectedWalletType} and try again.`);
+            }
+
+            // Mobile: Use the new mobile session resolution
+            console.log('[SESSION] Mobile: Using mobile session resolution');
+            return await resolveMobileWalletSession(selectedWalletAddress, selectedWalletType, requiredChainId);
         }
 
         // =============================================
@@ -13877,6 +13791,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         }
                     }
 
+                    // ===== FIXED #1: Use account property =====
                     const { provider, account, chainId: connectedChainId, capabilities } = sessionResult;
                     console.log('[DEPOSIT] Connected account:', account);
                     console.log('[DEPOSIT] Connected chain:', connectedChainId);
@@ -13889,9 +13804,13 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         throw new Error('The connected wallet does not match your selected linked wallet. Please switch to the correct wallet.');
                     }
 
+                    // ===== FIXED #5: Network enforcement moved here - before transaction =====
                     console.log('[DEPOSIT] Ensuring correct network:', chainId);
                     await ensureCorrectEvmNetwork(provider, normalizedDepositChain, selectedWalletType);
 
+                    // Capability lists are useful diagnostics but must never be used as a
+                    // hard gate for EIP-1193 providers. Injected wallets have no WC namespace,
+                    // and some WalletConnect clients update namespaces asynchronously.
                     const liveCapabilities = getSessionMethods(provider);
                     const supportsSendTx = liveCapabilities.includes('eth_sendTransaction');
                     console.log('[DEPOSIT] Provider capabilities:', liveCapabilities);
@@ -13900,6 +13819,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         console.warn('[DEPOSIT] WalletConnect namespace does not advertise eth_sendTransaction; attempting the RPC so the provider is the source of truth.');
                     }
 
+                    // ===== FIXED #6: Final fresh chain verification before transaction =====
                     console.log('[DEPOSIT] Performing final chain verification...');
                     const finalChainId = await provider.request({ method: 'eth_chainId' });
                     const normalizedFinalChain = normalizeChainId(finalChainId);
@@ -13942,7 +13862,9 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         statusMsg.textContent = 'Opening wallet for approval...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
 
-                        const txHash = await requestLinkedWalletTransaction(
+                        // Send first so WalletConnect queues the request on the LINKED session,
+                        // then immediately foreground that same wallet. No connect request is made.
+                        const txHash = await window.bhRequestLinkedWalletTransaction(
                             provider,
                             selectedWalletType,
                             txData
@@ -13979,6 +13901,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         await loadTransactions();
                         hideDepositAddress();
                     } else if (!isERC20) {
+                        // Native asset transfer
                         console.log('[DEPOSIT] Processing native transfer');
                         statusMsg.textContent = 'Preparing transfer...';
                         setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
@@ -13987,6 +13910,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         const amountRaw = ethers.parseUnits(cryptoAmountString, decimals);
                         const txData = { to: depositAddress, value: '0x' + amountRaw.toString(16), from: account };
 
+                        // ===== FIXED #6: Explicitly trigger mobile wallet for signing =====
                         if (isMobileDevice()) {
                             statusMsg.textContent = 'Opening wallet for approval...';
                             setButtonLoading(depositBtn, 'approving', 'Confirm in wallet...');
@@ -13995,7 +13919,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                         statusMsg.textContent = 'Opening wallet for approval...';
                         console.log('[DEPOSIT] Queueing native transaction on linked session');
-                        const txHash = await requestLinkedWalletTransaction(
+                        const txHash = await window.bhRequestLinkedWalletTransaction(
                             provider,
                             selectedWalletType,
                             txData
@@ -14040,6 +13964,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                         throw new Error(`Unknown asset type for ${asset}`);
                     }
                 } else {
+                    // Non-EVM asset - manual transfer
                     console.log('[DEPOSIT] Non-EVM asset - manual transfer required');
                     statusMsg.textContent = `Please send ${cryptoAmountString} ${asset.toUpperCase()} to the address above.`;
                     showDepositAddress(depositAddress, asset);
@@ -14085,6 +14010,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 let errorMessage = error.message || 'Deposit failed. Please try again.';
                 let errorCode = error.code || 0;
 
+                // ===== FIXED #9: Stop interpreting every 5000/5201 error as "user rejected" =====
                 if (errorCode === 4001) {
                     errorMessage = 'Transaction was rejected in your wallet.';
                 } else if (errorCode === 5201) {
@@ -14134,6 +14060,127 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         // =============================================
+        // DEPOSIT MODAL FUNCTIONS
+        // =============================================
+        function openDepositModal() {
+            document.getElementById('deposit-modal').classList.add('active');
+            if (currentAsset) {
+                updateAssetPickerUIModal(currentAsset);
+                updateDepositModalNetwork();
+                updateDepositModalRateInfo(currentAsset.symbol);
+                updateDepositModalFiatEstimate();
+                renderDepositModal(currentAsset);
+            }
+            const mainAmount = document.getElementById('deposit-amount-input');
+            const modalAmount = document.getElementById('deposit-modal-amount-input');
+            if (mainAmount && modalAmount) { modalAmount.value = mainAmount.value; updateDepositModalFiatEstimate(); }
+            document.getElementById('deposit-modal-status-msg').textContent = '';
+            hideDepositModalAddress();
+        }
+
+        function closeDepositModal() {
+            document.getElementById('deposit-modal').classList.remove('active');
+        }
+
+        async function executeDepositModal() {
+            const modalAmount = document.getElementById('deposit-modal-amount-input');
+            const mainAmount = document.getElementById('deposit-amount-input');
+            if (modalAmount && mainAmount) mainAmount.value = modalAmount.value;
+            await updateFiatEstimate();
+            await executeDeposit();
+            const modalStatus = document.getElementById('deposit-modal-status-msg');
+            const mainStatus = document.getElementById('deposit-status-msg');
+            if (modalStatus && mainStatus) {
+                modalStatus.textContent = mainStatus.textContent;
+                modalStatus.style.color = mainStatus.style.color;
+            }
+        }
+
+        function showDepositModalAddress(address, asset) {
+            const container = document.getElementById('deposit-modal-address-container');
+            const addressText = document.getElementById('deposit-modal-address-text');
+            if (container && addressText) {
+                addressText.textContent = address;
+                container.style.display = 'block';
+            }
+            generateDepositModalQR(address);
+            depositModalQRVisible = false;
+            const qrSection = document.getElementById('deposit-modal-qr-section');
+            if (qrSection) qrSection.style.display = 'none';
+        }
+
+        function hideDepositModalAddress() {
+            const container = document.getElementById('deposit-modal-address-container');
+            if (container) container.style.display = 'none';
+        }
+
+        function copyDepositModalAddress() {
+            const addressText = document.getElementById('deposit-modal-address-text');
+            if (!addressText) return;
+            const address = addressText.textContent;
+            if (!address || address === '0x0000000000000000000000000000000000000000') {
+                showNotification('warning', 'No Address', 'Please generate a deposit address first.');
+                return;
+            }
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(address).then(() => {
+                    const btn = document.getElementById('copy-modal-address-btn');
+                    if (btn) {
+                        const orig = btn.innerHTML;
+                        btn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                        btn.classList.add('copied');
+                        showNotification('success', 'Address Copied', 'Deposit address copied to clipboard.');
+                        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
+                    }
+                }).catch(() => { fallbackCopyAddress(address); });
+            } else { fallbackCopyAddress(address); }
+        }
+
+        function generateDepositModalQR(address) {
+            const container = document.getElementById('deposit-modal-qr-container');
+            if (!container) { console.warn('Modal QR container not found'); return; }
+            container.innerHTML = '';
+            ensureQRCodeLoaded(() => {
+                try {
+                    container.innerHTML = '';
+                    qrModalInstance = new QRCode(container, {
+                        text: address,
+                        width: 180,
+                        height: 180,
+                        colorDark: '#FFFFFF',
+                        colorLight: '#0B0E11',
+                        correctLevel: QRCode.CorrectLevel.H
+                    });
+                } catch (e) {
+                    console.error('Modal QR Code generation failed:', e);
+                    container.innerHTML = '<p style="color: var(--gray); font-size: 0.8rem;">QR code generation failed</p>';
+                }
+            });
+        }
+
+        function toggleDepositModalQR() {
+            const qrSection = document.getElementById('deposit-modal-qr-section');
+            if (!qrSection) return;
+            depositModalQRVisible = !depositModalQRVisible;
+            qrSection.style.display = depositModalQRVisible ? 'block' : 'none';
+            const btn = document.getElementById('qr-modal-toggle-btn');
+            if (btn) { btn.innerHTML = depositModalQRVisible ? '<i class="fas fa-times"></i> Close' : '<i class="fas fa-qrcode"></i> QR'; }
+        }
+
+        function downloadDepositModalQR() {
+            const container = document.getElementById('deposit-modal-qr-container');
+            if (!container) return;
+            const canvas = container.querySelector('canvas');
+            if (canvas) {
+                const link = document.createElement('a');
+                link.download = `bithash-deposit-modal-${currentDepositAsset || 'crypto'}-qr.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+                showNotification('success', 'QR Downloaded', 'QR code image downloaded.');
+            } else { showNotification('warning', 'No QR', 'Please generate a QR code first.'); }
+        }
+
+        // =============================================
         // ASSET DETAILS MODAL - Placeholder
         // =============================================
         function openAssetDetails(asset) {
@@ -14163,26 +14210,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         // Resume pending mobile wallet operations whenever the browser returns from the wallet app.
         document.addEventListener('visibilitychange', async () => {
             if (document.visibilityState !== 'visible') return;
-            try {
-                const pending = readPendingWalletLink();
-                if (pending?.walletType) {
-                    const provider = await getWalletConnectProvider();
-                    if (provider?.session) {
-                        const address = provider.session?.namespaces?.eip155?.accounts?.[0]?.split(':')[2];
-                        if (address) {
-                            const normalizedAddress = normalizeWalletAddress(address);
-                            if (normalizedAddress) {
-                                const session = await restoreExistingMobileSession(provider, normalizedAddress, pending.walletType);
-                                if (session) {
-                                    await finalizeLinkedWalletSession(session, normalizedAddress, pending.walletType);
-                                    clearPendingWalletLink();
-                                    showNotification('success', 'Wallet Connected', `${pending.walletType.charAt(0).toUpperCase() + pending.walletType.slice(1)} wallet connected successfully.`);
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e) { console.warn('[WALLET] Resume after visibility change:', e); }
+            try { await resumePendingWalletLink(); } catch (e) { console.warn('[WALLET] Resume after visibility change:', e); }
         });
 
         // =============================================
@@ -14255,6 +14283,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 });
                 window.addEventListener('resize', function() {
                     const mobileLogout = document.querySelector('.mobile-logout'); if (mobileLogout) mobileLogout.style.display = 'block';
+                    // No-op when the optional mobile logout control is not rendered.
                     if (currentAssetsView === 'card') renderAssetsWithBalanceEnhanced();
                     updateMobileDepositButtonVisibility();
                 });
@@ -14262,6 +14291,7 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
 
                 document.getElementById('convert-amount-step3').addEventListener('input', updateConversionEstimate);
 
+                // Guard against null element style access
                 setTimeout(() => {
                     try {
                         const elementsToCheck = [
@@ -14278,6 +14308,644 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
             }, 1000);
         });
     </script>
+
+<script>
+(function () {
+    'use strict';
+
+    /* BitHash Mobile WalletConnect reliability patch v4
+       - one WC EthereumProvider singleton
+       - no silent wallet substitution
+       - linking always requires approval in the selected wallet
+       - chain changes require approval in the linked wallet
+       - transactions require approval in the linked wallet
+       - capability refresh happens only when the current session truly lacks a required method
+       - pending hand-off survives MetaMask/Trust unlock and browser lifecycle changes
+       - duplicate backend link responses are idempotent
+       - desktop/EIP-6963 linking remains independent of mobile WC
+    */
+
+    const PENDING_LINK = 'bithash.wc.pendingLink.v3';
+    const PENDING_TX = 'bithash.deposit.pendingTx.v3';
+    const PENDING_DEPOSIT = 'bithash.deposit.pending.v3';
+    const LINK_MAX_AGE = 30 * 60 * 1000;
+
+    const normAddress = value => {
+        try { return normalizeWalletAddress(value); }
+        catch (_) { return value ? String(value).toLowerCase() : null; }
+    };
+    const normChain = value => {
+        try { return normalizeChainId(value); }
+        catch (_) {
+            if (typeof value === 'number') return '0x' + value.toString(16);
+            if (typeof value === 'string' && /^0x/i.test(value)) return value.toLowerCase();
+            const n = Number(value);
+            return Number.isFinite(n) ? '0x' + n.toString(16) : null;
+        }
+    };
+    const walletLabel = type => ({
+        metamask: 'MetaMask', trust: 'Trust Wallet', rainbow: 'Rainbow', phantom: 'Phantom'
+    }[type] || type || 'wallet');
+
+    function storageGet(key) {
+        try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; }
+    }
+    function storageSet(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+    }
+    function storageRemove(key) {
+        try { localStorage.removeItem(key); } catch (_) {}
+    }
+
+    function providerMethods(provider) {
+        return Array.isArray(provider?.session?.namespaces?.eip155?.methods)
+            ? [...new Set(provider.session.namespaces.eip155.methods)] : [];
+    }
+    function supports(provider, method) {
+        if (!provider?.session) return typeof provider?.request === 'function';
+        return providerMethods(provider).includes(method);
+    }
+    async function accounts(provider) {
+        try {
+            const a = await provider.request({ method: 'eth_accounts' });
+            if (Array.isArray(a) && a.length) return a.map(normAddress).filter(Boolean);
+        } catch (_) {}
+        const caip = provider?.session?.namespaces?.eip155?.accounts || [];
+        return caip.map(x => normAddress(String(x).split(':').slice(2).join(':'))).filter(Boolean);
+    }
+    function sessionAccount(provider) {
+        const caip = provider?.session?.namespaces?.eip155?.accounts || [];
+        for (const x of caip) {
+            const a = normAddress(String(x).split(':').slice(2).join(':'));
+            if (a) return a;
+        }
+        return normAddress(provider?.accounts?.[0]);
+    }
+    function peerMatches(provider, walletType) {
+        const peer = String(provider?.session?.peer?.metadata?.name || provider?.session?.peer?.metadata?.url || '').toLowerCase();
+        if (!peer) return null;
+        const names = {
+            metamask: ['metamask'],
+            trust: ['trust wallet', 'trust'],
+            rainbow: ['rainbow'],
+            phantom: ['phantom']
+        }[walletType] || [String(walletType).toLowerCase()];
+        return names.some(n => peer.includes(n));
+    }
+    function foreground(walletType, uri) {
+        if (typeof isMobileDevice !== 'function' || !isMobileDevice()) return false;
+        let url = '';
+        try {
+            if (typeof openDeepLink === 'function') url = openDeepLink(walletType, uri);
+        } catch (_) {}
+        if (!url) {
+            const encoded = encodeURIComponent(uri || '');
+            url = ({
+                metamask: uri ? `https://metamask.app.link/wc?uri=${encoded}` : 'metamask://',
+                trust: uri ? `https://link.trustwallet.com/wc?uri=${encoded}` : 'trust://',
+                rainbow: uri ? `https://rnbwapp.com/wc?uri=${encoded}` : 'rainbow://',
+                phantom: uri ? `https://phantom.app/ul/browse/connect?uri=${encoded}` : 'phantom://'
+            }[walletType] || '');
+        }
+        if (!url) return false;
+        try { window.location.assign(url); return true; }
+        catch (_) { try { window.location.href = url; return true; } catch (__) { return false; } }
+    }
+
+    function persistPendingLink(data) {
+        storageSet(PENDING_LINK, { ...data, updatedAt: Date.now() });
+    }
+    function readPendingLink() {
+        const x = storageGet(PENDING_LINK);
+        if (!x) return null;
+        if (Date.now() - Number(x.createdAt || x.updatedAt || 0) > LINK_MAX_AGE) {
+            storageRemove(PENDING_LINK); return null;
+        }
+        return x;
+    }
+    window.__bithashV3ReadPendingLink = readPendingLink;
+    window.__bithashV3WritePendingLink = persistPendingLink;
+    window.__bithashV3ClearPendingLink = () => storageRemove(PENDING_LINK);
+
+    /* Share the v2 singleton if it already exists. This is the key protection against
+       the "WalletConnect Core is already initialized" race seen in the logs. */
+    async function getProvider() {
+        if (typeof isMobileDevice === 'function' && !isMobileDevice()) return null;
+        if (window.__bithashWalletConnectProvider) return window.__bithashWalletConnectProvider;
+        if (typeof universalWalletProvider !== 'undefined' && universalWalletProvider) { window.__bithashWalletConnectProvider = universalWalletProvider; return universalWalletProvider; }
+        if (window.__bithashWalletConnectInitPromise) {
+            const p = await window.__bithashWalletConnectInitPromise;
+            if (p) window.__bithashWalletConnectProvider = p;
+            return p;
+        }
+        if (typeof bhInitializeWalletConnectOnce === 'function') {
+            const p = await bhInitializeWalletConnectOnce();
+            if (p) window.__bithashWalletConnectProvider = p;
+            return p;
+        }
+        const ProviderClass = window.WalletConnectProvider?.EthereumProvider;
+        if (!ProviderClass?.init) throw new Error('WalletConnect is not ready yet. Please try again.');
+        window.__bithashWalletConnectInitPromise = ProviderClass.init({
+            projectId: '3f054c15e97b05dda5a4dcfd652bc753',
+            showQrModal: false,
+            chains: [1, 56, 137, 43114],
+            optionalChains: [1, 56, 137, 43114],
+            methods: ['eth_requestAccounts','eth_accounts','eth_chainId','eth_sendTransaction','eth_signTransaction','eth_signTypedData','eth_signTypedData_v4','personal_sign','wallet_switchEthereumChain','wallet_addEthereumChain'],
+            optionalMethods: ['eth_requestAccounts','eth_accounts','eth_chainId','eth_sendTransaction','eth_signTransaction','eth_signTypedData','eth_signTypedData_v4','personal_sign','wallet_switchEthereumChain','wallet_addEthereumChain'],
+            events: ['accountsChanged','chainChanged','disconnect','session_event','session_update'],
+            optionalEvents: ['accountsChanged','chainChanged','disconnect','session_event','session_update'],
+            rpcMap: { 1:'https://mainnet.infura.io/v3/3f054c15e97b05dda5a4dcfd652bc753', 56:'https://bsc-dataseed.binance.org/', 137:'https://polygon-rpc.com/', 43114:'https://api.avax.network/ext/bc/C/rpc' },
+            metadata: {
+                name: 'BitHash Capital', description: 'Digital Asset Platform', url: window.location.origin,
+                icons: ['https://media.bithashcapital.live/ChatGPT%20Image%20Mar%2029%2C%202026%2C%2004_52_02%20PM.png'],
+                redirect: { native: window.location.origin + window.location.pathname, universal: window.location.origin + window.location.pathname }
+            },
+            qrModalOptions: { desktopLinks: [], mobileLinks: [] }
+        });
+        try {
+            const p = await window.__bithashWalletConnectInitPromise;
+            window.__bithashWalletConnectProvider = p;
+            universalWalletProvider = p;
+            walletConnectInitialized = true;
+            return p;
+        } finally { window.__bithashWalletConnectInitPromise = null; }
+    }
+    window.__bithashReliableGetWalletConnectProvider = getProvider;
+    window.v3GetProvider = getProvider;
+    if (typeof initializeWalletConnectOnce !== 'undefined') initializeWalletConnectOnce = getProvider;
+
+    async function findLinked(provider, walletType, address) {
+        if (!provider?.session) return null;
+        const requested = normAddress(address);
+        const liveAccounts = await accounts(provider);
+        const live = liveAccounts[0] || sessionAccount(provider);
+        if (!requested || !live || live.toLowerCase() !== requested.toLowerCase()) return null;
+        const peer = peerMatches(provider, walletType);
+        if (peer === false) throw new Error(`The active WalletConnect session belongs to another wallet. Select ${walletLabel(walletType)} and approve a new connection there.`);
+        const chainId = normChain(await provider.request({ method:'eth_chainId' }));
+        return { walletType, account:live, address:live, provider, session:provider.session, transport:'walletconnect', connected:true, chainId, capabilities:providerMethods(provider) };
+    }
+
+    async function backendLinkIdempotent(address, walletType, network) {
+        const normalized = normAddress(address);
+        const existing = (connectedWallets || []).find(w => {
+            const a = normAddress(w.address || w.walletAddress);
+            return a && a.toLowerCase() === normalized.toLowerCase() && w.type === walletType;
+        });
+        if (existing) return existing;
+        try {
+            return await linkWalletToBackend(address, walletType, network);
+        } catch (e) {
+            const msg = String(e?.message || '').toLowerCase();
+            if (msg.includes('wallet already linked')) {
+                try { await loadLinkedWallets(); } catch (_) {}
+                const verified = (connectedWallets || []).find(w => {
+                    const a = normAddress(w.address || w.walletAddress);
+                    return a && a.toLowerCase() === normalized.toLowerCase() && w.type === walletType;
+                });
+                if (verified) return verified;
+            }
+            throw e;
+        }
+    }
+
+    async function disconnectProvider(provider) {
+        try {
+            if (provider?.session && typeof provider.disconnect === 'function') {
+                await provider.disconnect({ code:6000, message:'Refreshing the explicitly linked wallet session.' });
+            }
+        } catch (_) { try { await provider?.disconnect?.(); } catch (__) {} }
+        window.__bithashWalletConnectProvider = null;
+        universalWalletProvider = null;
+        walletSessions = {};
+        web3Provider = null;
+    }
+
+    async function approvedSessionOnProvider(provider, walletType, expectedAddress, purpose) {
+        const createdAt = Date.now();
+        persistPendingLink({ walletType, expectedAddress: expectedAddress || null, purpose, phase:'starting', createdAt });
+        const uriPromise = new Promise((resolve, reject) => {
+            let done = false;
+            const timer = setTimeout(() => { if (!done) reject(new Error('Wallet connection link was not generated.')); }, 15000);
+            const onUri = uri => { if (done) return; done = true; clearTimeout(timer); provider.off?.('display_uri', onUri); resolve(uri); };
+            provider.once?.('display_uri', onUri);
+        });
+        const connectPromise = provider.connect();
+        const uri = await uriPromise;
+        persistPendingLink({ walletType, expectedAddress: expectedAddress || null, purpose, phase:'wallet_approval', uri, createdAt });
+        wcSessionState.uri = uri;
+        wcSessionState.status = 'wallet_launched';
+        foreground(walletType, uri);
+        await connectPromise;
+        const live = (await accounts(provider))[0];
+        if (!live) throw new Error(`Approve the ${walletLabel(walletType)} connection and return to BitHash.`);
+        if (expectedAddress && live.toLowerCase() !== normAddress(expectedAddress).toLowerCase()) {
+            throw new Error(`The approved ${walletLabel(walletType)} account does not match the linked wallet address. No wallet was relinked.`);
+        }
+        if (peerMatches(provider, walletType) === false) throw new Error(`The connection was approved by a different wallet, not ${walletLabel(walletType)}.`);
+        const chainId = normChain(await provider.request({ method:'eth_chainId' }));
+        if (!supports(provider,'eth_sendTransaction')) throw new Error(`${walletLabel(walletType)} did not approve transaction capability. Please approve the wallet connection again.`);
+        return { provider, address:live, chainId, walletType, session:provider.session };
+    }
+
+    async function freshApprovedSession(walletType, expectedAddress, purpose) {
+        let provider = await getProvider();
+        if (!provider) throw new Error('Unable to initialize the mobile wallet connection.');
+        if (provider.session) {
+            await disconnectProvider(provider);
+            provider = await getProvider();
+        }
+        return approvedSessionOnProvider(provider, walletType, expectedAddress, purpose);
+    }
+
+    async function refreshLinkedSession(walletType, expectedAddress, reason) {
+        /* Keep the same EthereumProvider object where possible. executeDeposit holds
+           a reference to this object; replacing it mid-flight would leave the caller
+           signing through a disconnected provider. */
+        let provider = await getProvider();
+        if (!provider) throw new Error(`Unable to initialize ${walletLabel(walletType)}.`);
+        if (provider.session) await disconnectProvider(provider);
+        provider = await getProvider();
+        const result = await approvedSessionOnProvider(provider, walletType, expectedAddress, reason || 'capability_refresh');
+        const session = {
+            walletType, account:result.address, address:result.address, provider:result.provider,
+            session:result.provider.session, transport:'walletconnect', connected:true,
+            chainId:result.chainId, capabilities:providerMethods(result.provider)
+        };
+        await backendLinkIdempotent(result.address, walletType, result.chainId);
+        await finalizeLinkedWalletSession(session, result.address, walletType);
+        storageRemove(PENDING_LINK);
+        try { clearPendingWalletLink?.(); } catch (_) {}
+        return session;
+    }
+
+    async function refreshProviderInPlace(provider, walletType, expectedAddress, reason) {
+        if (provider?.session) {
+            try { await provider.disconnect({ code:6000, message:'Refreshing the explicitly linked wallet session.' }); }
+            catch (_) { try { await provider.disconnect?.(); } catch (__) {} }
+        }
+        /* Do not replace the object reference held by executeDeposit. WalletConnect
+           EthereumProvider supports a new connect after disconnect. */
+        const result = await approvedSessionOnProvider(provider, walletType, expectedAddress, reason);
+        const session = { walletType, account:result.address, address:result.address, provider, session:provider.session, transport:'walletconnect', connected:true, chainId:result.chainId, capabilities:providerMethods(provider) };
+        await backendLinkIdempotent(result.address, walletType, result.chainId);
+        await finalizeLinkedWalletSession(session, result.address, walletType);
+        storageRemove(PENDING_LINK);
+        return session;
+    }
+
+    window.resolveLinkedWalletSession = async function (selectedAddress, walletType, requiredChainId) {
+        const requested = normAddress(selectedAddress);
+        if (!requested) throw new Error('Invalid linked wallet address.');
+        let provider = await getProvider();
+        if (!provider?.session) throw new Error(`Your linked ${walletLabel(walletType)} session is unavailable. Please open ${walletLabel(walletType)} and reconnect it from the wallet section.`);
+
+        let session = await findLinked(provider, walletType, requested);
+        if (!session) {
+            /* If the wallet is merely locked, foreground it first and allow the
+               wallet's existing session to answer. Never substitute another account. */
+            foreground(walletType);
+            try {
+                if (supports(provider,'eth_requestAccounts')) {
+                    const returned = await provider.request({ method:'eth_requestAccounts' });
+                    const a = returned?.[0] ? normAddress(returned[0]) : null;
+                    if (a && a.toLowerCase() === requested.toLowerCase()) session = await findLinked(provider, walletType, requested);
+                }
+            } catch (_) {}
+        }
+        if (!session) throw new Error(`The active ${walletLabel(walletType)} account does not match your linked wallet. No other wallet will be used automatically.`);
+
+        /* Do NOT require wallet_switchEthereumChain merely to send a transaction.
+           The supplied Trust Wallet error was caused by this exact mistake. */
+        if (!supports(provider,'eth_sendTransaction')) {
+            session = await refreshProviderInPlace(provider, walletType, requested, 'transaction_capability_refresh');
+        }
+        walletSessions[`${walletType}:${requested}`] = session;
+        return session;
+    };
+
+    window.ensureCorrectEvmNetwork = async function(provider, requiredChainId, walletType = web3WalletType) {
+        let required = normChain(requiredChainId);
+        let current = normChain(await provider.request({ method:'eth_chainId' }));
+        if (current === required) return current;
+
+        /* An old session without switch/add capability cannot be repaired by
+           retrying the RPC. Re-pair only because the user explicitly requested
+           a network change, and require the same linked address to be approved. */
+        if (!supports(provider,'wallet_switchEthereumChain')) {
+            const linked = normAddress(web3WalletAddress);
+            const refreshed = await refreshProviderInPlace(provider, walletType, linked, 'network_capability_refresh');
+            provider = refreshed.provider;
+        }
+
+        const config = getEvmChainConfig(required);
+        const doSwitch = () => provider.request({ method:'wallet_switchEthereumChain', params:[{ chainId:required }] });
+        try {
+            persistPendingLink({ walletType, phase:'network_approval', requiredChainId:required, createdAt:Date.now() });
+            const p = doSwitch();
+            foreground(walletType);
+            await p;
+        } catch (e) {
+            if (Number(e?.code) === 4001) throw new Error(`Network switch to ${config.chainName} was rejected in ${walletLabel(walletType)}.`);
+            if (Number(e?.code) !== 4902) throw e;
+            if (!supports(provider,'wallet_addEthereumChain')) {
+                const refreshed = await refreshProviderInPlace(provider, walletType, normAddress(web3WalletAddress), 'network_add_capability_refresh');
+                provider = refreshed.provider;
+            }
+            const add = provider.request({ method:'wallet_addEthereumChain', params:[buildAddChainParams(required)] });
+            foreground(walletType);
+            await add;
+            const retry = doSwitch();
+            foreground(walletType);
+            await retry;
+        }
+        for (let i=0;i<40;i++) {
+            current = normChain(await provider.request({ method:'eth_chainId' }));
+            if (current === required) { storageRemove(PENDING_DEPOSIT); return current; }
+            await new Promise(r=>setTimeout(r,250));
+        }
+        throw new Error(`Network switch to ${config.chainName} was not completed. Approve the change in ${walletLabel(walletType)} and return to BitHash.`);
+    };
+
+    window.__bithashV3RpcQueue = window.__bithashV3RpcQueue || Promise.resolve();
+    window.bhQueueLinkedWalletRpc = task => {
+        const run = window.__bithashV3RpcQueue.then(task, task);
+        window.__bithashV3RpcQueue = run.catch(() => undefined);
+        return run;
+    };
+    window.bhRequestLinkedWalletTransaction = async function(provider, walletType, txData) {
+        if (!provider?.request) throw new Error('The linked wallet provider is unavailable.');
+        const expected = normAddress(txData?.from);
+        const live = (await accounts(provider))[0] || sessionAccount(provider);
+        if (!expected || !live || expected.toLowerCase() !== live.toLowerCase()) {
+            foreground(walletType);
+            throw new Error(`The active ${walletLabel(walletType)} account does not match the linked wallet. Open ${walletLabel(walletType)} and select the linked account.`);
+        }
+        if (!supports(provider,'eth_sendTransaction')) {
+            throw new Error(`Your ${walletLabel(walletType)} session is not authorized to approve transactions. Refresh the linked wallet connection.`);
+        }
+        storageSet(PENDING_TX, { walletType, account:expected, to:txData.to, value:txData.value, data:txData.data || null, operationId:activeDepositOperation?.id || null, createdAt:Date.now() });
+        const request = window.bhQueueLinkedWalletRpc(() => provider.request({ method:'eth_sendTransaction', params:[txData] }));
+        /* Queue first; then foreground the exact linked wallet. */
+        foreground(walletType);
+        try {
+            const hash = await request;
+            storageRemove(PENDING_TX);
+            storageRemove(PENDING_DEPOSIT);
+            return hash;
+        } catch (e) {
+            /* Never replay a transaction automatically after returning from wallet. */
+            throw e;
+        }
+    };
+
+    /* Idempotent backend wrapper fixes the harmless-but-disruptive
+       "Wallet already linked to this account" resume error. */
+    if (typeof linkWalletToBackend === 'function' && !window.__bithashLinkBackendV4Wrapped) {
+        const originalLink = linkWalletToBackend;
+        linkWalletToBackend = async function(address, walletType, network) {
+            try { return await originalLink(address, walletType, network); }
+            catch (e) {
+                if (String(e?.message || '').toLowerCase().includes('wallet already linked')) {
+                    try { await loadLinkedWallets(); } catch (_) {}
+                    const a = normAddress(address);
+                    const ok = (connectedWallets || []).some(w => {
+                        const wa = normAddress(w.address || w.walletAddress);
+                        return wa && a && wa.toLowerCase() === a.toLowerCase() && w.type === walletType;
+                    });
+                    if (ok) return true;
+                }
+                throw e;
+            }
+        };
+        window.__bithashLinkBackendV4Wrapped = true;
+    }
+
+    /* Desktop path: v3 accidentally replaced the desktop handler with a stub.
+       Keep desktop EIP-6963 selection entirely separate from mobile WC. */
+    window.connectSelectedWallet = async function() {
+        if (typeof isMobileDevice === 'function' && isMobileDevice()) {
+            if (window.__bithashWalletOperation) return window.__bithashWalletOperation;
+            const walletType = selectedWallet?.id;
+            if (!walletType) throw new Error('Select a wallet first.');
+            const btn = document.getElementById('web3-connect-btn');
+            const errorDiv = document.getElementById('web3-error-msg');
+            window.__bithashWalletOperation = (async () => {
+                try {
+                    isConnecting = true;
+                    setButtonLoading(btn,'processing','Linking...');
+                    if (errorDiv) errorDiv.style.display='none';
+                    const provider = await getProvider();
+                    if (provider?.session) {
+                        const existing = sessionAccount(provider);
+                        const linked = (connectedWallets || []).find(w => normAddress(w.address || w.walletAddress)?.toLowerCase() === existing?.toLowerCase());
+                        if (linked && linked.type === walletType) {
+                            const restored = await findLinked(provider,walletType,existing);
+                            if (restored) { await finalizeLinkedWalletSession(restored,existing,walletType); storageRemove(PENDING_LINK); return restored; }
+                        }
+                        if (linked && linked.type !== walletType) throw new Error(`This wallet session is already linked as ${walletLabel(linked.type)}. Select that wallet instead.`);
+                    }
+                    const result = await freshApprovedSession(walletType, null, 'new_link');
+                    const session = { walletType, account:result.address, address:result.address, provider:result.provider, session:result.provider.session, transport:'walletconnect', connected:true, chainId:result.chainId, capabilities:providerMethods(result.provider) };
+                    await backendLinkIdempotent(result.address,walletType,result.chainId);
+                    await finalizeLinkedWalletSession(session,result.address,walletType);
+                    storageRemove(PENDING_LINK);
+                    return session;
+                } finally {
+                    isConnecting=false;
+                    if (btn) btn.disabled=false;
+                    wcSessionState.status=web3WalletAddress?'connected':'idle';
+                }
+            })();
+            try { return await window.__bithashWalletOperation; } finally { window.__bithashWalletOperation=null; }
+        }
+
+        const walletType = selectedWallet?.id;
+        if (!walletType) throw new Error('Select a wallet first.');
+        const targetRdns = { metamask:'io.metamask', trust:'com.trustwallet.app', phantom:'app.phantom', rainbow:'me.rainbow' }[walletType] || 'io.metamask';
+        const found = typeof getProviderByRDNS === 'function' ? getProviderByRDNS(targetRdns) : null;
+        if (!found?.provider) throw new Error(`No ${walletLabel(walletType)} extension detected.`);
+        const provider = found.provider;
+        const requested = await provider.request({ method:'eth_requestAccounts' });
+        if (!requested?.[0]) throw new Error('No wallet account returned.');
+        const address = normAddress(requested[0]);
+        const chainId = normChain(await provider.request({ method:'eth_chainId' }));
+        await backendLinkIdempotent(address,walletType,chainId);
+        await finalizeLinkedWalletSession({ walletType, account:address, address, provider, transport:'eip1193', connected:true, chainId, capabilities:['eth_requestAccounts','eth_accounts','eth_chainId','eth_sendTransaction','wallet_switchEthereumChain','wallet_addEthereumChain'] },address,walletType);
+    };
+
+    async function resume() {
+        if (typeof isMobileDevice === 'function' && !isMobileDevice()) return;
+        try {
+            const pending = readPendingLink();
+            if (pending?.walletType) {
+                const provider = await getProvider();
+                if (provider?.session) {
+                    const address = sessionAccount(provider);
+                    if (address && (!pending.expectedAddress || address.toLowerCase() === normAddress(pending.expectedAddress).toLowerCase())) {
+                        const linked = await findLinked(provider,pending.walletType,address).catch(()=>null);
+                        if (linked) {
+                            await backendLinkIdempotent(address,pending.walletType,linked.chainId);
+                            await finalizeLinkedWalletSession(linked,address,pending.walletType);
+                            storageRemove(PENDING_LINK);
+                            try { clearPendingWalletLink?.(); } catch (_) {}
+                            showNotification?.('success','Wallet Linked',`${walletLabel(pending.walletType)} approval completed successfully.`);
+                        }
+                    }
+                }
+            }
+            const tx = storageGet(PENDING_TX);
+            if (tx) {
+                const node = document.getElementById('deposit-status-msg') || document.getElementById('deposit-modal-status-msg');
+                if (node) node.textContent='Wallet approval is in progress. Open the linked wallet and review the request. Do not submit the same deposit twice.';
+            }
+        } catch (e) { console.warn('[WC v4] Resume check:',e); }
+    }
+
+    /* Replace the old resume entry point so legacy listeners become harmless. */
+    window.resumePendingWalletLink = resume;
+    document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') setTimeout(()=>resume(),450); });
+    window.addEventListener('pageshow',()=>setTimeout(()=>resume(),450));
+    window.addEventListener('focus',()=>setTimeout(()=>resume(),450));
+
+    console.info('[BitHash] Mobile WalletConnect reliability patch v4 active');
+})();
+</script>
+
+<script>
+/* BitHash mobile wallet/deposit hardening v5
+   - A linked wallet is the only wallet ever used for that deposit.
+   - A linked EVM wallet can deposit EVM assets on any supported EVM chain.
+   - Chain changes are explicitly approved in that same wallet.
+   - Transaction approvals are queued on that same WalletConnect session before foregrounding it.
+   - WalletConnect request calls receive an explicit CAIP/EVM chain id (fixes provider request errors).
+   - If a mobile WC session has genuinely disappeared, the SAME linked address is re-paired with approval;
+     no other wallet/account is substituted.
+   - Unlinking clears every local session/pending state for that address.
+*/
+(function () {
+    'use strict';
+    const V5_TX = 'bithash.deposit.pendingTx.v3';
+    const V5_DEP = 'bithash.deposit.pending.v3';
+    const v5Label = t => ({metamask:'MetaMask',trust:'Trust Wallet',rainbow:'Rainbow',phantom:'Phantom'}[t] || t || 'wallet');
+    const v5Norm = v => { try { return normalizeWalletAddress(v); } catch (_) { return v ? String(v).toLowerCase() : null; } };
+    const v5Chain = v => { try { return normalizeChainId(v); } catch (_) { if (typeof v === 'number') return '0x'+v.toString(16); const n=Number(v); return Number.isFinite(n)?'0x'+n.toString(16):String(v||'').toLowerCase(); } };
+    const v5Methods = p => Array.isArray(p?.session?.namespaces?.eip155?.methods) ? [...new Set(p.session.namespaces.eip155.methods)] : [];
+    const v5Supports = (p,m) => p && typeof p.request === 'function' && (!p.session || v5Methods(p).includes(m));
+    async function v5Accounts(p) {
+        try { const a=await p.request({method:'eth_accounts'}); if(Array.isArray(a)&&a.length) return a.map(v5Norm).filter(Boolean); } catch (_) {}
+        return (p?.session?.namespaces?.eip155?.accounts||[]).map(x=>v5Norm(String(x).split(':').slice(2).join(':'))).filter(Boolean);
+    }
+    function v5Foreground(type, uri) { try { if (typeof foreground==='function') return foreground(type,uri); } catch (_) {} return false; }
+
+    async function v5RePairSameWallet(walletType, expectedAddress) {
+        const provider = await window.__bithashReliableGetWalletConnectProvider?.();
+        if (!provider) throw new Error(`Unable to initialize ${v5Label(walletType)}.`);
+        // A live session for another wallet must never be reused.
+        const live = (await v5Accounts(provider))[0] || v5Norm(provider?.session?.namespaces?.eip155?.accounts?.[0]?.split(':').slice(2).join(':'));
+        if (live && v5Norm(live)?.toLowerCase() !== v5Norm(expectedAddress)?.toLowerCase()) {
+            throw new Error(`The active wallet account does not match the linked ${v5Label(walletType)} wallet. Select the linked account in ${v5Label(walletType)}.`);
+        }
+        if (provider.session && typeof provider.disconnect === 'function') {
+            try { await provider.disconnect({code:6000,message:'Refreshing the explicitly linked wallet session.'}); } catch (_) { try { await provider.disconnect(); } catch(__){} }
+        }
+        let resolveUri;
+        const uriPromise = new Promise((resolve,reject)=>{
+            const timer=setTimeout(()=>reject(new Error('Wallet connection link was not generated.')),15000);
+            const onUri=uri=>{clearTimeout(timer); try{provider.off?.('display_uri',onUri);}catch(_){} resolve(uri);};
+            provider.once?.('display_uri',onUri);
+        });
+        const connectPromise = provider.connect();
+        const uri = await uriPromise;
+        try { if (typeof persistPendingLink==='function') persistPendingLink({walletType,expectedAddress,purpose:'linked_wallet_repair',phase:'wallet_approval',uri,createdAt:Date.now()}); } catch (_) {}
+        // Let WalletConnect enqueue the pairing message before navigating away.
+        await Promise.resolve();
+        v5Foreground(walletType, uri);
+        await connectPromise;
+        const address=(await v5Accounts(provider))[0];
+        if (!address || address.toLowerCase() !== v5Norm(expectedAddress).toLowerCase()) throw new Error(`Approve the linked ${v5Label(walletType)} account. No other account will be accepted.`);
+        if (typeof peerMatches==='function' && peerMatches(provider,walletType)===false) throw new Error(`The connection was approved by a different wallet, not ${v5Label(walletType)}.`);
+        const chainId=v5Chain(await provider.request({method:'eth_chainId'}));
+        const session={walletType,account:address,address,provider,session:provider.session,transport:'walletconnect',connected:true,chainId,capabilities:v5Methods(provider)};
+        walletSessions[`${walletType}:${v5Norm(address)}`]=session;
+        return session;
+    }
+
+    // Deposit session resolver: restore the linked address, otherwise explicitly re-pair that SAME address.
+    window.resolveLinkedWalletSession = async function(selectedAddress,walletType,requiredChainId) {
+        const requested=v5Norm(selectedAddress);
+        if(!requested) throw new Error('Invalid linked wallet address.');
+        let provider = await window.__bithashReliableGetWalletConnectProvider?.();
+        if(!provider) throw new Error(`Unable to initialize ${v5Label(walletType)}.`);
+        let live=(await v5Accounts(provider))[0] || v5Norm(provider?.session?.namespaces?.eip155?.accounts?.[0]?.split(':').slice(2).join(':'));
+        if(live && live.toLowerCase() !== requested.toLowerCase()) throw new Error(`The active ${v5Label(walletType)} account does not match the selected linked wallet. No wallet will be substituted.`);
+        if(provider.session) {
+            const caip=(provider.session.namespaces?.eip155?.accounts||[]).some(x=>v5Norm(String(x).split(':').slice(2).join(':'))?.toLowerCase()===requested.toLowerCase());
+            if(caip) {
+                const chainId=v5Chain(await provider.request({method:'eth_chainId'}));
+                const session={walletType,account:requested,address:requested,provider,session:provider.session,transport:'walletconnect',connected:true,chainId,capabilities:v5Methods(provider)};
+                walletSessions[`${walletType}:${requested}`]=session;
+                return session;
+            }
+        }
+        // Session genuinely absent: recover only by approval for the already-linked address.
+        return v5RePairSameWallet(walletType, requested);
+    };
+
+    // Network switching always happens inside the selected linked wallet.
+    window.ensureCorrectEvmNetwork = async function(provider,requiredChainId,walletType=web3WalletType) {
+        let required=v5Chain(requiredChainId);
+        let current=v5Chain(await provider.request({method:'eth_chainId'}));
+        if(current===required) return current;
+        if(!v5Supports(provider,'wallet_switchEthereumChain')) throw new Error(`${v5Label(walletType)} cannot approve network changes on the active linked session. Reconnect the same wallet and approve the connection again.`);
+        const config=getEvmChainConfig(required);
+        let changedResolve; const changedPromise=new Promise(r=>changedResolve=r);
+        const onChanged=id=>changedResolve(v5Chain(id));
+        provider.on?.('chainChanged',onChanged);
+        try {
+            try {
+                const requestPromise=provider.request({method:'wallet_switchEthereumChain',params:[{chainId:required}]});
+                await Promise.resolve(); v5Foreground(walletType); await requestPromise;
+            } catch(e) {
+                if(Number(e?.code)===4001) throw new Error(`Network switch to ${config.chainName} was rejected in ${v5Label(walletType)}.`);
+                if(Number(e?.code)!==4902) throw e;
+                if(!v5Supports(provider,'wallet_addEthereumChain')) throw new Error(`The linked ${v5Label(walletType)} cannot add ${config.chainName} through this session.`);
+                const addPromise=provider.request({method:'wallet_addEthereumChain',params:[buildAddChainParams(required)]});
+                await Promise.resolve(); v5Foreground(walletType); await addPromise;
+                const retry=provider.request({method:'wallet_switchEthereumChain',params:[{chainId:required}]});
+                await Promise.resolve(); v5Foreground(walletType); await retry;
+            }
+            for(let i=0;i<40;i++) { current=v5Chain(await provider.request({method:'eth_chainId'})); if(current===required) { try{localStorage.removeItem('bithash.deposit.pending.v3');}catch(_){} return current; } const ev=await Promise.race([changedPromise,new Promise(r=>setTimeout(()=>r(null),250))]); if(ev===required) return required; }
+            throw new Error(`Network switch to ${config.chainName} was not completed. Approve the change in ${v5Label(walletType)} and return to BitHash.`);
+        } finally { try{provider.off?.('chainChanged',onChanged);}catch(_){} }
+    };
+
+    // Transaction request: pass the explicit active chain to WalletConnect and foreground the same wallet.
+    window.bhRequestLinkedWalletTransaction = async function(provider,walletType,txData) {
+        if(!provider?.request) throw new Error('The linked wallet provider is unavailable.');
+        const expected=v5Norm(txData?.from); const live=(await v5Accounts(provider))[0];
+        if(!expected || !live || live.toLowerCase()!==expected.toLowerCase()) { v5Foreground(walletType); throw new Error(`Open ${v5Label(walletType)} and select the linked account.`); }
+        const chainId=v5Chain(await provider.request({method:'eth_chainId'}));
+        if(!v5Supports(provider,'eth_sendTransaction')) throw new Error(`${v5Label(walletType)} is not authorized to approve transactions on this session. Reconnect the same linked wallet and approve the connection.`);
+        try { localStorage.setItem(V5_TX,JSON.stringify({walletType,account:expected,to:txData.to,value:txData.value,data:txData.data||null,operationId:window.activeDepositOperation?.id||null,chainId,createdAt:Date.now()})); } catch (_) {}
+        const task=()=>provider.request({method:'eth_sendTransaction',params:[txData]});
+        const requestPromise=(window.bhQueueLinkedWalletRpc ? window.bhQueueLinkedWalletRpc(task) : task());
+        // Do not navigate before the request has entered the WC provider.
+        await Promise.resolve();
+        v5Foreground(walletType);
+        try { const hash=await requestPromise; try{localStorage.removeItem(V5_TX);localStorage.removeItem(V5_DEP);}catch(_){} return hash; }
+        catch(e) { throw e; }
+    };
+
+    // Keep the active selected wallet synchronized after a chain change; never swap the account.
+    try {
+        const p=window.__bithashWalletConnectProvider;
+        p?.on?.('chainChanged',id=>{ if(window.web3WalletAddress) window.web3Network=v5Chain(id); });
+    } catch (_) {}
+
+    console.info('[BitHash] Mobile wallet/deposit hardening v5 active');
+})();
+</script>
 
 </body>
 </html>
