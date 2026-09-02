@@ -7703,7 +7703,8 @@
     }
 
     // FIXED: requestDisableOTP - Properly extracts challengeId
-    async function requestDisableOTP() {
+    async function requestDisableOTP(options = {}) {
+      const silent = options.silent === true;
       if (disableOTPController) disableOTPController.clearError();
 
       try {
@@ -7745,12 +7746,15 @@
           disableOTPController.focusFirstEmpty();
         }
 
-        showNotification('success', 'Code Sent', 'Verification code sent to your email.');
+        if (!silent) showNotification('success', 'Code Sent', 'Verification code sent to your email.');
 
       } catch (error) {
         console.error('Error requesting disable OTP:', error);
         const userMessage = normalizeApiError(error, 'otp_request');
-        if (disableOTPController) disableOTPController.setError(userMessage);
+        console.error('Disable challenge request failed:', userMessage);
+        if (disableOTPController && !silent) disableOTPController.setError(userMessage);
+        if (silent) showNotification('error', 'Verification Setup Failed', 'Could not create the security challenge. Please try again.');
+        syncDisableVerificationButton();
       }
     }
 
@@ -7791,24 +7795,19 @@
         return;
       }
 
-      // CRITICAL: Check if challengeId exists before proceeding
-      if (!disableModalState.challengeId && disableModalState.method === 'otp') {
-        // Request OTP first
-        showNotification('warning', 'No Active Session', 'Please request a verification code first.');
-        await requestDisableOTP();
-        // After OTP is requested, challengeId should be set
-        if (!disableModalState.challengeId) {
+      // The backend requires challengeId for BOTH email OTP and authenticator verification.
+      // Never call /disable/verify with a missing challenge ID.
+      if (!disableModalState.challengeId) {
+        showNotification('warning', 'Verification Pending', 'Please wait for the security challenge to finish, then verify again.');
+        await requestDisableOTP({ silent: disableModalState.method === 'authenticator' });
+        if (!disableModalState.challengeId) return;
+        if (disableModalState.method === 'otp') {
           if (disableOTPController) {
-            disableOTPController.setError('Failed to get verification code. Please try again.');
+            disableOTPController.clear();
+            disableOTPController.focusFirstEmpty();
           }
           return;
         }
-        // Now verify with the new code - user needs to enter it
-        if (disableOTPController) {
-          disableOTPController.clear();
-          disableOTPController.focusFirstEmpty();
-        }
-        return;
       }
 
       disableModalState.isVerifying = true;
@@ -7832,7 +7831,7 @@
             challengeId: disableModalState.challengeId
           };
         } else if (disableModalState.method === 'authenticator') {
-          body = { code: code };
+          body = { code: code, challengeId: disableModalState.challengeId };
         } else {
           throw new Error('No verification method selected');
         }
@@ -7872,9 +7871,9 @@
         showNotification('error', 'Disable Failed', userMessage);
 
       } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
         disableModalState.isVerifying = false;
+        btn.innerHTML = '<i class="fas fa-trash"></i> Disable Authenticator';
+        syncDisableVerificationButton();
       }
     }
 
@@ -7913,9 +7912,10 @@
         }, 300);
       });
 
-      document.getElementById('disable-method-auth')?.addEventListener('click', function() {
+      document.getElementById('disable-method-auth')?.addEventListener('click', async function() {
         disableModalState.method = 'authenticator';
-        disableModalState.challengeId = null; // Reset challengeId
+        // /disable/verify requires challengeId for authenticator verification too.
+        // Keep an existing challenge and create one if this modal has none.
         document.getElementById('disable-auth-section').classList.add('active');
         document.getElementById('disable-otp-section').classList.remove('active');
         const confirmBtn = document.getElementById('disable-confirm-btn');
@@ -7932,8 +7932,13 @@
 
         syncDisableVerificationButton();
 
+        if (!disableModalState.challengeId) {
+          await requestDisableOTP({ silent: true });
+        }
+
         setTimeout(() => {
           if (disableAuthController) disableAuthController.focusFirstEmpty();
+          syncDisableVerificationButton();
         }, 300);
       });
 
@@ -9591,8 +9596,14 @@
           throw new Error('KYC status missing from API response');
         }
 
-        // Extract individual component states
-        kycState.applicationStatus = data.data.application?.status || data.data.status || 'draft';
+        // Only an explicit application-level status can lock the entire KYC flow.
+        // A component save/status must never become the application status.
+        const explicitApplicationStatus = data.data.application?.status || data.data.applicationStatus;
+        if (explicitApplicationStatus) {
+          kycState.applicationStatus = explicitApplicationStatus;
+        } else if (kycState.applicationStatus !== 'pending' && kycState.applicationStatus !== 'verified') {
+          kycState.applicationStatus = 'draft';
+        }
 
         // Identity status - use dedicated field or infer
         kycState.identity.status = data.data.identity?.status || data.data.identityStatus || 'incomplete';
@@ -9965,18 +9976,16 @@
 
         // Update badge
         updateKycBadges();
+        updateKycFormDisabledState();
 
         showNotification('success', 'Document Saved', 'Identity documents uploaded successfully.');
-
-        // Refresh status to get any backend updates, but it should NOT lock
-        await loadKYCStatus();
 
       } catch (error) {
         console.error('Error saving document:', error);
         showNotification('error', 'Upload Failed', error.message || 'Failed to upload documents.');
       } finally {
-        btn.disabled = false;
         btn.innerHTML = 'Save Changes';
+        updateKycFormDisabledState();
       }
     }
 
@@ -10036,18 +10045,16 @@
 
         // Update badge
         updateKycBadges();
+        updateKycFormDisabledState();
 
         showNotification('success', 'Document Saved', 'Address document uploaded successfully.');
-
-        // Refresh status - should NOT lock
-        await loadKYCStatus();
 
       } catch (error) {
         console.error('Error saving address document:', error);
         showNotification('error', 'Upload Failed', error.message || 'Failed to upload address document.');
       } finally {
-        btn.disabled = false;
         btn.innerHTML = 'Save Changes';
+        updateKycFormDisabledState();
       }
     }
 
