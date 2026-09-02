@@ -7644,7 +7644,15 @@
 
       const controller = disableModalState.method === 'otp' ? disableOTPController : disableAuthController;
 
-      button.disabled = !controller || !controller.isComplete() || disableModalState.isVerifying;
+      // Email OTP requires the server-issued challenge before the destructive
+      // action can be submitted. Authenticator verification does not.
+      const challengeReady = disableModalState.method !== 'otp' || Boolean(disableModalState.challengeId);
+
+      button.disabled =
+        !controller ||
+        !controller.isComplete() ||
+        !challengeReady ||
+        disableModalState.isVerifying;
     }
 
     function openDisableAuthModal() {
@@ -7715,8 +7723,11 @@
           if (disableOTPController) {
             disableOTPController.setError('Failed to get challenge ID. Please try again.');
           }
+          syncDisableVerificationButton();
           return;
         }
+
+        syncDisableVerificationButton();
 
         const emailEl = document.getElementById('disable-otp-email');
         if (emailEl && disableModalState.email) {
@@ -7894,6 +7905,7 @@
         if (disableOTPController) disableOTPController.reset();
 
         // CRITICAL: Request OTP immediately when user selects email method
+        syncDisableVerificationButton();
         requestDisableOTP();
 
         setTimeout(() => {
@@ -7917,6 +7929,8 @@
         this.classList.add('btn-primary');
 
         if (disableAuthController) disableAuthController.reset();
+
+        syncDisableVerificationButton();
 
         setTimeout(() => {
           if (disableAuthController) disableAuthController.focusFirstEmpty();
@@ -7942,6 +7956,31 @@
         document.querySelectorAll('#disable-auth-modal .modal-step').forEach(el => el.classList.remove('active'));
         document.getElementById('disable-step-1').classList.add('active');
         disableModalState.step = 1;
+      });
+
+      // Confirm button — this was previously missing its click handler.
+      // Keep verification manual: the button becomes clickable only after a
+      // complete 6-digit code is present and, for email OTP, a challenge exists.
+      document.getElementById('disable-confirm-btn')?.addEventListener('click', function() {
+        if (disableModalState.isVerifying) return;
+
+        const controller = disableModalState.method === 'otp'
+          ? disableOTPController
+          : disableAuthController;
+
+        if (!controller || !controller.isComplete()) {
+          showNotification('warning', 'Incomplete', 'Please enter the full 6-digit verification code.');
+          syncDisableVerificationButton();
+          return;
+        }
+
+        if (disableModalState.method === 'otp' && !disableModalState.challengeId) {
+          showNotification('warning', 'Verification Pending', 'Please wait for the email verification challenge to finish.');
+          syncDisableVerificationButton();
+          return;
+        }
+
+        verifyDisableCode(controller.getCode());
       });
 
       // Close button
@@ -9376,71 +9415,89 @@
     }
 
     function isKycComponentLocked(component) {
-      // Only lock editing if the entire application is locked
-      return isKycApplicationLocked();
+      // The whole KYC application is locked only after final submission/review.
+      if (isKycApplicationLocked()) return true;
+
+      // Before final submission, lock only the individual component that has
+      // already been saved/completed/verified. Other KYC components remain editable.
+      const status = kycState[component]?.status;
+      return ['saved', 'complete', 'verified', 'approved', 'pending'].includes(status);
     }
 
     function updateKycFormDisabledState() {
-      const locked = isKycApplicationLocked();
+      const applicationLocked = isKycApplicationLocked();
+      const identityLocked = isKycComponentLocked('identity');
+      const addressLocked = isKycComponentLocked('address');
+      const facialLocked = isKycComponentLocked('facial');
 
-      // Identity fields
+      // Identity fields — lock only the identity component when it is complete/saved.
       const identityFields = ['document-type', 'document-number', 'document-expiry', 'document-front-file', 'document-back-file'];
       identityFields.forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.disabled = locked;
+        if (el) el.disabled = identityLocked;
       });
 
-      // Address fields
+      // Address fields — remain editable until the address component itself is complete/saved.
       const addressFields = ['address-document-type', 'address-document-date', 'address-document-file'];
       addressFields.forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.disabled = locked;
+        if (el) el.disabled = addressLocked;
       });
 
-      // Facial button
+      // Facial controls — lock only after facial verification/completion.
       const facialBtn = document.getElementById('start-facial-verification-btn');
-      if (facialBtn) facialBtn.disabled = locked;
+      if (facialBtn) facialBtn.disabled = applicationLocked || facialLocked;
 
-      // Upload containers
-      const uploads = ['document-front-upload', 'document-back-upload', 'address-document-upload'];
-      uploads.forEach(id => {
+      const retakeBtn = document.getElementById('retake-photo-btn');
+      if (retakeBtn) retakeBtn.disabled = applicationLocked || facialLocked;
+
+      const submitPhotoBtn = document.getElementById('submit-photo-btn');
+      if (submitPhotoBtn) submitPhotoBtn.disabled = applicationLocked || facialLocked;
+
+      // Upload containers — apply the disabled visual state per component.
+      const uploadStates = {
+        'document-front-upload': identityLocked,
+        'document-back-upload': identityLocked,
+        'address-document-upload': addressLocked
+      };
+      Object.entries(uploadStates).forEach(([id, disabled]) => {
         const el = document.getElementById(id);
         if (el) {
-          if (locked) el.classList.add('disabled');
+          if (disabled) el.classList.add('disabled');
           else el.classList.remove('disabled');
         }
       });
 
-      // Action buttons
-      const buttons = [
-        'save-document-btn', 'save-address-document-btn',
-        'retake-photo-btn', 'submit-photo-btn',
-        'cancel-document-btn', 'cancel-address-document-btn',
-        'submit-kyc-btn'
+      // Component action buttons — do not globally disable these merely because
+      // another KYC component was saved.
+      const componentButtons = [
+        ['save-document-btn', identityLocked],
+        ['cancel-document-btn', identityLocked],
+        ['save-address-document-btn', addressLocked],
+        ['cancel-address-document-btn', addressLocked]
       ];
-      buttons.forEach(id => {
+      componentButtons.forEach(([id, disabled]) => {
         const el = document.getElementById(id);
-        if (el) el.disabled = locked;
+        if (el) el.disabled = disabled;
       });
 
-      // If locked, also disable the submit button if already submitted
-      if (locked) {
-        const submitBtn = document.getElementById('submit-kyc-btn');
-        if (submitBtn) {
+      // The final KYC application button is controlled independently and is
+      // enabled only when every required component is complete.
+      const submitBtn = document.getElementById('submit-kyc-btn');
+      if (submitBtn) {
+        submitBtn.disabled = applicationLocked;
+        if (applicationLocked) {
           if (kycState.applicationStatus === 'pending') {
             submitBtn.textContent = I18N.t('kyc.status.pending');
           } else if (kycState.applicationStatus === 'verified') {
             submitBtn.textContent = I18N.t('kyc.status.verified');
           }
-        }
-      } else {
-        const submitBtn = document.getElementById('submit-kyc-btn');
-        if (submitBtn && kycState.applicationStatus !== 'rejected') {
+        } else if (kycState.applicationStatus !== 'rejected') {
           submitBtn.textContent = I18N.t('kyc.submitApplication');
         }
       }
 
-      // Update canSubmit state
+      // Recalculate final-submit eligibility without changing component locks.
       updateKycSubmitButton();
     }
 
@@ -9846,6 +9903,11 @@
     // SAVE DOCUMENT - NO GLOBAL LOCK
     // =============================================
     async function saveDocument() {
+      if (isKycComponentLocked('identity')) {
+        showNotification('warning', 'KYC Step Locked', 'Identity verification has already been saved or completed.');
+        return;
+      }
+
       const documentType = document.getElementById('document-type').value;
       const documentNumber = document.getElementById('document-number').value;
       const documentExpiry = document.getElementById('document-expiry').value;
@@ -9922,6 +9984,11 @@
     // SAVE ADDRESS - NO GLOBAL LOCK
     // =============================================
     async function saveAddressDocument() {
+      if (isKycComponentLocked('address')) {
+        showNotification('warning', 'KYC Step Locked', 'Address verification has already been saved or completed.');
+        return;
+      }
+
       const documentType = document.getElementById('address-document-type').value;
       const documentDate = document.getElementById('address-document-date').value;
       const file = uploadedAddressFile;
