@@ -12690,32 +12690,61 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
                 return;
             }
             const SOCKET_URL = 'https://bithash-backend-hz1a.onrender.com';
-            socket = io(SOCKET_URL, { transports: ['websocket', 'polling'], auth: { token }, reconnection: true,
-                reconnectionAttempts: 10, reconnectionDelay: 1000, reconnectionDelayMax: 5000, timeout: 20000,
-                upgrade: true, forceNew: true });
+            socket = io(SOCKET_URL, {
+                transports: ['websocket', 'polling'],
+                auth: { token },
+                reconnection: true,
+                // Live-rate recovery is infrastructure state, not a user-facing event.
+                // Keep retrying quietly in the background instead of surfacing transient outages.
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 20000,
+                upgrade: true,
+                forceNew: true
+            });
+
             socket.on('connect', () => {
                 console.log('Socket connected - real-time updates active');
+
+                // Re-subscribe after both the initial connection and every successful reconnect.
+                // This function no longer registers another `connect` listener, preventing
+                // duplicate listeners from accumulating across reconnect cycles.
                 setupRealTimePriceListener();
-                // FIX 21: Request price snapshot on reconnect
+
+                // Refresh the selected asset immediately so a reconnect never leaves a stale quote.
                 if (currentAsset) {
                     requestCurrentPriceSnapshot(currentAsset.symbol);
                 }
             });
+
             socket.on('disconnect', (reason) => {
-                console.warn('Socket disconnected:', reason);
-                // FIX 19: Show reconnecting status
-                showNotification('warning', 'Live Rate Reconnecting', 'Price feed is reconnecting...');
-                if (reason === 'io server disconnect') socket.connect();
-            });
-            socket.on('connect_error', (err) => { console.warn('Socket connection error:', err.message); });
-            socket.on('reconnecting', (attempt) => { console.log('Socket reconnecting... attempt', attempt); });
-            socket.on('reconnect', () => {
-                console.log('Socket reconnected');
-                // FIX 21: Request price snapshot on reconnect
-                if (currentAsset) {
-                    requestCurrentPriceSnapshot(currentAsset.symbol);
+                // Expected transient transport failures are handled silently by Socket.IO.
+                // Keep diagnostics in DevTools only; never show a reconnect notification to users.
+                console.warn('Socket disconnected; reconnecting in background:', reason);
+
+                // Socket.IO does not auto-reconnect after an explicit server disconnect,
+                // so restart the connection manually for that specific reason.
+                if (reason === 'io server disconnect') {
+                    socket.connect();
                 }
-                showNotification('success', 'Live Rate Restored', 'Price feed is active.');
+            });
+
+            socket.on('connect_error', (err) => {
+                // Background-only diagnostic. The manager will retry automatically.
+                console.warn('Socket connection error; background retry active:', err.message);
+            });
+
+            // Reconnection lifecycle events belong to the Socket.IO Manager (`socket.io`),
+            // not the application Socket. They are intentionally console-only.
+            socket.io.on('reconnect_attempt', (attempt) => {
+                console.log('Socket reconnecting in background... attempt', attempt);
+            });
+            socket.io.on('reconnect', (attempt) => {
+                console.log('Socket reconnected in background after attempt', attempt);
+            });
+            socket.io.on('reconnect_error', (err) => {
+                console.warn('Socket reconnect attempt failed:', err?.message || err);
             });
             socket.on('balance_update', (data) => {
                 if (data.main !== undefined) {
@@ -12946,15 +12975,12 @@ var e=ttq._i[t]||[],n=0;n<ttq.methods.length;n++)ttq.setAndDefer(e,ttq.methods[n
         }
 
         function setupRealTimePriceListener() {
-            if (!socket) return;
-            // FIX 13: Listen for price updates - already handled in socket.on('price_update')
-            // Additional subscription setup
-            socket.on('connect', () => {
-                subscribeToDepositPrices();
-                if (currentAsset) {
-                    requestCurrentPriceSnapshot(currentAsset.symbol);
-                }
-            });
+            if (!socket || !socket.connected) return;
+
+            // `price_update` already has one authoritative listener in initSocketIO().
+            // Only perform the subscription here. Do NOT attach another `connect` handler,
+            // otherwise every reconnect adds another listener and duplicates future work.
+            subscribeToDepositPrices();
         }
 
         // =============================================
