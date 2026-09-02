@@ -5861,10 +5861,12 @@
         });
       }
     }
- // =============================================
-// MAIN APPLICATION SCRIPT
-// =============================================
   </script>
+
+  <!-- ============================================= -->
+  <!-- MAIN APPLICATION SCRIPT -->
+  <!-- ============================================= -->
+  <script>
     // =============================================
     // INTERNATIONALIZATION SYSTEM
     // =============================================
@@ -7583,12 +7585,12 @@
     }
 
     // =============================================
-    // DISABLE AUTHENTICATOR - FIXED VERSION
+    // DISABLE AUTHENTICATOR
     // =============================================
     let disableModalState = {
       step: 1,
       method: null,
-      otpId: null,
+      challengeId: null,
       email: null,
       timer: null,
       remainingSeconds: 0,
@@ -7610,14 +7612,12 @@
             syncDisableVerificationButton();
           },
           onComplete: function(code) {
-            // ✅ FIX: DO NOT auto-verify - just update UI state
-            // The user must click the "Disable Authenticator" button
-            const confirmBtn = document.getElementById('disable-confirm-btn');
-            if (confirmBtn) {
-              confirmBtn.disabled = false;
+            if (!disableModalState.isVerifying) {
+              verifyDisableCode(code);
             }
           },
-          autoVerify: false  // ✅ FIX: Disable auto-verify
+          autoVerify: true,
+          autoVerifyDelay: 300
         });
       }
 
@@ -7632,13 +7632,12 @@
             syncDisableVerificationButton();
           },
           onComplete: function(code) {
-            // ✅ FIX: DO NOT auto-verify - just update UI state
-            const confirmBtn = document.getElementById('disable-confirm-btn');
-            if (confirmBtn) {
-              confirmBtn.disabled = false;
+            if (!disableModalState.isVerifying) {
+              verifyDisableCode(code);
             }
           },
-          autoVerify: false  // ✅ FIX: Disable auto-verify
+          autoVerify: true,
+          autoVerifyDelay: 300
         });
       }
     }
@@ -7657,9 +7656,10 @@
       modal.classList.add('active');
       document.body.style.overflow = 'hidden';
 
+      // ✅ FIX: Reset all state properly
       disableModalState.step = 1;
       disableModalState.method = null;
-      disableModalState.otpId = null;
+      disableModalState.challengeId = null;
       disableModalState.email = null;
       disableModalState.isVerifying = false;
 
@@ -7706,11 +7706,22 @@
           method: 'POST'
         });
 
-        disableModalState.otpId = data.challengeId || data.data?.challengeId;
-        disableModalState.email = data.data?.email || data.email;
+        // ✅ FIX: Extract challengeId from multiple possible locations
+        disableModalState.challengeId = data.challengeId || data.data?.challengeId || data.id || null;
+        disableModalState.email = data.data?.email || data.email || null;
+
+        if (!disableModalState.challengeId) {
+          console.error('No challengeId returned from API:', data);
+          if (disableOTPController) {
+            disableOTPController.setError('Failed to get challenge ID. Please try again.');
+          }
+          return;
+        }
 
         const emailEl = document.getElementById('disable-otp-email');
-        renderVerificationEmail(emailEl, disableModalState.email);
+        if (emailEl && disableModalState.email) {
+          renderVerificationEmail(emailEl, disableModalState.email);
+        }
 
         if (data.data?.expiresAt || data.expiresAt) {
           const expiresAt = new Date(data.data?.expiresAt || data.expiresAt);
@@ -7753,13 +7764,22 @@
       disableModalState.timer = setInterval(updateTimer, 1000);
     }
 
+    // ✅ FIXED: verifyDisableCode with proper challengeId handling
     async function verifyDisableCode(code) {
       if (disableModalState.isVerifying) return;
-      if (!/^\d{6}$/.test(code)) return;
+      if (!/^\d{6}$/.test(code)) {
+        if (disableOTPController) {
+          disableOTPController.setError('Please enter a valid 6-digit code');
+        }
+        return;
+      }
 
-      // ✅ FIX: Validate that challengeId exists BEFORE making API call
-      if (!disableModalState.otpId) {
-        showNotification('error', 'Session Error', 'Verification session not found. Please request a new code.');
+      // ✅ FIX: Check if challengeId exists before proceeding
+      if (!disableModalState.challengeId && disableModalState.method === 'otp') {
+        if (disableOTPController) {
+          disableOTPController.setError('No active verification session. Please request a new code.');
+        }
+        showNotification('error', 'Session Error', 'Please request a new verification code.');
         return;
       }
 
@@ -7779,12 +7799,18 @@
         let body = {};
 
         if (disableModalState.method === 'otp') {
-          body = { otp: code, challengeId: disableModalState.otpId };
+          body = {
+            otp: code,
+            challengeId: disableModalState.challengeId
+          };
         } else if (disableModalState.method === 'authenticator') {
           body = { code: code };
         } else {
           throw new Error('No verification method selected');
         }
+
+        // ✅ FIX: Log the request for debugging
+        console.log('Verifying with body:', { ...body, challengeId: body.challengeId ? 'present' : 'missing' });
 
         await apiCall(`${API_BASE_URL}/api/users/two-factor/authenticator/disable/verify`, {
           method: 'POST',
@@ -7833,6 +7859,7 @@
         initDisableOTPControllers();
       });
 
+      // ✅ FIXED: Method selector handlers with proper challengeId management
       document.getElementById('disable-method-otp')?.addEventListener('click', function() {
         disableModalState.method = 'otp';
         document.getElementById('disable-otp-section').classList.add('active');
@@ -7848,6 +7875,9 @@
         this.classList.add('btn-primary');
 
         if (disableOTPController) disableOTPController.reset();
+
+        // ✅ FIX: Reset challengeId before requesting new OTP
+        disableModalState.challengeId = null;
         requestDisableOTP();
 
         setTimeout(() => {
@@ -7871,13 +7901,19 @@
 
         if (disableAuthController) disableAuthController.reset();
 
+        // ✅ FIX: For authenticator method, we don't need challengeId
+        disableModalState.challengeId = null;
+
         setTimeout(() => {
           if (disableAuthController) disableAuthController.focusFirstEmpty();
         }, 300);
       });
 
+      // ✅ FIXED: Resend button handler
       document.getElementById('disable-resend-otp')?.addEventListener('click', function() {
         if (disableModalState.method === 'otp') {
+          // ✅ FIX: Reset challengeId before requesting new OTP
+          disableModalState.challengeId = null;
           requestDisableOTP();
           if (disableOTPController) {
             disableOTPController.clearError();
@@ -11002,7 +11038,5 @@
       }
     }
   </script>
-
- 
 </body>
 </html>
