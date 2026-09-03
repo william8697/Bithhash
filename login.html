@@ -2049,8 +2049,7 @@
 
         // =============================================
         // 2. PLATFORM DETECTION
-        // =============================================
-        function detectPlatform() {
+        // =============================================        function detectPlatform() {
             const ua = navigator.userAgent;
             if (/Android/i.test(ua)) return { type: 'android', isMobile: true };
             if (/iPhone|iPad|iPod/i.test(ua)) return { type: 'ios', isMobile: true };
@@ -2077,9 +2076,21 @@
                 let session = null;
 
                 if (platform.isMobile) {
-                    const result = await connectMobileWallet(walletType);
-                    provider = result.provider;
-                    session = result.session;
+                    try {
+                        const result = await connectMobileWallet(walletType);
+                        provider = result.provider;
+                        session = result.session;
+                    } catch (mobileError) {
+                        console.error('Mobile connection error:', mobileError);
+                        showConnectionError(
+                            mobileError.message && mobileError.message.includes('timeout')
+                                ? 'Connection timed out. Please make sure your wallet app is installed and try again.'
+                                : mobileError.message && mobileError.message.includes('rejected')
+                                ? 'Connection was rejected in your wallet. Please approve the connection.'
+                                : 'Failed to connect to wallet. Please try again.'
+                        );
+                        throw mobileError;
+                    }
                 } else {
                     const result = await connectDesktopWallet(walletType);
                     provider = result.provider;
@@ -2336,7 +2347,7 @@
         }
 
         // =============================================
-        // CONNECT MOBILE WALLET (Deep Link + WalletConnect)
+        // CONNECT MOBILE WALLET (Deep Link + WalletConnect) - FIXED
         // =============================================
         async function connectMobileWallet(walletType) {
             const wcStatus = document.getElementById('wc-mobile-status');
@@ -2352,6 +2363,7 @@
             const targetRdns = rdnsMap[walletType];
             let providerInfo = null;
 
+            // First try to detect if wallet is installed via EIP-6963
             if (eip6963Initialized) {
                 for (const p of discoveredProviders) {
                     if (p.info.rdns === targetRdns) {
@@ -2360,6 +2372,8 @@
                     }
                 }
             }
+
+            // Try window.ethereum detection
             if (!providerInfo && window.ethereum) {
                 const isTarget =
                     (targetRdns === 'io.metamask' && window.ethereum.isMetaMask) ||
@@ -2371,33 +2385,90 @@
                 }
             }
 
+            // If wallet is installed, try direct connection first
             if (providerInfo) {
                 document.getElementById('wc-status-text').textContent = 'Connecting to wallet...';
                 const provider = providerInfo.provider;
                 try {
-                    await provider.request({ method: 'eth_requestAccounts' });
-                    return { provider, session: null };
+                    // Try to get accounts directly - works for installed wallets
+                    const accounts = await provider.request({ method: 'eth_requestAccounts' });
+                    if (accounts && accounts.length > 0) {
+                        // Get chain ID
+                        let chainIdHex;
+                        try {
+                            chainIdHex = await provider.request({ method: 'eth_chainId' });
+                        } catch (e) {
+                            chainIdHex = '0x1';
+                        }
+
+                        // We have a successful connection
+                        document.getElementById('wc-status-text').textContent = 'Connected!';
+                        wcStatus.classList.remove('active');
+
+                        // Store the provider
+                        connectionManager.provider = provider;
+                        connectionManager.walletType = walletType;
+                        connectionManager.connected = true;
+
+                        return { provider, session: null };
+                    }
                 } catch (err) {
                     console.log('Provider request failed, falling back to deep link:', err.message);
+                    // If user rejects or wallet not responding, fall through to deep link
                 }
             }
 
+            // If wallet is not installed or direct connection failed, use WalletConnect
             document.getElementById('wc-status-text').textContent = 'Opening wallet app...';
 
-            const wcUri = await generateWalletConnectURI(walletType);
-            if (!wcUri) throw new Error('Failed to generate WalletConnect URI');
+            // Generate WalletConnect URI with timeout and retry
+            let wcUri;
+            try {
+                wcUri = await generateWalletConnectURI(walletType);
+                if (!wcUri) {
+                    throw new Error('Failed to generate WalletConnect URI');
+                }
+            } catch (uriError) {
+                console.error('URI generation error:', uriError);
+                showConnectionError('Failed to establish secure connection. Please try again.');
+                wcStatus.classList.remove('active');
+                throw new Error('Failed to generate connection URI');
+            }
 
+            // Open deep link
             const deepLink = openDeepLink(walletType, wcUri);
             launchWalletApp(deepLink, walletType);
 
             document.getElementById('wc-status-text').textContent = 'Waiting for approval in wallet...';
 
-            const session = await waitForWalletConnectSession(wcUri);
+            // Wait for session with timeout
+            let session;
+            try {
+                session = await waitForWalletConnectSession(wcUri, 60000);
+            } catch (sessionError) {
+                console.error('Session wait error:', sessionError);
+                showConnectionError('Connection timed out. Please make sure the wallet app is installed and try again.');
+                wcStatus.classList.remove('active');
+                throw sessionError;
+            }
 
+            if (!session) {
+                showConnectionError('No session established. Please try again.');
+                wcStatus.classList.remove('active');
+                throw new Error('No session established');
+            }
+
+            // Extract accounts from session
             const { accountsByChain, approvedChains } = extractEip155Accounts(session);
 
             connectionManager.accountsByChain = accountsByChain;
             connectionManager.approvedChains = approvedChains;
+            connectionManager.session = session;
+            connectionManager.sessionTopic = session.topic || null;
+
+            if (!connectionManager.sessionTopic) {
+                console.warn('No session topic found, but session may still work');
+            }
 
             const firstCaipId = approvedChains[0];
             const primaryAddress = accountsByChain[firstCaipId];
@@ -2410,11 +2481,177 @@
             session.accountsByChain = accountsByChain;
             session.approvedChains = approvedChains;
 
-            return { provider: createProviderFromSession(session), session };
+            // Create provider from session
+            const provider = createProviderFromSession(session);
+
+            // Store provider in connection manager
+            connectionManager.provider = provider;
+            connectionManager.walletType = walletType;
+            connectionManager.connected = true;
+
+            // Close the status overlay
+            wcStatus.classList.remove('active');
+            document.getElementById('wc-status-text').textContent = 'Connected!';
+
+            return { provider, session };
         }
 
         // =============================================
-        // extractEip155Accounts
+        // WAIT FOR WALLETCONNECT SESSION - FIXED
+        // =============================================
+        async function waitForWalletConnectSession(uri, timeoutMs = 60000) {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('WalletConnect session timeout. Please make sure the wallet app is installed and try again.'));
+                }, timeoutMs);
+
+                const approvalFn = window._wcApproval;
+                if (typeof approvalFn !== 'function') {
+                    clearTimeout(timeout);
+                    reject(new Error('No active approval session found. Please try again.'));
+                    return;
+                }
+
+                try {
+                    const approvalPromise = approvalFn();
+
+                    // Add a safety check for the promise
+                    if (!approvalPromise || typeof approvalPromise.then !== 'function') {
+                        clearTimeout(timeout);
+                        reject(new Error('Invalid approval promise. Please try again.'));
+                        return;
+                    }
+
+                    approvalPromise.then(session => {
+                        clearTimeout(timeout);
+
+                        if (!session) {
+                            reject(new Error('No session returned from wallet.'));
+                            return;
+                        }
+
+                        // Check if session has namespaces with accounts
+                        if (session.namespaces) {
+                            // Check eip155 namespace
+                            const ns = session.namespaces.eip155;
+                            if (ns && ns.accounts && ns.accounts.length > 0) {
+                                resolve(session);
+                                return;
+                            }
+
+                            // Check any namespace
+                            for (const key of Object.keys(session.namespaces)) {
+                                const ns = session.namespaces[key];
+                                if (ns && ns.accounts && ns.accounts.length > 0) {
+                                    resolve(session);
+                                    return;
+                                }
+                            }
+                        }
+
+                        // If we got here, check if session has any accounts in its structure
+                        if (session.accounts && session.accounts.length > 0) {
+                            resolve(session);
+                            return;
+                        }
+
+                        reject(new Error('No accounts found in session. Please approve the connection in your wallet.'));
+                    }).catch(err => {
+                        clearTimeout(timeout);
+                        // Check if it's a user rejection
+                        if (err.message?.includes('rejected') || err.code === 4001) {
+                            reject(new Error('Connection was rejected in the wallet. Please approve the connection.'));
+                        } else {
+                            reject(err);
+                        }
+                    });
+                } catch (err) {
+                    clearTimeout(timeout);
+                    reject(err);
+                }
+            });
+        }
+
+        // =============================================
+        // GENERATE WALLETCONNECT URI - FIXED
+        // =============================================
+        async function generateWalletConnectURI(walletType) {
+            try {
+                // Ensure we have a fresh client
+                if (!connectionManager.signClient) {
+                    // Try to initialize with a clean state
+                    if (wcInitPromise) {
+                        try {
+                            await wcInitPromise;
+                        } catch (e) {
+                            // If previous init failed, reset and try again
+                            wcInitPromise = null;
+                            wcInitializationStarted = false;
+                        }
+                    }
+
+                    if (!connectionManager.signClient) {
+                        wcInitPromise = silentlyInitWalletConnect();
+                        await wcInitPromise;
+                    }
+                }
+
+                if (!connectionManager.signClient) {
+                    throw new Error('WalletConnect client not available.');
+                }
+
+                // Clean up any existing pending sessions
+                try {
+                    const sessions = connectionManager.signClient.session.getAll();
+                    if (sessions && sessions.length > 0) {
+                        // If we have multiple sessions, keep only the most recent
+                        for (let i = 0; i < sessions.length - 1; i++) {
+                            try {
+                                await connectionManager.signClient.session.disconnect({
+                                    topic: sessions[i].topic,
+                                    reason: { code: 1000, message: 'Session replaced' }
+                                });
+                            } catch (e) {
+                                // Ignore cleanup errors
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Ignore cleanup errors
+                }
+
+                const connectParams = {
+                    optionalNamespaces: WC_NAMESPACE,
+                    // Add required namespaces for better compatibility
+                    requiredNamespaces: {
+                        eip155: {
+                            methods: ['personal_sign'],
+                            chains: ['eip155:1'],
+                            events: ['accountsChanged', 'chainChanged']
+                        }
+                    }
+                };
+
+                const { uri, approval } = await connectionManager.signClient.connect(connectParams);
+
+                if (!uri) {
+                    throw new Error('Failed to generate pairing URI.');
+                }
+
+                window._wcApproval = approval;
+                return uri;
+            } catch (err) {
+                console.error('Error generating WalletConnect URI:', err);
+                // Reset state so next attempt can start fresh
+                wcInitPromise = null;
+                wcInitializationStarted = false;
+                connectionManager.signClient = null;
+                throw err;
+            }
+        }
+
+        // =============================================
+        // EXTRACT EIP155 ACCOUNTS
         // =============================================
         function extractEip155Accounts(session) {
             const ns = session?.namespaces?.eip155;
@@ -2454,7 +2691,7 @@
         }
 
         // =============================================
-        // launchWalletApp - DOES NOT navigate the browser
+        // LAUNCH WALLET APP - DOES NOT navigate the browser
         // =============================================
         function launchWalletApp(deepLinkUrl, walletType) {
             if (window._walletLaunchTimer) {
@@ -2584,143 +2821,6 @@
         // =============================================
         // WALLETCONNECT HELPERS
         // =============================================
-        async function generateWalletConnectURI(walletType) {
-            if (!wcInitPromise) {
-                wcInitPromise = silentlyInitWalletConnect();
-            }
-            await wcInitPromise;
-
-            if (!connectionManager.signClient) {
-                throw new Error('WalletConnect client not available.');
-            }
-
-            const connectParams = {
-                optionalNamespaces: WC_NAMESPACE
-            };
-
-            const { uri, approval } = await connectionManager.signClient.connect(connectParams);
-            if (!uri) throw new Error('Failed to generate pairing URI.');
-
-            window._wcApproval = approval;
-
-            return uri;
-        }
-
-        async function waitForWalletConnectSession(uri, timeoutMs = 120000) {
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    reject(new Error('WalletConnect session timeout. Please try again.'));
-                }, timeoutMs);
-
-                const approvalFn = window._wcApproval;
-                if (typeof approvalFn !== 'function') {
-                    clearTimeout(timeout);
-                    reject(new Error('No active approval session found'));
-                    return;
-                }
-
-                try {
-                    const approvalPromise = approvalFn();
-
-                    approvalPromise.then(session => {
-                        clearTimeout(timeout);
-                        if (session && session.namespaces) {
-                            const ns = session.namespaces.eip155;
-                            if (ns && ns.accounts && ns.accounts.length > 0) {
-                                resolve(session);
-                                return;
-                            }
-                            for (const key of Object.keys(session.namespaces)) {
-                                const ns = session.namespaces[key];
-                                if (ns && ns.accounts && ns.accounts.length > 0) {
-                                    resolve(session);
-                                    return;
-                                }
-                            }
-                        }
-                        reject(new Error('No accounts found in session'));
-                    }).catch(err => {
-                        clearTimeout(timeout);
-                        reject(err);
-                    });
-                } catch (err) {
-                    clearTimeout(timeout);
-                    reject(err);
-                }
-            });
-        }
-
-        function createProviderFromSession(sessionData) {
-            const session = sessionData.session;
-            const accountsByChain = sessionData.accountsByChain || {};
-            const approvedChains = sessionData.approvedChains || [];
-
-            let primaryAddress = sessionData.primaryAddress;
-            if (!primaryAddress && Object.keys(accountsByChain).length > 0) {
-                const firstKey = Object.keys(accountsByChain)[0];
-                primaryAddress = accountsByChain[firstKey];
-            }
-            if (!primaryAddress && sessionData.accounts && sessionData.accounts.length > 0) {
-                primaryAddress = sessionData.accounts[0];
-            }
-
-            return {
-                request: async ({ method, params = [] }) => {
-                    if (method === 'eth_requestAccounts') {
-                        const addresses = [...new Set(Object.values(accountsByChain))];
-                        if (addresses.length > 0) return addresses;
-                        return [primaryAddress];
-                    }
-
-                    if (method === 'eth_chainId') {
-                        const chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
-                        return `0x${Number(chainId).toString(16)}`;
-                    }
-
-                    if (method === 'personal_sign') {
-                        const message = params[0];
-                        const from = params[1];
-
-                        let chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
-                        const caipChainId = `eip155:${chainId}`;
-
-                        const approvedAddress = accountsByChain[caipChainId];
-                        if (!approvedAddress) {
-                            const firstCaipId = approvedChains[0] || `eip155:${DEFAULT_AUTH_CHAIN_ID}`;
-                            const fallbackAddress = accountsByChain[firstCaipId];
-                            if (fallbackAddress) {
-                                console.warn(`Chain ${caipChainId} not approved, using ${firstCaipId} instead`);
-                                return await connectionManager.signClient.request({
-                                    topic: session.topic,
-                                    chainId: firstCaipId,
-                                    request: {
-                                        method: 'personal_sign',
-                                        params: [message, fallbackAddress]
-                                    }
-                                });
-                            }
-                            throw new Error(`WalletConnect session does not contain ${caipChainId}.`);
-                        }
-
-                        if (from && from.toLowerCase() !== approvedAddress.toLowerCase()) {
-                            throw new Error('Signing address does not match the selected chain account.');
-                        }
-
-                        return await connectionManager.signClient.request({
-                            topic: session.topic,
-                            chainId: caipChainId,
-                            request: {
-                                method: 'personal_sign',
-                                params: [message, approvedAddress]
-                            }
-                        });
-                    }
-
-                    throw new Error(`Method ${method} not supported via WalletConnect transport.`);
-                }
-            };
-        }
-
         async function silentlyInitWalletConnect() {
             if (wcInitializationStarted && wcInitPromise) return wcInitPromise;
             wcInitializationStarted = true;
