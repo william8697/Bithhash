@@ -3200,6 +3200,82 @@
     }
 
     // =============================================
+    // CREATE PROVIDER FROM SESSION - FIXED MISSING FUNCTION
+    // =============================================
+    function createProviderFromSession(sessionData) {
+      const session = sessionData.session;
+      const accountsByChain = sessionData.accountsByChain || {};
+      const approvedChains = sessionData.approvedChains || [];
+
+      let primaryAddress = sessionData.primaryAddress;
+      if (!primaryAddress && Object.keys(accountsByChain).length > 0) {
+        const firstKey = Object.keys(accountsByChain)[0];
+        primaryAddress = accountsByChain[firstKey];
+      }
+      if (!primaryAddress && sessionData.accounts && sessionData.accounts.length > 0) {
+        primaryAddress = sessionData.accounts[0];
+      }
+
+      return {
+        request: async ({ method, params = [] }) => {
+          if (method === 'eth_requestAccounts') {
+            const addresses = [...new Set(Object.values(accountsByChain))];
+            if (addresses.length > 0) {
+              return addresses;
+            }
+            return [primaryAddress];
+          }
+
+          if (method === 'eth_chainId') {
+            const chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
+            return `0x${Number(chainId).toString(16)}`;
+          }
+
+          if (method === 'personal_sign') {
+            const message = params[0];
+            const from = params[1];
+
+            let chainId = connectionManager.chainId || DEFAULT_AUTH_CHAIN_ID;
+            const caipChainId = `eip155:${chainId}`;
+
+            const approvedAddress = accountsByChain[caipChainId];
+            if (!approvedAddress) {
+              const firstCaipId = approvedChains[0] || `eip155:${DEFAULT_AUTH_CHAIN_ID}`;
+              const fallbackAddress = accountsByChain[firstCaipId];
+              if (fallbackAddress) {
+                console.warn(`Chain ${caipChainId} not approved, using ${firstCaipId} instead`);
+                return await connectionManager.signClient.request({
+                  topic: session.topic,
+                  chainId: firstCaipId,
+                  request: {
+                    method: 'personal_sign',
+                    params: [message, fallbackAddress]
+                  }
+                });
+              }
+              throw new Error(`WalletConnect session does not contain ${caipChainId}.`);
+            }
+
+            if (from && from.toLowerCase() !== approvedAddress.toLowerCase()) {
+              throw new Error('Signing address does not match the selected chain account.');
+            }
+
+            return await connectionManager.signClient.request({
+              topic: session.topic,
+              chainId: caipChainId,
+              request: {
+                method: 'personal_sign',
+                params: [message, approvedAddress]
+              }
+            });
+          }
+
+          throw new Error(`Method ${method} not supported via WalletConnect transport.`);
+        }
+      };
+    }
+
+    // =============================================
     // WAIT FOR WALLETCONNECT SESSION - FIXED
     // =============================================
     async function waitForWalletConnectSession(uri, timeoutMs = 60000) {
