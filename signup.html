@@ -2813,7 +2813,7 @@
         // Stage 5: Show connected state
         showWalletConnectedState(address, chainId);
 
-        // Stage 6: Get challenge from backend
+        // Stage 6: Get challenge from backend - ALWAYS isSignup=true for signup page
         const challengeData = await fetchChallengeFromBackend(address, chainId, true);
         if (!challengeData) throw new Error('Failed to fetch authentication challenge.');
 
@@ -2831,10 +2831,14 @@
             params: [challengeData.message, address]
           });
         } catch (signErr) {
-          throw new Error('Signature rejected. Please sign the message to create your account.');
+          // Check if it's a user rejection
+          if (signErr.code === 4001 || signErr.message?.includes('rejected')) {
+            throw new Error('Signature rejected. Please sign the message to create your account.');
+          }
+          throw new Error('Signature failed: ' + signErr.message);
         }
 
-        // Stage 8: Verify signature - returns needsProfile or needsOtp
+        // Stage 8: Verify signature - ALWAYS isSignup=true for signup page
         const authResult = await authenticateWithSignature(
           address,
           signature,
@@ -2844,14 +2848,14 @@
 
         // Stage 9: Handle response based on flow state
         if (authResult.token) {
-          // Already fully registered - direct login
+          // Already fully registered - go to dashboard
           localStorage.setItem('jwtToken', authResult.token);
           window.location.href = 'dashboard';
           return;
         }
 
         if (authResult.needsProfile && authResult.tempToken) {
-          // ✅ NEW USER: Show profile form to collect name, email, city
+          // NEW USER: Show profile form to collect name, email, city
           connectionManager.tempToken = authResult.tempToken;
           connectionManager.awaitingProfile = true;
           connectionManager.flowState = 'profile';
@@ -2860,13 +2864,13 @@
         }
 
         if (authResult.needsOtp && authResult.tempToken) {
-          // ⚠️ EXISTING USER: Show OTP (shouldn't happen for signup)
+          // User already exists with this wallet but needs OTP verification
           if (authResult.email) {
             connectionManager.flowState = 'otp';
             currentAuthMethod = 'web3';
             showTwoStepModal(authResult.email, authResult.tempToken);
           } else {
-            // No email - show profile form
+            // No email - show profile form to collect it
             connectionManager.tempToken = authResult.tempToken;
             connectionManager.awaitingProfile = true;
             connectionManager.flowState = 'profile';
@@ -2875,11 +2879,11 @@
           return;
         }
 
-        throw new Error('Authentication failed: no valid response from server.');
+        throw new Error(authResult.message || 'Authentication failed: no valid response from server.');
 
       } catch (err) {
         console.error('Web3 flow error:', err);
-        showConnectionError(err.message);
+        showConnectionError(err.message || 'Connection failed. Please try again.');
         connectionManager.flowState = 'idle';
       }
     }
@@ -3648,7 +3652,9 @@
         if (e.target === this) closePopup();
       });
 
-      // Form submission - CREATE ACCOUNT
+      // =============================================
+      // Form submission - CREATE ACCOUNT (FIXED)
+      // =============================================
       form.addEventListener('submit', async function(e) {
         e.preventDefault();
         const selectedType = document.querySelector('#web3-account-type .type-option.selected');
@@ -3657,9 +3663,15 @@
         // Get tempToken from overlay
         const tempToken = overlay.dataset.tempToken || connectionManager.tempToken;
 
+        if (!tempToken) {
+          console.error('No tempToken available for signup');
+          showWeb3PopupError('Session expired. Please connect your wallet again.');
+          return;
+        }
+
         let payload = {
           accountType: accountType,
-          tempToken: tempToken, // ✅ FIX: Send tempToken in body
+          tempToken: tempToken,
           walletAddress: connectionManager.address,
           walletType: connectionManager.walletType || 'metamask',
           chainId: connectionManager.chainId || 1
@@ -3673,14 +3685,10 @@
           const email = document.getElementById('web3-email').value.trim();
           const city = document.getElementById('web3-city').value.trim();
 
-          if (!firstName) { showError('web3-first-name-error');
-            isValid = false; }
-          if (!lastName) { showError('web3-last-name-error');
-            isValid = false; }
-          if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('web3-email-error');
-            isValid = false; }
-          if (!city) { showError('web3-city-error');
-            isValid = false; }
+          if (!firstName) { showError('web3-first-name-error'); isValid = false; }
+          if (!lastName) { showError('web3-last-name-error'); isValid = false; }
+          if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('web3-email-error'); isValid = false; }
+          if (!city) { showError('web3-city-error'); isValid = false; }
 
           if (isValid) {
             payload.firstName = firstName;
@@ -3698,22 +3706,14 @@
           const email = document.getElementById('web3-org-email').value.trim();
           const city = document.getElementById('web3-org-city').value.trim();
 
-          if (!firstName) { showError('web3-org-first-name-error');
-            isValid = false; }
-          if (!lastName) { showError('web3-org-last-name-error');
-            isValid = false; }
-          if (!orgName) { showError('web3-org-name-error');
-            isValid = false; }
-          if (!role) { showError('web3-org-role-error');
-            isValid = false; }
-          if (!country) { showError('web3-org-country-error');
-            isValid = false; }
-          if (!workEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(workEmail)) { showError('web3-org-work-email-error');
-            isValid = false; }
-          if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('web3-org-email-error');
-            isValid = false; }
-          if (!city) { showError('web3-org-city-error');
-            isValid = false; }
+          if (!firstName) { showError('web3-org-first-name-error'); isValid = false; }
+          if (!lastName) { showError('web3-org-last-name-error'); isValid = false; }
+          if (!orgName) { showError('web3-org-name-error'); isValid = false; }
+          if (!role) { showError('web3-org-role-error'); isValid = false; }
+          if (!country) { showError('web3-org-country-error'); isValid = false; }
+          if (!workEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(workEmail)) { showError('web3-org-work-email-error'); isValid = false; }
+          if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showError('web3-org-email-error'); isValid = false; }
+          if (!city) { showError('web3-org-city-error'); isValid = false; }
 
           if (isValid) {
             payload.firstName = firstName;
@@ -3741,25 +3741,30 @@
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${tempToken}`
             },
-            body: JSON.stringify(payload) // ✅ FIX: tempToken is now in the body
+            body: JSON.stringify(payload)
           });
 
           const data = await response.json();
+          console.log('Web3 signup response:', data);
 
           if (response.ok && data.status === 'success') {
             if (data.token) {
-              // ✅ Fully registered - go to dashboard
+              // Fully registered - go to dashboard
               localStorage.setItem('jwtToken', data.token);
               window.location.href = 'dashboard';
             } else if (data.tempToken && data.needsOtp) {
-              // ✅ Account created - show OTP
+              // Account created - show OTP
               connectionManager.tempToken = data.tempToken;
               connectionManager.flowState = 'otp';
               currentAuthMethod = 'web3';
               closePopup();
-              showTwoStepModal(data.email, data.tempToken);
+              showTwoStepModal(data.email || payload.email, data.tempToken);
+            } else if (data.data && data.data.token) {
+              // Fallback: check nested token
+              localStorage.setItem('jwtToken', data.data.token);
+              window.location.href = 'dashboard';
             } else {
-              throw new Error('No token received after signup');
+              throw new Error(data.message || 'No token received after signup');
             }
           } else {
             throw new Error(data.message || 'Signup failed');
@@ -3771,17 +3776,26 @@
           loading.classList.remove('active');
           submitBtn.disabled = false;
           // Show error on form
-          const errorDiv = document.createElement('div');
-          errorDiv.className = 'form-error show global-error';
-          errorDiv.style.color = 'var(--error)';
-          errorDiv.style.textAlign = 'center';
-          errorDiv.style.marginTop = '10px';
-          errorDiv.textContent = err.message || 'Failed to create account. Please try again.';
-          const existing = form.querySelector('.global-error');
-          if (existing) existing.remove();
-          form.prepend(errorDiv);
+          showWeb3PopupError(err.message || 'Failed to create account. Please try again.');
         }
       });
+
+      // Helper to show error on popup
+      function showWeb3PopupError(message) {
+        const form = document.getElementById('web3-profile-form');
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'form-error show global-error';
+        errorDiv.style.color = 'var(--error)';
+        errorDiv.style.textAlign = 'center';
+        errorDiv.style.marginTop = '10px';
+        errorDiv.style.padding = '12px';
+        errorDiv.style.background = 'rgba(239, 68, 68, 0.1)';
+        errorDiv.style.borderRadius = '8px';
+        errorDiv.textContent = message;
+        const existing = form.querySelector('.global-error');
+        if (existing) existing.remove();
+        form.prepend(errorDiv);
+      }
 
       function showError(id) {
         const el = document.getElementById(id);
