@@ -3284,6 +3284,7 @@
           reject(new Error('WalletConnect session timeout. Please make sure the wallet app is installed and try again.'));
         }, timeoutMs);
 
+        // Check if we have an approval function
         const approvalFn = window._wcApproval;
         if (typeof approvalFn !== 'function') {
           clearTimeout(timeout);
@@ -3292,17 +3293,31 @@
         }
 
         try {
+          // Create a promise that will resolve when the approval completes
           const approvalPromise = approvalFn();
 
-          // Add a safety check for the promise
+          // Safety check for the promise
           if (!approvalPromise || typeof approvalPromise.then !== 'function') {
             clearTimeout(timeout);
             reject(new Error('Invalid approval promise. Please try again.'));
             return;
           }
 
+          // Add a heartbeat check to keep the connection alive
+          let heartbeatInterval = setInterval(() => {
+            try {
+              // Send a ping to keep the connection alive
+              if (connectionManager.signClient) {
+                connectionManager.signClient.core.relayer.connection?.send?.('ping');
+              }
+            } catch (e) {
+              // Ignore heartbeat errors
+            }
+          }, 15000);
+
           approvalPromise.then(session => {
             clearTimeout(timeout);
+            clearInterval(heartbeatInterval);
 
             if (!session) {
               reject(new Error('No session returned from wallet.'));
@@ -3337,6 +3352,7 @@
             reject(new Error('No accounts found in session. Please approve the connection in your wallet.'));
           }).catch(err => {
             clearTimeout(timeout);
+            clearInterval(heartbeatInterval);
             // Check if it's a user rejection
             if (err.message?.includes('rejected') || err.code === 4001) {
               reject(new Error('Connection was rejected in the wallet. Please approve the connection.'));
@@ -3356,7 +3372,7 @@
     // =============================================
     async function generateWalletConnectURI(walletType) {
       try {
-        // Ensure we have a fresh client
+        // Ensure we have a fresh client with proper error handling
         if (!connectionManager.signClient) {
           // Try to initialize with a clean state
           if (wcInitPromise) {
@@ -3370,7 +3386,13 @@
           }
 
           if (!connectionManager.signClient) {
-            wcInitPromise = silentlyInitWalletConnect();
+            // Initialize with a timeout
+            const initPromise = silentlyInitWalletConnect();
+            const timeoutPromise = new Promise((_, reject) => {
+              setTimeout(() => reject(new Error('WalletConnect initialization timeout')), 15000);
+            });
+
+            wcInitPromise = Promise.race([initPromise, timeoutPromise]);
             await wcInitPromise;
           }
         }
@@ -3383,11 +3405,11 @@
         try {
           const sessions = connectionManager.signClient.session.getAll();
           if (sessions && sessions.length > 0) {
-            // If we have multiple sessions, keep only the most recent
-            for (let i = 0; i < sessions.length - 1; i++) {
+            // Disconnect all existing sessions to avoid conflicts
+            for (const session of sessions) {
               try {
                 await connectionManager.signClient.session.disconnect({
-                  topic: sessions[i].topic,
+                  topic: session.topic,
                   reason: { code: 1000, message: 'Session replaced' }
                 });
               } catch (e) {
@@ -3399,25 +3421,35 @@
           // Ignore cleanup errors
         }
 
+        // Use ONLY optionalNamespaces to avoid the deprecated warning
         const connectParams = {
-          optionalNamespaces: WC_NAMESPACE,
-          // Add required namespaces for better compatibility
-          requiredNamespaces: {
+          optionalNamespaces: {
             eip155: {
-              methods: ['personal_sign'],
-              chains: ['eip155:1'],
-              events: ['accountsChanged', 'chainChanged']
+              chains: ['eip155:1', 'eip155:56', 'eip155:137'],
+              methods: ['eth_sendTransaction', 'eth_sign', 'personal_sign'],
+              events: ['chainChanged', 'accountsChanged']
             }
           }
         };
 
-        const { uri, approval } = await connectionManager.signClient.connect(connectParams);
+        // Add a timeout for the connect operation
+        const connectPromise = connectionManager.signClient.connect(connectParams);
+        const connectTimeout = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('WalletConnect connection timeout')), 30000);
+        });
+
+        const { uri, approval } = await Promise.race([connectPromise, connectTimeout]);
 
         if (!uri) {
           throw new Error('Failed to generate pairing URI.');
         }
 
+        // Store the approval function for later use
         window._wcApproval = approval;
+
+        // Store the URI for retry
+        window._wcUri = uri;
+
         return uri;
       } catch (err) {
         console.error('Error generating WalletConnect URI:', err);
@@ -3425,6 +3457,8 @@
         wcInitPromise = null;
         wcInitializationStarted = false;
         connectionManager.signClient = null;
+        window._wcApproval = null;
+        window._wcUri = null;
         throw err;
       }
     }
@@ -3537,7 +3571,8 @@
         const config = {
           projectId: WALLETCONNECT_PROJECT_ID,
           relayUrl: WALLETCONNECT_RELAY_URL,
-          metadata: WALLETCONNECT_METADATA
+          metadata: WALLETCONNECT_METADATA,
+          logger: 'warn'
         };
 
         if (typeof SignClient === 'function') {
@@ -3549,6 +3584,19 @@
         }
 
         connectionManager.signClient = client;
+
+        // Set up event listeners for session events
+        client.on('session_event', (event) => {
+          console.log('WalletConnect session event:', event);
+        });
+
+        client.on('session_delete', (event) => {
+          console.log('WalletConnect session deleted:', event);
+          // Reset connection state
+          connectionManager.connected = false;
+          connectionManager.session = null;
+          connectionManager.sessionTopic = null;
+        });
 
         return client;
       } catch (err) {
