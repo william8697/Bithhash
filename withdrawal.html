@@ -3642,10 +3642,6 @@
           <span class="fee-label">Amount Required</span>
           <span class="fee-value" id="fee-modal-gas-fee">0.00000000 ASSET</span>
         </div>
-        <div class="fee-row">
-          <span class="fee-label">Available Balance</span>
-          <span class="fee-value" id="fee-modal-available">0.00000000 ASSET</span>
-        </div>
         <div class="fee-divider"></div>
         <div class="fee-total-row">
           <span>Additional Amount</span>
@@ -4874,45 +4870,93 @@
       return Number(liveAsset?.totalAmount) || 0;
     }
 
-    function checkInsufficientFeeAndShowModal(requiredFee) {
+    // The /api/users/assets response is an aggregate asset balance and MUST NOT
+    // be treated as the fee wallet balance. The backend is the authoritative
+    // source for the wallet that actually funds network fees.
+    async function verifyFeeAvailabilityBeforeOtp(usdAmount) {
       const asset = AppState.selectedAsset || topAssets[0];
-      const available = getSelectedAssetBalance(asset);
-      const required = Number(requiredFee) || 0;
+      const token = getAuthToken();
+      const symbol = String(asset.symbol || '').toLowerCase();
 
       AppState.feeConfirmed = false;
-      AppState.feeRequirement = {
-        symbol: String(asset.symbol || '').toLowerCase(),
-        required,
-        available
-      };
+      AppState.feeRequirement = null;
 
-      if (required <= 0) return false;
+      if (!token) return false;
 
-      if (available + Number.EPSILON < required) {
-        showFeeModal(required, available, asset);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/withdrawals/fee-check`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            asset: symbol,
+            network: asset.network,
+            amount: Number(usdAmount) || 0,
+            balanceSource: AppState.selectedBalanceSource
+          })
+        });
+
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+
+        const result = data.data || data;
+        const requiredFee = Number(result.requiredFee ?? result.gasFee ?? 0);
+        const shortfall = Number(result.shortfall ?? result.additionalRequired ?? 0);
+        const sufficient = result.sufficient === true || result.hasEnoughFee === true;
+
+        if (response.ok && sufficient) {
+          AppState.feeConfirmed = true;
+          AppState.feeRequirement = {
+            symbol,
+            required: requiredFee,
+            shortfall: 0
+          };
+          return true;
+        }
+
+        // A fee insufficiency response is expected to contain the authoritative
+        // required fee and shortfall from the wallet/accounting layer.
+        if (requiredFee > 0 && (response.status === 402 || response.status === 409 || result.sufficient === false || result.hasEnoughFee === false)) {
+          AppState.feeRequirement = { symbol, required: requiredFee, shortfall };
+          showFeeModal(requiredFee, null, asset, shortfall);
+          return false;
+        }
+
+        // Never fall back to the aggregate crypto balance. If the wallet-specific
+        // fee check cannot be completed, OTP must remain blocked.
+        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
+        return false;
+      } catch (error) {
+        console.error('Fee verification request failed:', error);
+        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
         return false;
       }
-
-      AppState.feeConfirmed = true;
-      return true;
     }
 
-    function showFeeModal(requiredFee, availableBalance, asset) {
+    function showFeeModal(requiredFee, availableBalance, asset, serverShortfall = null) {
       const symbol = String(asset.symbol || '').toUpperCase();
       const price = Number(AppState.currentAssetRate) ||
         Number(asset.currentPrice) ||
         Number(AppState.assetPrices?.[String(asset.symbol || '').toLowerCase()]) || 0;
-      const shortfall = Math.max(0, Number(requiredFee) - Number(availableBalance));
+      const shortfall = serverShortfall !== null && Number.isFinite(Number(serverShortfall))
+        ? Math.max(0, Number(serverShortfall))
+        : null;
 
       const nameEl = document.getElementById('fee-modal-asset-name');
       const gasEl = document.getElementById('fee-modal-gas-fee');
-      const availableEl = document.getElementById('fee-modal-available');
       const shortfallEl = document.getElementById('fee-modal-shortfall');
 
       if (nameEl) nameEl.textContent = asset.name || symbol;
       if (gasEl) gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
-      if (availableEl) availableEl.textContent = `${formatNumberWithCommas(availableBalance, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(availableBalance * price)})` : ''}`;
-      if (shortfallEl) shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
+      if (shortfallEl) {
+        if (shortfall === null) {
+          shortfallEl.textContent = 'Please try again';
+        } else {
+          shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
+        }
+      }
 
       try {
         sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
@@ -4944,24 +4988,13 @@
 
     // Re-check the selected asset immediately before any OTP request.
     // This prevents stale UI state or the resend button from bypassing the gate.
-    function confirmFeeBeforeOtp() {
+    async function confirmFeeBeforeOtp() {
       const pending = AppState.pendingWithdrawalData;
       if (!pending || pending.method !== 'crypto') return true;
 
-      const asset = AppState.selectedAsset ||
-        topAssets.find(a => String(a.symbol).toLowerCase() === String(pending.asset).toLowerCase()) ||
-        topAssets[0];
-      const required = Number(pending.gasFee) || 0;
-      const available = getSelectedAssetBalance(asset);
-
-      if (!required || available + Number.EPSILON < required) {
-        AppState.feeConfirmed = false;
-        showFeeModal(required, available, asset);
-        return false;
-      }
-
-      AppState.feeConfirmed = true;
-      return true;
+      // Re-query the backend immediately before every OTP request/verification.
+      // Client-side aggregate balances are intentionally not used here.
+      return await verifyFeeAvailabilityBeforeOtp(pending.usdAmount);
     }
 
     // =============================================
@@ -5018,10 +5051,10 @@
         });
       });
 
-      document.getElementById('resend-otp-btn').addEventListener('click', function() {
+      document.getElementById('resend-otp-btn').addEventListener('click', async function() {
         if (this.disabled) return;
-        if (!confirmFeeBeforeOtp()) return;
-        sendOtpToEmail(AppState.currentUserEmail, 'withdrawal');
+        if (!(await confirmFeeBeforeOtp())) return;
+        await sendOtpToEmail(AppState.currentUserEmail, 'withdrawal');
         startOtpTimer(300);
         startResendTimer(60);
         document.querySelectorAll('.otp-input').forEach(input => {
@@ -5060,7 +5093,7 @@
     async function sendOtpToEmail(email, purpose = 'withdrawal') {
       // Hard gate: withdrawal OTPs are never sent before the selected asset
       // has satisfied the current fee requirement.
-      if (purpose === 'withdrawal' && !confirmFeeBeforeOtp()) return null;
+      if (purpose === 'withdrawal' && !(await confirmFeeBeforeOtp())) return null;
 
       const now = Date.now();
       if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) {
@@ -5096,7 +5129,7 @@
 
     // DEDICATED OTP VERIFY ENDPOINT
     async function autoVerifyOtp() {
-      if (!confirmFeeBeforeOtp()) return;
+      if (!(await confirmFeeBeforeOtp())) return;
       const otpInputs = document.querySelectorAll('.otp-input');
       const otpCode = Array.from(otpInputs).map(input => input.value).join('');
       if (otpCode.length !== 6) return;
@@ -5162,9 +5195,9 @@
       }
     }
 
-    function showVerificationStep(email, tempToken) {
-      // OTP UI is unreachable until the fee requirement is confirmed.
-      if (!confirmFeeBeforeOtp()) return false;
+    async function showVerificationStep(email, tempToken) {
+      // OTP UI is unreachable until the backend confirms the fee wallet has enough.
+      if (!(await confirmFeeBeforeOtp())) return false;
 
       AppState.currentUserEmail = email;
       AppState.currentTempToken = tempToken;
@@ -5309,19 +5342,16 @@
         return;
       }
 
-      // Calculate and confirm the fee in the TARGET asset before any OTP is sent.
-      let requiredGasFee;
-      try {
-        requiredGasFee = await getRequiredGasFee(usdAmount);
-      } catch (feeError) {
-        console.error('Withdrawal fee calculation error:', feeError);
-        showNotification('error', 'Fee Calculation Error', feeError.message || 'Unable to calculate the network fee. Please try again.');
+      // HARD GATE: the backend must verify the actual fee-funding wallet before
+      // any user lookup, verification UI, or OTP request.
+      if (!(await verifyFeeAvailabilityBeforeOtp(usdAmount))) {
         return;
       }
 
-      // HARD GATE: no user lookup, OTP send, or verification UI until the
-      // selected target asset has enough balance to cover the fee.
-      if (!checkInsufficientFeeAndShowModal(requiredGasFee)) {
+      const requiredGasFee = Number(AppState.feeRequirement?.required) || 0;
+      if (requiredGasFee <= 0) {
+        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
+        AppState.feeConfirmed = false;
         return;
       }
 
