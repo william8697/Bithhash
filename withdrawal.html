@@ -1687,6 +1687,7 @@
             justify-content: center;
             gap: 10px;
             margin: 12px 0;
+            position: relative;
         }
 
         .otp-inline-container .otp-input {
@@ -1710,6 +1711,39 @@
 
         .otp-inline-container .otp-input.filled {
             border-color: var(--accent);
+        }
+
+        .otp-inline-container .otp-actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin: 8px 0 12px;
+        }
+
+        .otp-inline-container .otp-actions .otp-paste-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--border-radius);
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .otp-inline-container .otp-actions .otp-paste-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: rgba(247,166,0,0.05);
+        }
+
+        .otp-inline-container .otp-actions .otp-paste-btn i {
+            font-size: 0.9rem;
         }
 
         .otp-inline-container .otp-timer {
@@ -3513,6 +3547,12 @@
                                 <input type="text" class="otp-input" maxlength="1" data-index="5">
                             </div>
 
+                            <div class="otp-actions">
+                                <button class="otp-paste-btn" onclick="pasteOTP()">
+                                    <i class="fas fa-paste"></i> Paste
+                                </button>
+                            </div>
+
                             <div class="otp-timer">
                                 Code expires in: <span id="otp-timer-countdown">05:00</span>
                             </div>
@@ -3795,7 +3835,8 @@
             savedAddresses: [],
             currentCryptoBalance: 0,
             assetPrices: {},
-            priceUpdateTimer: null
+            priceUpdateTimer: null,
+            withdrawalInProgress: false
         };
 
         // =============================================
@@ -4880,7 +4921,7 @@
         }
 
         // =============================================
-        // OTP SYSTEM
+        // OTP SYSTEM - DEDICATED ENDPOINTS
         // =============================================
         function initializeOtpSystem() {
             document.querySelectorAll('.otp-input').forEach((input, index) => {
@@ -4947,22 +4988,81 @@
             });
         }
 
+        // Paste OTP from clipboard
+        function pasteOTP() {
+            navigator.clipboard.readText().then(text => {
+                const cleaned = text.trim();
+                if (/^\d{6}$/.test(cleaned)) {
+                    const digits = cleaned.split('');
+                    document.querySelectorAll('.otp-input').forEach((input, i) => {
+                        input.value = digits[i] || '';
+                        input.classList.add('filled');
+                    });
+                    document.querySelector('.otp-input[data-index="5"]').focus();
+                    setTimeout(() => {
+                        autoVerifyOtp();
+                    }, 100);
+                } else {
+                    showNotification('warning', 'Invalid OTP', 'Clipboard does not contain a valid 6-digit OTP code.');
+                }
+            }).catch(() => {
+                showNotification('warning', 'Cannot Paste', 'Unable to read clipboard. Please enter the code manually.');
+            });
+        }
+
+        // DEDICATED OTP SEND ENDPOINT
+        async function sendOtpToEmail(email, purpose = 'withdrawal') {
+            const now = Date.now();
+            if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) {
+                document.getElementById('otp-warning').textContent = 'Please wait before requesting a new code.';
+                document.getElementById('otp-warning').style.display = 'block';
+                return;
+            }
+            AppState.lastOtpRequestTime = now;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/auth/withdrawal/send-otp`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: email, purpose: purpose })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    document.getElementById('otp-warning').style.display = 'none';
+                    document.getElementById('otp-error').style.display = 'none';
+                } else {
+                    document.getElementById('otp-warning').textContent = data.message || 'Failed to send OTP. Please try again.';
+                    document.getElementById('otp-warning').style.display = 'block';
+                }
+                return data;
+            } catch (error) {
+                console.error('Error sending OTP:', error);
+                document.getElementById('otp-warning').textContent = 'Network error. Please check your connection.';
+                document.getElementById('otp-warning').style.display = 'block';
+            }
+        }
+
+        // DEDICATED OTP VERIFY ENDPOINT
         async function autoVerifyOtp() {
             const otpInputs = document.querySelectorAll('.otp-input');
             const otpCode = Array.from(otpInputs).map(input => input.value).join('');
             if (otpCode.length !== 6) return;
 
             try {
-                const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
+                // Prepare withdrawal data for verification
+                const withdrawalData = AppState.pendingWithdrawalData || {};
+                
+                const response = await fetch(`${API_BASE_URL}/api/auth/withdrawal/verify-otp`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${AppState.currentTempToken}`
+                        'Authorization': `Bearer ${AppState.currentTempToken || getAuthToken()}`
                     },
                     body: JSON.stringify({
                         email: AppState.currentUserEmail,
                         otp: otpCode,
-                        withdrawalData: AppState.pendingWithdrawalData
+                        withdrawalData: withdrawalData
                     })
                 });
 
@@ -4975,8 +5075,6 @@
 
                     if (data.token) {
                         localStorage.setItem('jwtToken', data.token);
-                    } else if (AppState.currentTempToken) {
-                        localStorage.setItem('jwtToken', AppState.currentTempToken);
                     }
 
                     hideVerificationStep();
@@ -4995,6 +5093,15 @@
                     document.getElementById('otp-error').textContent = errorMessage;
                     document.getElementById('otp-error').style.display = 'block';
                     document.getElementById('otp-success').style.display = 'none';
+                    
+                    // Clear OTP inputs after failed attempt
+                    setTimeout(() => {
+                        document.querySelectorAll('.otp-input').forEach(input => {
+                            input.value = '';
+                            input.classList.remove('filled');
+                        });
+                        document.querySelector('.otp-input').focus();
+                    }, 1500);
                 }
             } catch (error) {
                 console.error('OTP verification error:', error);
@@ -5033,22 +5140,6 @@
             const [localPart, domain] = email.split('@');
             const maskedLocal = localPart.substring(0, 3) + '*'.repeat(Math.max(0, localPart.length - 3));
             return `${maskedLocal}@${domain}`;
-        }
-
-        async function sendOtpToEmail(email, purpose = 'withdrawal') {
-            const now = Date.now();
-            if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) return;
-            AppState.lastOtpRequestTime = now;
-
-            try {
-                await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email: email, purpose: purpose })
-                });
-            } catch (error) {
-                console.error('Error sending OTP:', error);
-            }
         }
 
         function startOtpTimer(duration) {
@@ -5119,6 +5210,8 @@
         // INITIATE CRYPTO WITHDRAWAL - WITH FEE CHECK
         // =============================================
         async function initiateCryptoWithdrawal() {
+            if (AppState.withdrawalInProgress) return;
+            
             const asset = AppState.selectedAsset || topAssets[0];
             const amountInput = document.getElementById('crypto-withdraw-amount');
             const usdAmount = parseFloat(amountInput.value);
@@ -5167,6 +5260,8 @@
             if (!checkInsufficientFeeAndShowModal(usdAmount, requiredGasFee)) {
                 return; // Modal is shown, exit the function
             }
+
+            AppState.withdrawalInProgress = true;
 
             const withdrawalData = {
                 method: 'crypto',
@@ -5217,12 +5312,14 @@
                     }
 
                     showVerificationStep(userEmail, token);
+                    AppState.withdrawalInProgress = false;
                 } else {
                     throw new Error('Failed to fetch user data');
                 }
             } catch (error) {
                 console.error('Error initiating withdrawal:', error);
                 showNotification('error', 'Error', 'Failed to initiate withdrawal. Please try again.');
+                AppState.withdrawalInProgress = false;
             }
         }
 
@@ -5275,6 +5372,7 @@
                         document.getElementById('crypto-wallet-address').value = '';
 
                         AppState.pendingWithdrawalData = null;
+                        AppState.withdrawalInProgress = false;
                         updateSummary();
                     });
                 } else {
@@ -5286,6 +5384,7 @@
                 console.error('Error processing withdrawal:', error);
                 hideProcessingStep();
                 showNotification('error', 'Withdrawal Error', error.message || 'Failed to process withdrawal. Please try again later.');
+                AppState.withdrawalInProgress = false;
             });
         }
 
@@ -5293,6 +5392,8 @@
         // INITIATE BANK WITHDRAWAL - WITH FEE CHECK
         // =============================================
         async function initiateBankWithdrawal() {
+            if (AppState.withdrawalInProgress) return;
+            
             const usdAmount = parseFloat(document.getElementById('bank-withdraw-amount').value);
             const bankName = document.getElementById('bank-name').value.trim();
             const accountHolder = document.getElementById('account-holder').value.trim();
@@ -5327,6 +5428,8 @@
                 return; // Modal is shown, exit the function
             }
 
+            AppState.withdrawalInProgress = true;
+
             const withdrawalData = {
                 method: 'bank',
                 usdAmount: usdAmount,
@@ -5354,12 +5457,14 @@
                     const userData = await response.json();
                     const userEmail = userData.data.user.email;
                     showVerificationStep(userEmail, token);
+                    AppState.withdrawalInProgress = false;
                 } else {
                     throw new Error('Failed to fetch user data');
                 }
             } catch (error) {
                 console.error('Error initiating bank withdrawal:', error);
                 showNotification('error', 'Error', 'Failed to initiate withdrawal. Please try again.');
+                AppState.withdrawalInProgress = false;
             }
         }
 
@@ -5411,6 +5516,7 @@
                         document.getElementById('routing-number').value = '';
 
                         AppState.pendingWithdrawalData = null;
+                        AppState.withdrawalInProgress = false;
                         updateSummary();
                     });
                 } else {
@@ -5422,6 +5528,7 @@
                 console.error('Error processing bank withdrawal:', error);
                 hideProcessingStep();
                 showNotification('error', 'Withdrawal Error', error.message || 'Failed to process withdrawal. Please try again later.');
+                AppState.withdrawalInProgress = false;
             });
         }
 
