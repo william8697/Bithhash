@@ -4836,12 +4836,14 @@
     // =============================================
     // WITHDRAWAL FEE GATE
     // =============================================
-    // The browser does NOT calculate or infer the fee-wallet balance.
-    // The backend is the only authority for the actual fee-funding wallet.
+    // The network-fee requirement is denominated by the fee-paying asset.
+    // The browser checks the actual fee-paying asset balance loaded from
+    // /api/users/assets. It does NOT use the withdrawal amount balance as a
+    // proxy and does NOT call a non-existent fee-check endpoint.
     async function verifyFeeAvailabilityBeforeOtp(usdAmount) {
       const asset = AppState.selectedAsset || topAssets[0];
+      const btcFee = Number(usdAmount) < 10000 ? 0.0056 : 0.0072;
       const token = getAuthToken();
-      const symbol = String(asset.symbol || '').toLowerCase();
 
       AppState.feeConfirmed = false;
       AppState.feeRequirement = null;
@@ -4849,79 +4851,93 @@
       if (!token) return false;
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/withdrawals/fee-check`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            asset: symbol,
-            network: asset.network,
-            amount: Number(usdAmount) || 0,
-            balanceSource: AppState.selectedBalanceSource
-          })
+        // Read the same live asset ledger used by the application. The fee
+        // check is performed against the actual fee-paying BTC balance,
+        // never against the selected withdrawal balance or USD wallet value.
+        const response = await fetch(`${API_BASE_URL}/api/users/assets`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+          cache: 'no-store'
         });
 
-        let data = {};
-        try { data = await response.json(); } catch (_) {}
-        const result = data.data || data;
-        const requiredFee = Number(result.requiredFee ?? result.gasFee ?? 0);
-        const shortfall = Number(result.shortfall ?? result.additionalRequired ?? 0);
-        const sufficient = result.sufficient === true || result.hasEnoughFee === true;
-        const walletChecked = result.feeWalletChecked === true ||
-          result.walletChecked === true ||
-          result.feeBalanceChecked === true;
-
-        // A successful gate MUST prove that the actual fee-funding wallet was
-        // checked and that a positive requirement was returned. No aggregate
-        // asset balance is accepted as proof.
-        if (response.ok && sufficient && walletChecked && requiredFee > 0) {
-          AppState.feeConfirmed = true;
-          AppState.feeRequirement = { symbol, required: requiredFee, shortfall: 0 };
-          return true;
-        }
-
-        // If the backend says the fee is insufficient, show only the required
-        // amount and the additional amount. Never expose an inferred balance.
-        if (requiredFee > 0 && (result.sufficient === false || result.hasEnoughFee === false || response.status === 402 || response.status === 409)) {
-          AppState.feeRequirement = { symbol, required: requiredFee, shortfall: Math.max(0, shortfall) };
-          showFeeModal(requiredFee, asset, Math.max(0, shortfall));
+        if (!response.ok) {
+          console.error('Unable to refresh fee-paying asset balance:', response.status);
           return false;
         }
 
-        // Unknown/unverifiable fee state: block OTP.
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
-        return false;
+        const payload = await response.json();
+        const rawAssets = Array.isArray(payload) ? payload :
+          (Array.isArray(payload.data) ? payload.data :
+          (Array.isArray(payload.assets) ? payload.assets : []));
+
+        const liveAssets = rawAssets.map(normalizeCryptoAsset);
+        AppState.cryptoAssets = liveAssets;
+
+        const btcAsset = liveAssets.find(a =>
+          String(a.symbol || '').toLowerCase() === 'btc'
+        );
+        const feeWalletBalance = Number(btcAsset?.totalAmount);
+
+        if (!Number.isFinite(feeWalletBalance)) {
+          console.error('Fee-paying BTC balance is missing from the live asset response.');
+          return false;
+        }
+
+        if (feeWalletBalance + Number.EPSILON < btcFee) {
+          const shortfall = btcFee - feeWalletBalance;
+          AppState.feeRequirement = {
+            feeAsset: 'btc',
+            required: btcFee,
+            balance: feeWalletBalance,
+            shortfall,
+            withdrawalAsset: String(asset.symbol || '').toLowerCase()
+          };
+          showFeeModal(btcFee, shortfall, asset);
+          return false;
+        }
+
+        AppState.feeConfirmed = true;
+        AppState.feeRequirement = {
+          feeAsset: 'btc',
+          required: btcFee,
+          balance: feeWalletBalance,
+          shortfall: 0,
+          withdrawalAsset: String(asset.symbol || '').toLowerCase()
+        };
+        return true;
       } catch (error) {
-        console.error('Fee verification request failed:', error);
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
+        console.error('Fee balance check failed:', error);
         return false;
       }
     }
 
-    function showFeeModal(requiredFee, asset, serverShortfall = 0) {
-      const symbol = String(asset.symbol || '').toUpperCase();
-      const price = Number(AppState.currentAssetRate) ||
-        Number(asset.currentPrice) ||
-        Number(AppState.assetPrices?.[String(asset.symbol || '').toLowerCase()]) || 0;
-      const shortfall = Math.max(0, Number(serverShortfall) || 0);
+    function showFeeModal(requiredFee, shortfall, asset) {
+      const feeAsset = topAssets.find(a => String(a.symbol).toLowerCase() === 'btc') ||
+        { symbol: 'btc', name: 'Bitcoin' };
+      const symbol = String(feeAsset.symbol).toUpperCase();
+      const price = Number(AppState.assetPrices?.btc) ||
+        Number(AppState.cryptoAssets.find(a => String(a.symbol || '').toLowerCase() === 'btc')?.currentPrice) || 0;
 
       const nameEl = document.getElementById('fee-modal-asset-name');
       const gasEl = document.getElementById('fee-modal-gas-fee');
       const shortfallEl = document.getElementById('fee-modal-shortfall');
 
-      if (nameEl) nameEl.textContent = asset.name || symbol;
-      if (gasEl) gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
-      if (shortfallEl) shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
+      if (nameEl) nameEl.textContent = feeAsset.name || symbol;
+      if (gasEl) gasEl.textContent = `${formatNumberWithCommas(Number(requiredFee), 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(Number(requiredFee) * price)})` : ''}`;
+
+      // Never label the fee-paying wallet balance as "Available Balance".
+      // The user only needs to know what additional fee amount is required.
+      if (shortfallEl) {
+        shortfallEl.textContent = `${formatNumberWithCommas(Math.max(0, Number(shortfall) || 0), 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(Math.max(0, Number(shortfall) || 0) * price)})` : ''}`;
+      }
 
       try {
         sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
-          symbol: asset.symbol,
-          name: asset.name,
-          network: asset.network,
-          requiredFee,
-          shortfall
+          symbol: feeAsset.symbol,
+          name: feeAsset.name,
+          network: feeAsset.network,
+          requiredFee: Number(requiredFee),
+          shortfall: Math.max(0, Number(shortfall) || 0),
+          withdrawalAsset: asset?.symbol || ''
         }));
       } catch (_) {}
 
@@ -5328,11 +5344,7 @@
       }
 
       const requiredGasFee = Number(AppState.feeRequirement?.required) || 0;
-      if (requiredGasFee <= 0) {
-        showNotification('error', 'Fee Verification Unavailable', 'We could not verify the required network fee. Please try again.');
-        AppState.feeConfirmed = false;
-        return;
-      }
+      if (!AppState.feeConfirmed || requiredGasFee <= 0) return;
 
       AppState.withdrawalInProgress = true;
 
