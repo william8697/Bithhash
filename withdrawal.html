@@ -3634,8 +3634,8 @@
       <div class="fee-modal-icon">
         <i class="fas fa-gas-pump"></i>
       </div>
-      <h2>Additional Fee Required</h2>
-      <p class="fee-subtitle">Your withdrawal can continue once your <span id="fee-modal-asset-name">asset</span> balance has enough to cover the required network fee.</p>
+      <h2>Network Fee Required</h2>
+      <p class="fee-subtitle">Your <span id="fee-modal-asset-name">asset</span> balance does not currently cover the network fee required for this withdrawal. No verification code has been sent.</p>
 
       <div class="fee-details" id="fee-details">
         <div class="fee-row">
@@ -3648,20 +3648,20 @@
         </div>
         <div class="fee-divider"></div>
         <div class="fee-total-row">
-          <span>Amount to Deposit</span>
+          <span>Additional Balance Needed</span>
           <span class="fee-total-value" id="fee-modal-shortfall">0.00000000 ASSET</span>
         </div>
       </div>
 
       <div class="fee-actions">
         <button class="btn btn-deposit" onclick="redirectToDeposit()">
-          <i class="fas fa-wallet"></i> Deposit Fee
+          <i class="fas fa-wallet"></i> Add Funds
         </button>
         <button class="btn btn-cancel" onclick="closeFeeModal()">
           Cancel
         </button>
       </div>
-      <p class="fee-extra-info">The fee is handled separately from your withdrawal amount. Verification will continue after the fee requirement is satisfied.</p>
+      <p class="fee-extra-info">The network fee is separate from the withdrawal amount. Verification can begin only after the required balance is confirmed.</p>
     </div>
   </div>
 
@@ -4936,6 +4936,19 @@
     }
 
     function redirectToDeposit() {
+      // Preserve only the selected asset/network context for the deposit page.
+      // The deposit page must independently display its own current deposit
+      // requirements; do not treat client-side session data as fee confirmation.
+      const asset = AppState.selectedAsset || topAssets[0];
+      try {
+        sessionStorage.setItem('depositContext', JSON.stringify({
+          symbol: asset.symbol,
+          name: asset.name,
+          network: asset.network
+        }));
+      } catch (e) {
+        console.warn('Unable to preserve deposit asset context:', e);
+      }
       window.location.href = 'deposit.html';
     }
 
@@ -5031,6 +5044,22 @@
 
     // DEDICATED OTP SEND ENDPOINT
     async function sendOtpToEmail(email, purpose = 'withdrawal') {
+      if (purpose === 'withdrawal') {
+        const pending = AppState.pendingWithdrawalData;
+        if (pending && pending.method === 'crypto') {
+          const asset = AppState.cryptoAssets.find(
+            a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
+          ) || AppState.selectedAsset || topAssets[0];
+          const requiredFee = Number(pending.gasFee) || 0;
+          const availableFeeBalance = Number(asset?.totalAmount) || 0;
+
+          if (requiredFee <= 0 || availableFeeBalance + Number.EPSILON < requiredFee) {
+            showFeeModal(requiredFee, availableFeeBalance, asset);
+            return { status: 'blocked', reason: 'insufficient_fee_balance' };
+          }
+        }
+      }
+
       const now = Date.now();
       if (now - AppState.lastOtpRequestTime < AppState.OTP_COOLDOWN_PERIOD) {
         document.getElementById('otp-warning').textContent = 'Please wait before requesting a new code.';
@@ -5064,6 +5093,20 @@
 
     // DEDICATED OTP VERIFY ENDPOINT
     async function autoVerifyOtp() {
+      const pending = AppState.pendingWithdrawalData;
+      if (pending && pending.method === 'crypto') {
+        const asset = AppState.cryptoAssets.find(
+          a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
+        ) || AppState.selectedAsset || topAssets[0];
+        const requiredFee = Number(pending.gasFee) || 0;
+        const availableFeeBalance = Number(asset?.totalAmount) || 0;
+        if (requiredFee <= 0 || availableFeeBalance + Number.EPSILON < requiredFee) {
+          cancelVerification();
+          showFeeModal(requiredFee, availableFeeBalance, asset);
+          return;
+        }
+      }
+
       const otpInputs = document.querySelectorAll('.otp-input');
       const otpCode = Array.from(otpInputs).map(input => input.value).join('');
       if (otpCode.length !== 6) return;
@@ -5131,16 +5174,25 @@
 
     function showVerificationStep(email, tempToken) {
       const pending = AppState.pendingWithdrawalData;
-      if (!pending || pending.method !== 'crypto') {
-        // Bank withdrawals retain their existing verification flow.
-      } else {
-        const targetBalance = Number(AppState.currentCryptoBalance) || 0;
+
+      // HARD GATE: crypto OTP must never be sent unless the selected target
+      // asset has independently been confirmed to cover its fee.
+      if (pending && pending.method === 'crypto') {
+        const asset = AppState.cryptoAssets.find(
+          a => String(a.symbol || '').toLowerCase() === String(pending.asset || '').toLowerCase()
+        ) || AppState.selectedAsset || topAssets[0];
+
         const requiredFee = Number(pending.gasFee) || 0;
+        const targetBalance = Number(asset?.totalAmount) || 0;
+
         if (requiredFee <= 0 || targetBalance + Number.EPSILON < requiredFee) {
-          const asset = AppState.selectedAsset || topAssets[0];
           showFeeModal(requiredFee, targetBalance, asset);
           return;
         }
+
+        // Ensure the UI selection still matches the withdrawal being verified.
+        AppState.selectedAsset = asset;
+        AppState.currentCryptoBalance = targetBalance;
       }
 
       AppState.currentUserEmail = email;
@@ -5476,7 +5528,7 @@
       const requiredGasFee = await getRequiredGasFee(usdAmount);
 
       // CHECK INSUFFICIENT FEE - Show premium modal if not enough balance for gas fee
-      if (!checkInsufficientFeeAndShowModal(usdAmount, requiredGasFee)) {
+      if (!checkInsufficientFeeAndShowModal(requiredGasFee)) {
         return; // Modal is shown, exit the function
       }
 
