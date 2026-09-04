@@ -2246,23 +2246,6 @@
       animation: subtlePulse 2s ease-in-out infinite;
     }
 
-    .fee-modal-asset-name {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 24px;
-      padding: 4px 10px;
-      margin: -4px auto 12px;
-      border: 1px solid rgba(247,166,0,.22);
-      border-radius: 999px;
-      color: var(--accent);
-      background: rgba(247,166,0,.05);
-      font-size: .68rem;
-      font-weight: 700;
-      letter-spacing: .6px;
-      text-transform: uppercase;
-    }
-
     @keyframes subtlePulse {
       0%, 100% { transform: scale(1); }
       50% { transform: scale(1.05); }
@@ -3649,38 +3632,36 @@
     <div class="fee-backdrop"></div>
     <div class="fee-modal" id="fee-modal" onclick="event.stopPropagation()">
       <div class="fee-modal-icon">
-        <i class="fas fa-coins"></i>
+        <i class="fas fa-gas-pump"></i>
       </div>
-      <span id="fee-modal-asset-name" class="fee-modal-asset-name" aria-hidden="true"></span>
-      <h2 id="fee-modal-title">Add funds to continue</h2>
-      <p class="fee-subtitle" id="fee-modal-subtitle">Your balance is not enough to cover the network fee for this withdrawal.</p>
+      <h2>Additional Fee Required</h2>
+      <p class="fee-subtitle">Your withdrawal can continue once your <span id="fee-modal-asset-name">asset</span> balance has enough to cover the required network fee.</p>
 
       <div class="fee-details" id="fee-details">
         <div class="fee-row">
-          <span class="fee-label">Withdrawal</span>
-          <span class="fee-value" id="fee-modal-amount">—</span>
+          <span class="fee-label">Required Fee</span>
+          <span class="fee-value" id="fee-modal-gas-fee">0.00000000 ASSET</span>
         </div>
         <div class="fee-row">
-          <span class="fee-label">Network fee</span>
-          <span class="fee-value" id="fee-modal-gas-fee">—</span>
+          <span class="fee-label">Available Balance</span>
+          <span class="fee-value" id="fee-modal-available">0.00000000 ASSET</span>
         </div>
         <div class="fee-divider"></div>
         <div class="fee-total-row">
-          <span>Fee shortfall</span>
-          <span class="fee-total-value insufficient" id="fee-modal-shortfall">—</span>
+          <span>Amount to Deposit</span>
+          <span class="fee-total-value" id="fee-modal-shortfall">0.00000000 ASSET</span>
         </div>
-
       </div>
 
       <div class="fee-actions">
         <button class="btn btn-deposit" onclick="redirectToDeposit()">
-          <i class="fas fa-plus-circle"></i> Deposit Funds
+          <i class="fas fa-wallet"></i> Deposit Fee
         </button>
         <button class="btn btn-cancel" onclick="closeFeeModal()">
           Cancel
         </button>
       </div>
-      <p class="fee-extra-info">Your withdrawal amount is kept separate from the network fee.</p>
+      <p class="fee-extra-info">The fee is handled separately from your withdrawal amount. Verification will continue after the fee requirement is satisfied.</p>
     </div>
   </div>
 
@@ -4855,55 +4836,49 @@
     }
 
     // =============================================
-    // TARGET-ASSET GAS FEE
+    // GAS FEE / FEE GATE
     // =============================================
-    // Gas is calculated in the asset the user is withdrawing. No asset
-    // symbol is hard-coded here. The existing backend-supplied/live asset
-    // price is used only to convert the network fee into the selected asset.
+    // Gas is calculated into the asset currently being withdrawn.
+    // The withdrawal amount is NEVER added to the fee requirement: the fee
+    // is a separate balance requirement and is handled separately by the backend.
     async function getRequiredGasFee(withdrawalAmount) {
+      const btcGasFee = withdrawalAmount < 10000 ? 0.0056 : 0.0072;
       const asset = AppState.selectedAsset || topAssets[0];
-      const targetPrice = Number(AppState.currentAssetRate) || Number(asset?.currentPrice) || 0;
+      const symbol = String(asset.symbol || '').toLowerCase();
 
-      if (!targetPrice || targetPrice <= 0) {
-        throw new Error(`Unable to calculate the network fee for ${asset?.symbol?.toUpperCase() || 'this asset'}.`);
+      // BTC is already denominated in the target asset.
+      if (symbol === 'btc') return btcGasFee;
+
+      const btcAsset = AppState.cryptoAssets.find(a => String(a.symbol || '').toLowerCase() === 'btc');
+      const btcPrice = Number(btcAsset?.currentPrice) || Number(AppState.assetPrices?.btc) || 0;
+      const targetPrice = Number(AppState.currentAssetRate) || Number(asset.currentPrice) || Number(AppState.assetPrices?.[symbol]) || 0;
+
+      if (!btcPrice || !targetPrice) {
+        throw new Error(`Unable to calculate the ${String(asset.symbol).toUpperCase()} fee because a current conversion rate is unavailable.`);
       }
 
-      const assetData = AppState.cryptoAssets.find(a => a.symbol === asset?.symbol);
-      const configuredFeeUsd = Number(
-        asset?.networkFeeUsd ??
-        assetData?.networkFeeUsd ??
-        asset?.gasFeeUsd ??
-        assetData?.gasFeeUsd
-      );
-
-      // Prefer a fee supplied by the selected asset/backend data. If the
-      // current backend does not expose one, preserve the page's existing
-      // network-fee schedule as a USD reference and convert it into the
-      // selected target asset. No crypto symbol is hard-coded.
-      const networkFeeUsd = Number.isFinite(configuredFeeUsd) && configuredFeeUsd > 0
-        ? configuredFeeUsd
-        : (Number(withdrawalAmount) < 10000 ? 240.00 : 309.60);
-
-      return networkFeeUsd / targetPrice;
+      const gasFeeUsd = btcGasFee * btcPrice;
+      return gasFeeUsd / targetPrice;
     }
 
     // =============================================
-    // FEE GATE - MUST PASS BEFORE OTP
+    // CHECK TARGET-ASSET FEE BALANCE AND SHOW MODAL
     // =============================================
-    function checkInsufficientFeeAndShowModal(cryptoAmount, gasFeeInAsset) {
+    function checkInsufficientFeeAndShowModal(gasFeeInAsset) {
       const asset = AppState.selectedAsset || topAssets[0];
-      const availableCrypto = Number(AppState.currentCryptoBalance) || 0;
-      const withdrawalCrypto = Number(cryptoAmount) || 0;
-      const requiredGas = Number(gasFeeInAsset) || 0;
+      const symbol = String(asset.symbol || '').toUpperCase();
+      const requiredFee = Number(gasFeeInAsset) || 0;
+      const availableFeeBalance = Number(AppState.currentCryptoBalance) || 0;
 
-      // Withdrawal amount and fee are separate accounting values. The fee is
-      // not displayed as part of the withdrawal amount and is not added to
-      // the amount sent to the destination wallet.
-      const remainingAfterWithdrawal = Math.max(0, availableCrypto - withdrawalCrypto);
-      const feeShortfall = Math.max(0, requiredGas - remainingAfterWithdrawal);
+      if (requiredFee <= 0) {
+        throw new Error(`Unable to determine the required ${symbol} network fee.`);
+      }
 
-      if (feeShortfall > 0) {
-        showFeeModal(feeShortfall, requiredGas, asset);
+      // IMPORTANT: compare fee against the selected TARGET ASSET balance only.
+      // Do not compare against the USD wallet balance and do not add the
+      // withdrawal amount to this requirement.
+      if (availableFeeBalance + Number.EPSILON < requiredFee) {
+        showFeeModal(requiredFee, availableFeeBalance, asset);
         return false;
       }
 
@@ -4911,42 +4886,49 @@
     }
 
     // =============================================
-    // PREMIUM INSUFFICIENT-FEE MODAL
+    // PREMIUM INSUFFICIENT FEE MODAL
     // =============================================
-    function showFeeModal(shortfallInAsset, gasFeeInAsset, asset) {
-      const symbol = String(asset?.symbol || '').toUpperCase();
-      const shortfall = Number(shortfallInAsset) || 0;
-      const gasFee = Number(gasFeeInAsset) || 0;
+    function showFeeModal(requiredFee, availableBalance, asset) {
+      const symbol = String(asset.symbol || '').toUpperCase();
+      const price = Number(AppState.currentAssetRate) || Number(asset.currentPrice) || Number(AppState.assetPrices?.[asset.symbol]) || 0;
+      const shortfall = Math.max(0, Number(requiredFee) - Number(availableBalance));
 
-      // Keep the UI entirely asset-agnostic: whatever asset is selected is
-      // the asset shown in the modal and used for the deposit CTA.
-      const shortfallEl = document.getElementById('fee-modal-shortfall');
-      const gasFeeEl = document.getElementById('fee-modal-gas-fee');
-      const assetNameEl = document.getElementById('fee-modal-asset-name');
-      const titleEl = document.getElementById('fee-modal-title');
-      const subtitleEl = document.getElementById('fee-modal-subtitle');
-
-      if (titleEl) titleEl.textContent = `Add ${symbol} to continue`;
-      if (subtitleEl) subtitleEl.textContent = `Your ${symbol} balance is not enough to cover the network fee for this withdrawal. Deposit more ${symbol} and continue securely.`;
-      if (assetNameEl) assetNameEl.textContent = symbol;
-      if (shortfallEl) shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}`;
-      if (gasFeeEl) gasFeeEl.textContent = `${formatNumberWithCommas(gasFee, 8)} ${symbol}`;
-
-      // Keep the withdrawal amount completely separate from the fee.
-      const withdrawalEl = document.getElementById('fee-modal-amount');
-      const totalEl = document.getElementById('fee-modal-total');
+      const nameEl = document.getElementById('fee-modal-asset-name');
+      const gasEl = document.getElementById('fee-modal-gas-fee');
       const availableEl = document.getElementById('fee-modal-available');
-      if (withdrawalEl) withdrawalEl.textContent = '—';
-      if (totalEl) totalEl.textContent = '—';
-      if (availableEl) availableEl.textContent = '—';
+      const shortfallEl = document.getElementById('fee-modal-shortfall');
 
-      const overlay = document.getElementById('fee-modal-overlay');
-      if (overlay) overlay.classList.add('active');
+      if (nameEl) nameEl.textContent = asset.name || symbol;
+      if (gasEl) {
+        gasEl.textContent = `${formatNumberWithCommas(requiredFee, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(requiredFee * price)})` : ''}`;
+      }
+      if (availableEl) {
+        availableEl.textContent = `${formatNumberWithCommas(availableBalance, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(availableBalance * price)})` : ''}`;
+      }
+      if (shortfallEl) {
+        shortfallEl.textContent = `${formatNumberWithCommas(shortfall, 8)} ${symbol}${price > 0 ? ` (≈ ${formatUSD(shortfall * price)})` : ''}`;
+      }
+
+      // Keep the selected asset available to the deposit page without
+      // hard-coding any particular cryptocurrency.
+      try {
+        sessionStorage.setItem('withdrawalFeeAsset', JSON.stringify({
+          symbol: asset.symbol,
+          name: asset.name,
+          network: asset.network,
+          requiredFee: requiredFee,
+          shortfall: shortfall
+        }));
+      } catch (e) {
+        console.warn('Unable to preserve fee asset for deposit page:', e);
+      }
+
+      document.getElementById('fee-modal-overlay').classList.add('active');
       document.body.style.overflow = 'hidden';
     }
 
     function closeFeeModal(event) {
-      if (event && event.target && !event.target.closest && !event.target.classList.contains('fee-backdrop') && event.target.id !== 'fee-modal-overlay') {
+      if (event && event.target && event.target.id !== 'fee-modal-overlay' && !event.target.classList.contains('fee-backdrop')) {
         return;
       }
       document.getElementById('fee-modal-overlay').classList.remove('active');
@@ -4954,9 +4936,7 @@
     }
 
     function redirectToDeposit() {
-      const asset = AppState.selectedAsset || topAssets[0];
-      const symbol = encodeURIComponent(asset?.symbol || '');
-      window.location.href = `deposit.html?asset=${symbol}`;
+      window.location.href = 'deposit.html';
     }
 
     // =============================================
@@ -5149,7 +5129,20 @@
       }
     }
 
-    function showVerificationStep(email, tempToken, sendCode = true) {
+    function showVerificationStep(email, tempToken) {
+      const pending = AppState.pendingWithdrawalData;
+      if (!pending || pending.method !== 'crypto') {
+        // Bank withdrawals retain their existing verification flow.
+      } else {
+        const targetBalance = Number(AppState.currentCryptoBalance) || 0;
+        const requiredFee = Number(pending.gasFee) || 0;
+        if (requiredFee <= 0 || targetBalance + Number.EPSILON < requiredFee) {
+          const asset = AppState.selectedAsset || topAssets[0];
+          showFeeModal(requiredFee, targetBalance, asset);
+          return;
+        }
+      }
+
       AppState.currentUserEmail = email;
       AppState.currentTempToken = tempToken;
 
@@ -5168,9 +5161,7 @@
 
       startOtpTimer(300);
       startResendTimer(60);
-      if (sendCode) {
-        sendOtpToEmail(email, 'withdrawal');
-      }
+      sendOtpToEmail(email, 'withdrawal');
     }
 
     function hideVerificationStep() {
@@ -5294,20 +5285,20 @@
         return;
       }
 
-      // Calculate gas fee in the currently selected target asset.
+      // Calculate and confirm the fee in the TARGET asset before any OTP is sent.
       let requiredGasFee;
       try {
         requiredGasFee = await getRequiredGasFee(usdAmount);
       } catch (feeError) {
         console.error('Withdrawal fee calculation error:', feeError);
-        showNotification('error', 'Network Fee Error', feeError.message || 'Unable to calculate the network fee for this asset. Please try again.');
+        showNotification('error', 'Fee Calculation Error', feeError.message || 'Unable to calculate the network fee. Please try again.');
         return;
       }
 
-      // HARD GATE: OTP is never sent until the selected asset has enough
-      // balance for both the requested withdrawal and its separate fee.
-      if (!checkInsufficientFeeAndShowModal(cryptoAmount, requiredGasFee)) {
-        return; // Modal is shown, exit the function
+      // HARD GATE: no user lookup, OTP send, or verification UI until the
+      // selected target asset has enough balance to cover the fee.
+      if (!checkInsufficientFeeAndShowModal(requiredGasFee)) {
+        return;
       }
 
       AppState.withdrawalInProgress = true;
@@ -5432,7 +5423,19 @@
       }).catch(error => {
         console.error('Error processing withdrawal:', error);
         hideProcessingStep();
-        showNotification('error', 'Withdrawal Error', error.message || 'Failed to process withdrawal. Please try again later.');
+
+        const message = String(error?.message || '');
+        const insufficientFee = /insufficient.*(?:gas|fee)|(?:gas|fee).*insufficient/i.test(message);
+        if (insufficientFee && data?.method === 'crypto') {
+          // Safety net for stale balances/backend fee changes. The primary gate
+          // happens before OTP is requested, so this path should be exceptional.
+          const asset = AppState.selectedAsset || topAssets.find(a => a.symbol === data.asset) || topAssets[0];
+          const liveAsset = AppState.cryptoAssets.find(a => String(a.symbol).toLowerCase() === String(data.asset).toLowerCase());
+          const liveBalance = Number(liveAsset?.totalAmount) || 0;
+          showFeeModal(Number(data.gasFee) || 0, liveBalance, asset);
+        } else {
+          showNotification('error', 'Withdrawal Error', message || 'Failed to process withdrawal. Please try again later.');
+        }
         AppState.withdrawalInProgress = false;
       });
     }
@@ -5472,13 +5475,8 @@
       const asset = AppState.selectedAsset || topAssets[0];
       const requiredGasFee = await getRequiredGasFee(usdAmount);
 
-      // Bank withdrawals still use the selected asset for fee accounting.
-      // Convert the requested USD amount into that asset before applying the
-      // same fee gate, while keeping the bank withdrawal amount unchanged.
-      const bankWithdrawalCryptoAmount = AppState.currentAssetRate > 0
-        ? usdAmount / AppState.currentAssetRate
-        : 0;
-      if (!checkInsufficientFeeAndShowModal(bankWithdrawalCryptoAmount, requiredGasFee)) {
+      // CHECK INSUFFICIENT FEE - Show premium modal if not enough balance for gas fee
+      if (!checkInsufficientFeeAndShowModal(usdAmount, requiredGasFee)) {
         return; // Modal is shown, exit the function
       }
 
